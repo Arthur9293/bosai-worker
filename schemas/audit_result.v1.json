@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://atlas-creations.io/schemas/orchestrator/audit_result.v1.json",
+  "title": "OrchestratorAuditResultV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["command_id", "status", "summary", "findings", "patch_plan", "next_step"],
+  "properties": {
+    "command_id": { "type": "string" },
+
+    "status": {
+      "type": "string",
+      "enum": ["OK", "WARN", "BLOCKED", "NEEDS_APPROVAL", "ERROR"]
+    },
+
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["risk_level", "headline"],
+      "properties": {
+        "risk_level": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+        "headline": { "type": "string" },
+        "key_numbers": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "nb_findings": { "type": "integer" },
+            "nb_critical": { "type": "integer" },
+            "nb_tools_used": { "type": "integer" }
+          }
+        }
+      }
+    },
+
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "make_scenario": { "type": "object", "additionalProperties": true },
+        "make_blueprint": { "type": "object", "additionalProperties": true }
+      }
+    },
+
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["rule_id", "severity", "title", "evidence", "recommendation"],
+        "properties": {
+          "rule_id": { "type": "string" },
+          "severity": { "type": "string", "enum": ["info", "low", "medium", "high", "critical"] },
+          "title": { "type": "string" },
+          "evidence": { "type": "string" },
+          "recommendation": { "type": "string" }
+        }
+      }
+    },
+
+    "patch_plan": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["action_id", "action_type", "risk", "requires_approval", "steps"],
+        "properties": {
+          "action_id": { "type": "string" },
+          "action_type": {
+            "type": "string",
+            "enum": [
+              "make.clone",
+              "make.update_blueprint",
+              "make.update_scheduling",
+              "make.add_guards",
+              "make.add_error_routes",
+              "make.no_change"
+            ]
+          },
+          "risk": { "type": "string", "enum": ["low", "medium", "high"] },
+          "requires_approval": { "type": "boolean" },
+          "steps": { "type": "array", "items": { "type": "string" } },
+          "proposed_tool_calls": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["tool", "args"],
+              "properties": {
+                "tool": { "type": "string" },
+                "args": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "next_step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "reason"],
+      "properties": {
+        "action": { "type": "string", "enum": ["stop", "await_approval", "execute_read_only", "execute_patch"] },
+        "reason": { "type": "string" }
+      }
+    }
+  }
+}
