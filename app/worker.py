@@ -773,30 +773,10 @@ def sla_machine_tick(worker_name: str, run_id: str) -> Dict[str, Any]:
         "time_utc": now_iso,
     }
 
-            # ---- DISPATCH capabilities EXISTANTES ----
-            # Ici tu branches sur TES fonctions déjà présentes.
-            if cap == "sla_machine":
-                result = sla_machine(payload)  # <-- doit exister chez toi
-            elif cap == "health_tick":
-                result = health_tick(payload)  # <-- si tu as
-            else:
-                unsupported += 1
-                airtable_update_record(COMMANDS_TABLE_NAME, rid, {
-                    "Status_select": "Unsupported",
-                    "Result_JSON": json.dumps({"ok": False, "error": "unsupported_capability", "capability": cap}),
-                    "Locked_By": worker_name,
-                    "Locked_At": lock_stamp,
-                })
-                continue
 
             executed += 1
             airtable_update_record(COMMANDS_TABLE_NAME, rid, {
-                "Status_select": "Done",
-                "Result_JSON": json.dumps(result, ensure_ascii=False),
-                "Error_Message": "",
-                "Locked_By": worker_name,
-                "Locked_At": lock_stamp,
-            })
+                "Status_se
 
         except Exception as e:
             errors += 1
