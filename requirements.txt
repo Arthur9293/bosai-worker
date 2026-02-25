@@ -1,4 +1,5 @@
-fastapi
-uvicorn[standard]
-requests
-pydantic
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+pydantic==2.9.2
+requests==2.32.3
+python-dotenv==1.0.1
