@@ -4,13 +4,16 @@ import time
 import hashlib
 import hmac
 import secrets
+import requests
+
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List, Tuple, Union
-
-import requests
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from fastapi import Response 
+from datetime import datetime, timezone
+from fastapi import Response
+
 
 # ============================================================
 # Version / Identity
@@ -33,6 +36,13 @@ AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID", "").strip()
 SYSTEM_RUNS_TABLE = os.getenv("SYSTEM_RUNS_TABLE", "System_Runs").strip()
 LOGS_ERRORS_TABLE = os.getenv("LOGS_ERRORS_TABLE", "Logs_Erreurs").strip()
 COMMANDS_TABLE = os.getenv("COMMANDS_TABLE", "Commands").strip()
+COMMANDS_TABLE_NAME = os.getenv("COMMANDS_TABLE_NAME", "Commands").strip()
+COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Pending").strip()
+COMMANDS_MAX_PER_TICK = int(os.getenv("COMMANDS_MAX_PER_TICK", "5"))
+LOCK_TTL_SECONDS = int(os.getenv("LOCK_TTL_SECONDS", "600"))  # 10 min
+
+
+
 
 # Views
 LOGS_ERRORS_VIEW_DEFAULT = os.getenv("LOGS_ERRORS_VIEW_DEFAULT", "Active").strip()
@@ -112,6 +122,21 @@ SLA_WARNING = os.getenv("SLA_WARNING", "Warning").strip()
 SLA_BREACHED = os.getenv("SLA_BREACHED", "Breached").strip()
 SLA_ESCALATED = os.getenv("SLA_ESCALATED", "Escalated").strip()
 SLA_ALLOWED = {SLA_OK, SLA_WARNING, SLA_BREACHED, SLA_ESCALATED}
+
+LE_VIEW_ACTIVE = os.getenv("LOGS_ERRORS_VIEW_NAME", "Active").strip()
+LE_TABLE = os.getenv("LOGS_ERRORS_TABLE_NAME", "Logs_Erreurs").strip()
+
+# Champs Logs_Erreurs (par défaut) — modifiables si besoin via ENV
+LE_LAST_SLA_CHECK_FIELD = os.getenv("LE_LAST_SLA_CHECK_FIELD", "Last_SLA_Check").strip()
+LE_LINKED_RUN_FIELD = os.getenv("LE_LINKED_RUN_FIELD", "Linked_Run").strip()
+LE_SLA_STATUS_FIELD = os.getenv("LE_SLA_STATUS_FIELD", "SLA_Status").strip()
+
+# IMPORTANT: pour éviter 422 sur single select, on n’écrit SLA_Status que si tu donnes EXACTEMENT les valeurs.
+SLA_STATUS_OK = os.getenv("LE_SLA_STATUS_OK", "").strip()
+SLA_STATUS_ALERT = os.getenv("LE_SLA_STATUS_ALERT", "").strip()
+SLA_STATUS_BREACH = os.getenv("LE_SLA_STATUS_BREACH", "").strip()
+
+
 
 # Optional: allowlist to prevent accidental writes (comma-separated)
 LOGS_ERRORS_FIELDS_ALLOWED = set(
@@ -566,6 +591,218 @@ def command_orchestrator_execute(
         "run_id": run_id,
     }
 
+
+def _now_utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def _is_lock_expired(locked_at_iso: str | None) -> bool:
+    if not locked_at_iso:
+        return True
+    try:
+        # Airtable renvoie souvent ISO 8601
+        dt = datetime.fromisoformat(locked_at_iso.replace("Z", "+00:00"))
+        age = (datetime.now(timezone.utc) - dt).total_seconds()
+        return age > LOCK_TTL_SECONDS
+    except Exception:
+        # Si parsing foire, on considère expiré pour éviter le blocage permanent
+        return True
+
+def _extract_capability(fields: dict) -> str:
+    # 1) champ direct
+    cap = (fields.get("Capability") or "").strip()
+    if cap:
+        return cap
+
+    # 2) sinon payload_JSON
+    raw = fields.get("payload_JSON")
+    if not raw:
+        return ""
+    try:
+        payload = raw if isinstance(raw, dict) else json.loads(raw)
+        return str(payload.get("capability", "")).strip()
+    except Exception:
+        return ""
+
+def _extract_payload(fields: dict) -> dict:
+    raw = fields.get("payload_JSON")
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {}
+
+def command_orchestrator_tick(worker_name: str) -> dict:
+    """
+    - Lit Commands (vue Pending)
+    - Lock + set Running
+    - Exécute la capability
+    - Ecrit Result_JSON + Status_select Done/Error
+    """
+    records = airtable_list_records(
+        COMMANDS_TABLE_NAME,
+        view=COMMANDS_VIEW_NAME,
+        max_records=COMMANDS_MAX_PER_TICK,
+    )
+
+    scanned = len(records)
+    executed = 0
+    errors = 0
+    unsupported = 0
+
+    for rec in records:
+        rid = rec.get("id")
+        fields = rec.get("fields", {}) or {}
+
+        status = (fields.get("Status_select") or "").strip()
+        locked_by = (fields.get("Locked_By") or "").strip()
+        locked_at = fields.get("Locked_At")
+
+        # Sécurité : ne traiter que Queued
+        if status != "Queued":
+            continue
+
+        # Lock si déjà locké non expiré
+        if locked_by and not _is_lock_expired(locked_at):
+            continue
+
+        # Lock + Running
+        lock_stamp = _now_utc_iso()
+        airtable_update_record(COMMANDS_TABLE_NAME, rid, {
+            "Status_select": "Running",
+            "Locked_By": worker_name,
+            "Locked_At": lock_stamp,
+        })
+
+        cap = _extract_capability(fields)
+        payload = _extract_payload(fields)
+
+        try:
+            if not cap:
+                # payload invalide
+                errors += 1
+                airtable_update_record(COMMANDS_TABLE_NAME, rid, {
+                    "Status_select": "Error",
+                    "Error_Message": "Missing capability (Capability field or payload_JSON.capability).",
+                    "Locked_By": worker_name,
+                    "Locked_At": lock_stamp,
+                })
+                continue
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def sla_machine_tick(worker_name: str, run_id: str) -> Dict[str, Any]:
+    """
+    SAFE tick:
+    - scan Logs_Erreurs view
+    - write Last_SLA_Check + Linked_Run for each scanned record
+    - optionally write SLA_Status if env provides exact single select options
+    """
+    scanned = 0
+    updated = 0
+    skipped_status = 0
+    errors = 0
+
+    # 1) fetch records from Airtable view
+    try:
+        rows = airtable_list_records(table=LE_TABLE, view=LE_VIEW_ACTIVE, max_records=50)
+    except Exception as e:
+        return {
+            "ok": False,
+            "capability": "sla_machine",
+            "error": f"list_records_failed: {e}",
+        }
+
+    now_iso = utc_now_iso()
+
+    for r in rows:
+        scanned += 1
+        rec_id = r.get("id")
+        if not rec_id:
+            errors += 1
+            continue
+
+        fields_to_write: Dict[str, Any] = {
+            LE_LAST_SLA_CHECK_FIELD: now_iso,
+            LE_LINKED_RUN_FIELD: run_id,
+        }
+
+        # 2) optional SLA_Status write (only if configured)
+        # If not configured, we skip to avoid 422 INVALID_MULTIPLE_CHOICE_OPTIONS.
+        if LE_SLA_STATUS_FIELD:
+            if SLA_STATUS_OK or SLA_STATUS_ALERT or SLA_STATUS_BREACH:
+                # Exemple minimal: on met OK par défaut (tu raffines ensuite avec deadline/temps restant)
+                # IMPORTANT: mets les valeurs EXACTES (casse incluse) dans les ENV.
+                fields_to_write[LE_SLA_STATUS_FIELD] = SLA_STATUS_OK or SLA_STATUS_ALERT or SLA_STATUS_BREACH
+            else:
+                skipped_status += 1
+
+        try:
+            airtable_update_record(table=LE_TABLE, record_id=rec_id, fields=fields_to_write)
+            updated += 1
+        except Exception:
+            errors += 1
+
+    return {
+        "ok": True,
+        "capability": "sla_machine",
+        "view": LE_VIEW_ACTIVE,
+        "scanned": scanned,
+        "updated": updated,
+        "skipped_status_write": skipped_status,
+        "errors": errors,
+        "run_id": run_id,
+        "worker": worker_name,
+        "time_utc": now_iso,
+    }
+
+            # ---- DISPATCH capabilities EXISTANTES ----
+            # Ici tu branches sur TES fonctions déjà présentes.
+            if cap == "sla_machine":
+                result = sla_machine(payload)  # <-- doit exister chez toi
+            elif cap == "health_tick":
+                result = health_tick(payload)  # <-- si tu as
+            else:
+                unsupported += 1
+                airtable_update_record(COMMANDS_TABLE_NAME, rid, {
+                    "Status_select": "Unsupported",
+                    "Result_JSON": json.dumps({"ok": False, "error": "unsupported_capability", "capability": cap}),
+                    "Locked_By": worker_name,
+                    "Locked_At": lock_stamp,
+                })
+                continue
+
+            executed += 1
+            airtable_update_record(COMMANDS_TABLE_NAME, rid, {
+                "Status_select": "Done",
+                "Result_JSON": json.dumps(result, ensure_ascii=False),
+                "Error_Message": "",
+                "Locked_By": worker_name,
+                "Locked_At": lock_stamp,
+            })
+
+        except Exception as e:
+            errors += 1
+            airtable_update_record(COMMANDS_TABLE_NAME, rid, {
+                "Status_select": "Error",
+                "Error_Message": str(e),
+                "Locked_By": worker_name,
+                "Locked_At": lock_stamp,
+            })
+
+    return {
+        "ok": True,
+        "capability": "command_orchestrator",
+        "scanned": scanned,
+        "executed": executed,
+        "errors": errors,
+        "unsupported": unsupported,
+        "view": COMMANDS_VIEW_NAME,
+        "max_per_tick": COMMANDS_MAX_PER_TICK,
+    }
 # ===========================================================
 # /run endpoint
 # ============================================================
@@ -652,13 +889,8 @@ async def run(req: Request):
             )
             final_status = SR_STATUS_DONE
 
-        elif capability in ("command_orchestrator",):
-            result = command_orchestrator_execute(
-                run_id=run_id,
-                payload=payload,
-                dry_run=dry_run,
-                system_runs_record_id=airtable_record_id,
-            )
+        elif capability in ("command_orchestrator", "command_orchestrator_tick"):
+            result = command_orchestrator_tick(worker_name)
             final_status = SR_STATUS_DONE
 
         else:
