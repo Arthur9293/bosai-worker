@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List, Tuple, Union
-from fastapi import FastAPI, HTTPException, Request
+
 from pydantic import BaseModel, Field
 from fastapi import Response 
 from datetime import datetime, timezone
@@ -698,9 +698,15 @@ def command_orchestrator_tick(worker_name: str) -> dict:
                     "Locked_At": lock_stamp,
                 })
                 continue
+        except Exception as e:
+            errors += 1
+            airtable_update_record(COMMANDS_TABLE_NAME, rid, {
+                "Status_select": "Error",
+                "Error_Message": str(e),
+                "Locked_By": worker_name,
+                "Locked_At": lock_stamp,
+            })
 
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 def sla_machine_tick(worker_name: str, run_id: str) -> Dict[str, Any]:
     """
