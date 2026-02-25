@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional, List, Tuple, Union
 import requests
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
+from fastapi import Response 
 
 # ============================================================
 # Version / Identity
@@ -283,6 +284,24 @@ class RunResponse(BaseModel):
 # ============================================================
 
 app = FastAPI(title="BOSAI Worker", version=WORKER_VERSION)
+@app.get("/")
+def root():
+    return {"ok": True, "service": "bosai-worker", "version": WORKER_VERSION}
+
+@app.head("/")
+def root_head():
+    return Response(status_code=200)
+
+@app.get("/health")
+def health():
+    return {
+        "ok": True,
+        "worker": DEFAULT_WORKER_NAME,
+        "app": DEFAULT_APP_NAME,
+        "version": WORKER_VERSION,
+        "env": DEFAULT_ENV,
+        "time_utc": utc_now_iso(),
+    }
 
 @app.get("/health")
 def health():
