@@ -1,15 +1,14 @@
+# app/worker.py
 import os
 import json
 import time
 import hashlib
 import hmac
 import secrets
-
-import requests
-
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List
 
+import requests
 from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field, AliasChoices, ConfigDict
 
@@ -17,7 +16,7 @@ from pydantic import BaseModel, Field, AliasChoices, ConfigDict
 # Version / Identity
 # ============================================================
 
-WORKER_VERSION = "2.2.2"  # stable baseline: fixed /run, no duplicates, canonical orchestrator
+WORKER_VERSION = "2.2.2"  # stable baseline: clean /run, no duplicates, canonical orchestrator
 DEFAULT_WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 DEFAULT_APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
 DEFAULT_ENV = os.getenv("APP_ENV", "local").strip()
@@ -97,7 +96,6 @@ CMD_LINKED_RUN = os.getenv("CMD_LINKED_RUN", "Linked_Run").strip()
 LE_SLA_STATUS = os.getenv("LE_SLA_STATUS", "SLA_Status").strip()
 LE_LAST_SLA_CHECK = os.getenv("LE_LAST_SLA_CHECK", "Last_SLA_Check").strip()
 LE_LINKED_RUN = os.getenv("LE_LINKED_RUN", "Linked_Run").strip()
-
 LE_SLA_REMAINING_MINUTES = os.getenv("LE_SLA_REMAINING_MINUTES", "SLA_Remaining_Minutes").strip()
 
 SLA_OK = os.getenv("SLA_OK", "OK").strip()
@@ -185,7 +183,6 @@ def airtable_list_records(
     if filter_by_formula:
         params["filterByFormula"] = filter_by_formula
     if fields:
-        # Airtable supports repeated fields[]; requests handles list properly
         params["fields[]"] = fields
     resp = requests.get(url, headers=_airtable_headers(), params=params, timeout=30)
     if resp.status_code >= 400:
@@ -259,7 +256,12 @@ def _set_if(fields: Dict[str, Any], name: str, value: Any) -> None:
     fields[name] = value
 
 
-def _set_linked_run(fields: Dict[str, Any], field_name: str, system_runs_record_id: Optional[str], fallback_text: str) -> None:
+def _set_linked_run(
+    fields: Dict[str, Any],
+    field_name: str,
+    system_runs_record_id: Optional[str],
+    fallback_text: str,
+) -> None:
     """
     Airtable linked-record fields expect: [record_id].
     If we don't have the System_Runs record id, fall back to a text value.
@@ -469,7 +471,7 @@ def _list_commands_best_effort(view: str, max_commands: int) -> List[Dict[str, A
             fields=fields_to_get,
         )
     except Exception:
-        # fallback: no formula support (or bad formula), filter client-side
+        # fallback: filter client-side
         recs = airtable_list_records(
             COMMANDS_TABLE,
             view=view,
@@ -508,6 +510,7 @@ def command_orchestrator_execute(
         cmd_record_id = r.get("id", "")
         f = r.get("fields", {}) or {}
 
+        # IMPORTANT: Here "capability" is per-command field (do not rename globally)
         capability = (f.get(CMD_CAPABILITY) or "").strip()
         priority = _safe_int(f.get(CMD_PRIORITY), default=1)
         cmd_payload = _safe_json_loads(f.get(CMD_PAYLOAD_JSON))
@@ -521,8 +524,6 @@ def command_orchestrator_execute(
         _set_if(lock_patch, CMD_LOCKED_AT, started_at)
         _set_if(lock_patch, CMD_LOCKED_BY, DEFAULT_WORKER_NAME)
         _set_if(lock_patch, CMD_STARTED_AT, started_at)
-
-        # Linked_Run may be linked-to System_Runs => use record id if available, else fallback string
         _set_linked_run(lock_patch, CMD_LINKED_RUN, system_runs_record_id, fallback_text=run_id)
 
         if not dry_run:
@@ -570,7 +571,6 @@ def command_orchestrator_execute(
         _set_if(final_patch, CMD_RETRY_COUNT, retry_count)
         _set_if(final_patch, CMD_RESULT_JSON, json_dumps_safe(cmd_result))
         _set_if(final_patch, CMD_LAST_ERROR, cmd_result.get("error") if isinstance(cmd_result, dict) else None)
-
         _set_linked_run(final_patch, CMD_LINKED_RUN, system_runs_record_id, fallback_text=run_id)
 
         if not dry_run:
@@ -663,6 +663,7 @@ async def run(req: Request):
         "dry_run": dry_run,
     }
 
+    # IMPORTANT: System_Runs uses SR_CAPABILITY field name, but we store the *capacity* value
     sr_fields: Dict[str, Any] = {
         SR_RUN_ID: run_id,
         SR_WORKER_NAME: worker_name,
