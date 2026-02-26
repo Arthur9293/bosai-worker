@@ -1,5 +1,4 @@
 import os
-
 import requests
 from typing import Any, Dict, Optional
 
@@ -8,31 +7,29 @@ class MakeClient:
     """
     Minimal Make.com REST client.
     Uses MAKE_API_TOKEN and MAKE_REGION from env.
+    Base URL: https://{region}.make.com/api/v2
+    Auth header: Authorization: Token <token>
     """
 
     def __init__(self, api_token: Optional[str] = None, region: Optional[str] = None, timeout: int = 30):
         self.api_token = (api_token or os.getenv("MAKE_API_TOKEN", "")).strip()
-        self.region = region or os.getenv("MAKE_REGION", "eu1").strip()
+        self.region = (region or os.getenv("MAKE_REGION", "eu1")).strip()
         self.timeout = timeout
 
         if not self.api_token:
             raise RuntimeError("MAKE_API_TOKEN is missing in environment (.env)")
 
-        # Make API base URL format
-        # Common pattern: https://{region}.make.com/api/v2
         self.base_url = f"https://{self.region}.make.com/api/v2"
 
         self.session = requests.Session()
-        
         self.session.headers.update(
-    {
-        "Authorization": f"Token {self.api_token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-)
-           
-       
+            {
+                "Authorization": f"Token {self.api_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+        )
+
     def _url(self, path: str) -> str:
         if not path.startswith("/"):
             path = "/" + path
@@ -48,29 +45,32 @@ class MakeClient:
         r.raise_for_status()
         return r.json()
 
+    def _patch(self, path: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        r = self.session.patch(self._url(path), json=json or {}, timeout=self.timeout)
+        r.raise_for_status()
+        return r.json()
+
+    # ---- Scenarios ----
+
     def get_scenario(self, scenario_id: str) -> Dict[str, Any]:
         data = self._get(f"/scenarios/{scenario_id}")
         return data.get("scenario", data)
 
     def get_blueprint(self, scenario_id: str) -> Dict[str, Any]:
-        # Endpoint: /scenarios/{scenarioId}/blueprint
-        return self._get(f"/scenarios/{scenario_id}/blueprint")
+        data = self._get(f"/scenarios/{scenario_id}/blueprint")
+        return data.get("blueprint", data)
+
+    def pause_scenario(self, scenario_id: str) -> Dict[str, Any]:
+        # API supports /scenarios/{id}/pause on many accounts; if not, you'll see 404.
+        return self._post(f"/scenarios/{scenario_id}/pause")
+
+    def resume_scenario(self, scenario_id: str) -> Dict[str, Any]:
+        return self._post(f"/scenarios/{scenario_id}/resume")
 
     def clone_scenario(self, scenario_id: str, new_name: str) -> Dict[str, Any]:
-        """
-        Make doesn't always provide a single 'clone' endpoint across versions.
-        We implement a pragmatic clone:
-        1) fetch blueprint
-        2) create scenario with name + blueprint
-        If your Make API differs, we'll adapt after first real error payload.
-        """
-        blueprint = self.get_blueprint(scenario_id)
-        payload = {"name": new_name, "blueprint": blueprint}
-        # Endpoint often: POST /scenarios
-        return self._post("/scenarios", json=payload)
+        # Common endpoint: POST /scenarios/{id}/clone with {"name": "..."}
+        return self._post(f"/scenarios/{scenario_id}/clone", json={"name": new_name})
 
-    def update_scenario(self, scenario_id: str, blueprint: Dict[str, Any]) -> Dict[str, Any]:
-        # Some APIs use PUT/PATCH; here we try POST to a common update endpoint.
-        # We'll adjust if Make returns method/endpoint error.
-        payload = {"blueprint": blueprint}
-        return self._post(f"/scenarios/{scenario_id}", json=payload)
+    def update_scenario(self, scenario_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
+        # Generic PATCH; useful for renaming, settings, etc.
+        return self._patch(f"/scenarios/{scenario_id}", json=patch)

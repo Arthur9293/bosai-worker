@@ -153,3 +153,34 @@ MAKE_TOOLS = [
         }
     }
 ]
+from typing import Any, Dict
+from .make_client import MakeClient
+
+_client = MakeClient()
+
+def dispatch(intent: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Route intents "make.*" vers MakeClient.
+    Retourne un dict JSON-serializable.
+    """
+    if intent == "make.get_scenario":
+        scenario_id = str(args["scenario_id"])
+        return _client.get_scenario(scenario_id)
+
+    if intent == "make.get_blueprint":
+        scenario_id = str(args["scenario_id"])
+        return _client.get_blueprint(scenario_id)
+
+    if intent == "make.clone_scenario":
+        # args attendu: { "scenario_id": "...", "new_name": "..." }
+        scenario_id = str(args["scenario_id"])
+        new_name = str(args.get("new_name") or f"Clone of {scenario_id}")
+        return _client.clone_scenario(scenario_id, new_name)
+
+    if intent == "make.update_scenario":
+        # args attendu: { "scenario_id": "...", "blueprint": {...} }
+        scenario_id = str(args["scenario_id"])
+        blueprint = args["blueprint"]
+        return _client.update_scenario(scenario_id, blueprint)
+
+    raise ValueError(f"Unknown intent: {intent}")

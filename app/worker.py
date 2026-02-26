@@ -391,8 +391,13 @@ def sla_machine_execute(
             LE_LAST_SLA_CHECK: now_iso,
         }
 
+<<<<<<< HEAD
         if system_runs_record_id:
             patch[LE_LINKED_RUN] = [system_runs_record_id]
+=======
+        # Linked_Run est un champ Texte court (pas un linked record)
+        patch[LE_LINKED_RUN] = run_id
+>>>>>>> 3166510 (update worker SLA + linked_run)
 
         patch = filter_allowed_fields(patch, LOGS_ERRORS_FIELDS_ALLOWED)
 
