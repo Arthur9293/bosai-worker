@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, AliasChoices, ConfigDict
 # Version / Identity
 # ============================================================
 
-WORKER_VERSION = "2.2.2"  # stable baseline: clean /run, no duplicates, canonical orchestrator
+WORKER_VERSION = "2.2.2"  # stable baseline: canonical = capability (NOT capacity)
 DEFAULT_WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 DEFAULT_APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
 DEFAULT_ENV = os.getenv("APP_ENV", "local").strip()
@@ -275,7 +275,7 @@ def _set_linked_run(
 
 
 # ============================================================
-# Request models (support BOTH schemas)
+# Request models (canonical = capability; accept capacity too)
 # ============================================================
 
 
@@ -285,11 +285,11 @@ class RunRequest(BaseModel):
     command_id: Optional[str] = Field(default=None)
     worker: Optional[str] = Field(default=DEFAULT_WORKER_NAME)
 
-    # Canon = capacity, but accept legacy "capability"
-    capacity: str = Field(
+    # Canon = capability. Accept "capacity" as alias WITHOUT requiring it in Airtable.
+    capability: str = Field(
         ...,
-        validation_alias=AliasChoices("capacity", "capability"),
-        serialization_alias="capacity",
+        validation_alias=AliasChoices("capability", "capacity"),
+        serialization_alias="capability",
         min_length=1,
     )
 
@@ -308,7 +308,7 @@ class RunRequest(BaseModel):
 class RunResponse(BaseModel):
     ok: bool
     worker: str
-    capacity: str
+    capability: str
     priority: int
     idempotency_key: str
     run_id: str
@@ -415,7 +415,6 @@ def sla_machine_execute(
             LE_LAST_SLA_CHECK: now_iso,
         }
 
-        # Linked_Run is linked-to System_Runs => list of record ids
         if system_runs_record_id:
             patch[LE_LINKED_RUN] = [system_runs_record_id]
 
@@ -471,7 +470,6 @@ def _list_commands_best_effort(view: str, max_commands: int) -> List[Dict[str, A
             fields=fields_to_get,
         )
     except Exception:
-        # fallback: filter client-side
         recs = airtable_list_records(
             COMMANDS_TABLE,
             view=view,
@@ -510,7 +508,6 @@ def command_orchestrator_execute(
         cmd_record_id = r.get("id", "")
         f = r.get("fields", {}) or {}
 
-        # IMPORTANT: Here "capability" is per-command field (do not rename globally)
         capability = (f.get(CMD_CAPABILITY) or "").strip()
         priority = _safe_int(f.get(CMD_PRIORITY), default=1)
         cmd_payload = _safe_json_loads(f.get(CMD_PAYLOAD_JSON))
@@ -604,7 +601,7 @@ def command_orchestrator_execute(
 
 
 # ===========================================================
-# /run endpoint (CLEAN, single-parse, no duplicates)
+# /run endpoint (canonical = capability)
 # ===========================================================
 
 @app.post("/run", response_model=RunResponse)
@@ -626,14 +623,14 @@ async def run(req: Request):
     if "worker" not in payload_in or not str(payload_in.get("worker", "")).strip():
         payload_in["worker"] = DEFAULT_WORKER_NAME
 
-    # canonical parse (aliases supported by RunRequest)
+    # canonical parse
     try:
         req_parsed = RunRequest(**payload_in)
     except Exception as e:
         raise HTTPException(status_code=422, detail=str(e))
 
     worker_name = (req_parsed.worker or DEFAULT_WORKER_NAME).strip()
-    capacity = req_parsed.capacity
+    capability = req_parsed.capability
     priority = int(req_parsed.priority or 0)
     dry_run = bool(req_parsed.dry_run)
     payload = req_parsed.input or {}
@@ -646,7 +643,7 @@ async def run(req: Request):
         idem = compute_idempotency_key(
             {
                 "worker": worker_name,
-                "capacity": capacity,
+                "capability": capability,
                 "priority": priority,
                 "input": payload,
                 "dry_run": dry_run,
@@ -657,19 +654,18 @@ async def run(req: Request):
     started_at = utc_now_iso()
 
     effective_payload = {
-        "capacity": capacity,
+        "capability": capability,
         "priority": priority,
         "input": payload,
         "dry_run": dry_run,
     }
 
-    # IMPORTANT: System_Runs uses SR_CAPABILITY field name, but we store the *capacity* value
     sr_fields: Dict[str, Any] = {
         SR_RUN_ID: run_id,
         SR_WORKER_NAME: worker_name,
         SR_APP: DEFAULT_APP_NAME,
         SR_VERSION: WORKER_VERSION,
-        SR_CAPABILITY: capacity,
+        SR_CAPABILITY: capability,  # Airtable field name stays "Capability"
         SR_PRIORITY: priority,
         SR_IDEMPOTENCY_KEY: idem,
         SR_STATUS: SR_STATUS_RUNNING,
@@ -685,11 +681,11 @@ async def run(req: Request):
     try:
         airtable_record_id = airtable_create_record(SYSTEM_RUNS_TABLE, sr_fields)
 
-        if capacity == "health_tick":
+        if capability == "health_tick":
             result = health_tick_execute()
             final_status = SR_STATUS_DONE
 
-        elif capacity in ("sla_machine", "sla_tick"):
+        elif capability in ("sla_machine", "sla_tick"):
             result = sla_machine_execute(
                 payload if isinstance(payload, dict) else {},
                 run_id=run_id,
@@ -698,7 +694,7 @@ async def run(req: Request):
             )
             final_status = SR_STATUS_DONE
 
-        elif capacity in ("command_orchestrator", "command_orchestrator_tick"):
+        elif capability in ("command_orchestrator", "command_orchestrator_tick"):
             result = command_orchestrator_execute(
                 run_id=run_id,
                 payload=payload if isinstance(payload, dict) else {},
@@ -708,7 +704,7 @@ async def run(req: Request):
             final_status = SR_STATUS_DONE
 
         else:
-            result = {"reason": "unsupported_capability", "capacity": capacity}
+            result = {"reason": "unsupported_capability", "capability": capability}
             final_status = SR_STATUS_BLOCKED
 
     except Exception as e:
@@ -745,7 +741,7 @@ async def run(req: Request):
     return RunResponse(
         ok=ok,
         worker=worker_name,
-        capacity=capacity,
+        capability=capability,
         priority=priority,
         idempotency_key=idem,
         run_id=run_id,
