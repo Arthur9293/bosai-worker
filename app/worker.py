@@ -1,14 +1,15 @@
-# app/worker.py
 import os
 import json
 import time
 import hashlib
 import hmac
 import secrets
+
+import requests
+
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List
 
-import requests
 from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field, AliasChoices, ConfigDict
 
@@ -16,12 +17,13 @@ from pydantic import BaseModel, Field, AliasChoices, ConfigDict
 # Version / Identity
 # ============================================================
 
-WORKER_VERSION = "2.2.2"  # stable baseline: canonical = capability (NOT capacity)
+WORKER_VERSION = "2.2.2"  # bump patch: fixed syntax + duplicates + canonical orchestrator
 DEFAULT_WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 DEFAULT_APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
 DEFAULT_ENV = os.getenv("APP_ENV", "local").strip()
 
 # NOTE: IMPORTANT — no Is_bad field, no Is_bad logic. Ever.
+
 
 # ============================================================
 # Airtable config (ENV)
@@ -41,6 +43,7 @@ AIRTABLE_API_URL = "https://api.airtable.com/v0"
 
 # Optional signature secret for /run endpoint
 RUN_SHARED_SECRET = os.getenv("RUN_SHARED_SECRET", "").strip()
+
 
 # ============================================================
 # Airtable field names (System_Runs) — must match Airtable exactly
@@ -66,6 +69,7 @@ SR_STATUS_DONE = os.getenv("SR_STATUS_DONE", "Done").strip()
 SR_STATUS_ERROR = os.getenv("SR_STATUS_ERROR", "Error").strip()
 SR_STATUS_BLOCKED = os.getenv("SR_STATUS_BLOCKED", "Blocked").strip()
 
+
 # ============================================================
 # Airtable field names (Commands) — must match Airtable exactly
 # ============================================================
@@ -89,6 +93,7 @@ CMD_LOCKED_AT = os.getenv("CMD_LOCKED_AT", "Locked_At").strip()
 CMD_LOCKED_BY = os.getenv("CMD_LOCKED_BY", "Locked_By").strip()
 CMD_LINKED_RUN = os.getenv("CMD_LINKED_RUN", "Linked_Run").strip()
 
+
 # ============================================================
 # Logs_Erreurs SLA fields — must match Airtable exactly
 # ============================================================
@@ -96,6 +101,7 @@ CMD_LINKED_RUN = os.getenv("CMD_LINKED_RUN", "Linked_Run").strip()
 LE_SLA_STATUS = os.getenv("LE_SLA_STATUS", "SLA_Status").strip()
 LE_LAST_SLA_CHECK = os.getenv("LE_LAST_SLA_CHECK", "Last_SLA_Check").strip()
 LE_LINKED_RUN = os.getenv("LE_LINKED_RUN", "Linked_Run").strip()
+
 LE_SLA_REMAINING_MINUTES = os.getenv("LE_SLA_REMAINING_MINUTES", "SLA_Remaining_Minutes").strip()
 
 SLA_OK = os.getenv("SLA_OK", "OK").strip()
@@ -126,10 +132,10 @@ ORCH_DONE_STATUS = os.getenv("ORCH_DONE_STATUS", "Done").strip()
 ORCH_ERROR_STATUS = os.getenv("ORCH_ERROR_STATUS", "Error").strip()
 ORCH_BLOCKED_STATUS = os.getenv("ORCH_BLOCKED_STATUS", "Blocked").strip()
 
+
 # ============================================================
 # Airtable HTTP helpers
 # ============================================================
-
 
 def _require_airtable() -> None:
     if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
@@ -183,7 +189,7 @@ def airtable_list_records(
     if filter_by_formula:
         params["filterByFormula"] = filter_by_formula
     if fields:
-        params["fields[]"] = fields
+        params["fields[]"] = fields  # Airtable supports repeated fields[]
     resp = requests.get(url, headers=_airtable_headers(), params=params, timeout=30)
     if resp.status_code >= 400:
         raise RuntimeError(f"Airtable list failed ({table}): {resp.status_code} {resp.text}")
@@ -193,7 +199,6 @@ def airtable_list_records(
 # ============================================================
 # Generic helpers
 # ============================================================
-
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -256,39 +261,21 @@ def _set_if(fields: Dict[str, Any], name: str, value: Any) -> None:
     fields[name] = value
 
 
-def _set_linked_run(
-    fields: Dict[str, Any],
-    field_name: str,
-    system_runs_record_id: Optional[str],
-    fallback_text: str,
-) -> None:
-    """
-    Airtable linked-record fields expect: [record_id].
-    If we don't have the System_Runs record id, fall back to a text value.
-    """
-    if not field_name:
-        return
-    if system_runs_record_id:
-        fields[field_name] = [system_runs_record_id]
-    else:
-        fields[field_name] = fallback_text
-
-
 # ============================================================
-# Request models (canonical = capability; accept capacity too)
-# ============================================================
-
+# Request models (support BOTH schemas)
+# ====================================
 
 class RunRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
+    # Optional fields depending on the caller
     command_id: Optional[str] = Field(default=None)
     worker: Optional[str] = Field(default=DEFAULT_WORKER_NAME)
 
-    # Canon = capability. Accept "capacity" as alias WITHOUT requiring it in Airtable.
+    # Canon = but accept legacy "capability"
     capability: str = Field(
         ...,
-        validation_alias=AliasChoices("capability", "capacity"),
+        validation_alias=AliasChoices("Capability", "capability"),
         serialization_alias="capability",
         min_length=1,
     )
@@ -304,7 +291,6 @@ class RunRequest(BaseModel):
     priority: int = Field(default=1, ge=0, le=10)
     dry_run: bool = Field(default=False)
 
-
 class RunResponse(BaseModel):
     ok: bool
     worker: str
@@ -314,8 +300,6 @@ class RunResponse(BaseModel):
     run_id: str
     airtable_record_id: str
     result: Dict[str, Any] = Field(default_factory=dict)
-
-
 # ============================================================
 # FastAPI app
 # ============================================================
@@ -353,7 +337,6 @@ def health_score():
 # ============================================================
 # Capabilities
 # ============================================================
-
 
 def health_tick_execute() -> Dict[str, Any]:
     _require_airtable()
@@ -415,6 +398,9 @@ def sla_machine_execute(
             LE_LAST_SLA_CHECK: now_iso,
         }
 
+
+
+
         if system_runs_record_id:
             patch[LE_LINKED_RUN] = [system_runs_record_id]
 
@@ -441,22 +427,10 @@ def sla_machine_execute(
 
 def _list_commands_best_effort(view: str, max_commands: int) -> List[Dict[str, Any]]:
     fields_to_get = [
-        CMD_STATUS,
-        CMD_CAPABILITY,
-        CMD_PRIORITY,
-        CMD_PAYLOAD_JSON,
-        CMD_IDEMPOTENCY_KEY,
-        CMD_COMMAND_ID_TEXT,
-        CMD_RETRY_COUNT,
-        CMD_LAST_ERROR,
-        CMD_RESULT_JSON,
-        CMD_STARTED_AT,
-        CMD_FINISHED_AT,
-        CMD_DURATION_MS,
-        CMD_IS_LOCKED,
-        CMD_LOCKED_AT,
-        CMD_LOCKED_BY,
-        CMD_LINKED_RUN,
+        CMD_STATUS, CMD_CAPABILITY, CMD_PRIORITY, CMD_PAYLOAD_JSON, CMD_IDEMPOTENCY_KEY,
+        CMD_COMMAND_ID_TEXT, CMD_RETRY_COUNT, CMD_LAST_ERROR, CMD_RESULT_JSON,
+        CMD_STARTED_AT, CMD_FINISHED_AT, CMD_DURATION_MS,
+        CMD_IS_LOCKED, CMD_LOCKED_AT, CMD_LOCKED_BY, CMD_LINKED_RUN,
     ]
     fields_to_get = list(dict.fromkeys([f for f in fields_to_get if f]))
 
@@ -520,8 +494,8 @@ def command_orchestrator_execute(
         _set_if(lock_patch, CMD_IS_LOCKED, True)
         _set_if(lock_patch, CMD_LOCKED_AT, started_at)
         _set_if(lock_patch, CMD_LOCKED_BY, DEFAULT_WORKER_NAME)
+        _set_if(lock_patch, CMD_LINKED_RUN, run_id)
         _set_if(lock_patch, CMD_STARTED_AT, started_at)
-        _set_linked_run(lock_patch, CMD_LINKED_RUN, system_runs_record_id, fallback_text=run_id)
 
         if not dry_run:
             airtable_update_record(COMMANDS_TABLE, cmd_record_id, lock_patch)
@@ -532,7 +506,7 @@ def command_orchestrator_execute(
         try:
             if capability in ("sla_machine", "sla_tick"):
                 cmd_result = sla_machine_execute(
-                    cmd_payload if isinstance(cmd_payload, dict) else {},
+                    cmd_payload,
                     run_id=run_id,
                     dry_run=dry_run,
                     system_runs_record_id=system_runs_record_id,
@@ -568,7 +542,7 @@ def command_orchestrator_execute(
         _set_if(final_patch, CMD_RETRY_COUNT, retry_count)
         _set_if(final_patch, CMD_RESULT_JSON, json_dumps_safe(cmd_result))
         _set_if(final_patch, CMD_LAST_ERROR, cmd_result.get("error") if isinstance(cmd_result, dict) else None)
-        _set_linked_run(final_patch, CMD_LINKED_RUN, system_runs_record_id, fallback_text=run_id)
+        _set_if(final_patch, CMD_LINKED_RUN, run_id)
 
         if not dry_run:
             airtable_update_record(COMMANDS_TABLE, cmd_record_id, final_patch)
@@ -601,71 +575,74 @@ def command_orchestrator_execute(
 
 
 # ===========================================================
-# /run endpoint (canonical = capability)
-# ===========================================================
+# /run endpoint
+# ============================================================
 
 @app.post("/run", response_model=RunResponse)
 async def run(req: Request):
-    body_bytes = await req.body()
-    verify_signature_if_needed(req, body_bytes)
+    body = await req.body()
+    verify_signature_if_needed(req, body)
 
     try:
-        payload_in = json.loads(body_bytes.decode("utf-8"))
+        payload_in = json.loads(body.decode("utf-8"))
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
-
+    
+    # ---- Normalize legacy payload keys ----
     if not isinstance(payload_in, dict):
-        raise HTTPException(status_code=422, detail="Invalid JSON body (must be object)")
+        raise HTTPException(status_code=422, detail="Invalid JSON body")
 
-    # normalize legacy keys
     if "payload" in payload_in and "input" not in payload_in:
         payload_in["input"] = payload_in.pop("payload")
+
     if "worker" not in payload_in or not str(payload_in.get("worker", "")).strip():
         payload_in["worker"] = DEFAULT_WORKER_NAME
 
-    # canonical parse
+                 # ---- Single canonical parse ----
     try:
         req_parsed = RunRequest(**payload_in)
     except Exception as e:
         raise HTTPException(status_code=422, detail=str(e))
 
-    worker_name = (req_parsed.worker or DEFAULT_WORKER_NAME).strip()
-    capability = req_parsed.capability
-    priority = int(req_parsed.priority or 0)
-    dry_run = bool(req_parsed.dry_run)
-    payload = req_parsed.input or {}
 
-    # idempotency: explicit > lock_key alias > computed hash
-    idem = (req_parsed.idempotency_key or "").strip()
-    if not idem and isinstance(payload, dict):
-        idem = (payload.get("lock_key") or payload.get("Lock_key") or "").strip()
+
+        # ---- Canonical vars (single source of truth) ----
+    capability = req_parsed.capability
+    priority = getattr(req_parsed, "priority", 1) or 1
+    dry_run = getattr(req_parsed, "dry_run", False) or False              
+    payload = {}
+    if isinstance(getattr(req_parsed, "input", None), dict):
+        payload = req_parsed.input
+    idem_in = (getattr(req_parsed, "idempotency_key", None) or "").strip()
+    command_id = getattr(req_parsed, "command_id", None)
+    worker_name = (getattr(req_parsed, "worker", None) or DEFAULT_WORKER_NAME).strip()
+
+
+          
+    lock_key_alias = ""
+    if isinstance(payload, dict):
+        lock_key_alias = (payload.get("lock_key") or payload.get("Lock_key") or "").strip()
+    idem = idem_in or lock_key_alias
+
+    effective_payload = {
+        "command_id": command_id,
+        "capability": capability,
+        "priority": priority,
+        "payload": payload,
+        "dry_run": dry_run,
+    }
     if not idem:
-        idem = compute_idempotency_key(
-            {
-                "worker": worker_name,
-                "capability": capability,
-                "priority": priority,
-                "input": payload,
-                "dry_run": dry_run,
-            }
-        )
+        idem = compute_idempotency_key(effective_payload)
 
     run_id = f"run_{secrets.token_hex(8)}"
     started_at = utc_now_iso()
-
-    effective_payload = {
-        "capability": capability,
-        "priority": priority,
-        "input": payload,
-        "dry_run": dry_run,
-    }
 
     sr_fields: Dict[str, Any] = {
         SR_RUN_ID: run_id,
         SR_WORKER_NAME: worker_name,
         SR_APP: DEFAULT_APP_NAME,
         SR_VERSION: WORKER_VERSION,
-        SR_CAPABILITY: capability,  # Airtable field name stays "Capability"
+        SR_CAPABILITY: capability,
         SR_PRIORITY: priority,
         SR_IDEMPOTENCY_KEY: idem,
         SR_STATUS: SR_STATUS_RUNNING,
@@ -681,13 +658,13 @@ async def run(req: Request):
     try:
         airtable_record_id = airtable_create_record(SYSTEM_RUNS_TABLE, sr_fields)
 
-        if capability == "health_tick":
+        if capability in ("health_tick",):
             result = health_tick_execute()
             final_status = SR_STATUS_DONE
 
         elif capability in ("sla_machine", "sla_tick"):
             result = sla_machine_execute(
-                payload if isinstance(payload, dict) else {},
+                payload,
                 run_id=run_id,
                 dry_run=dry_run,
                 system_runs_record_id=airtable_record_id,
@@ -715,7 +692,7 @@ async def run(req: Request):
     finished_at = utc_now_iso()
 
     if airtable_record_id:
-        patch: Dict[str, Any] = {
+        patch = {
             SR_FINISHED_AT: finished_at,
             SR_DURATION_MS: duration_ms,
             SR_STATUS: final_status,
@@ -728,23 +705,30 @@ async def run(req: Request):
             airtable_update_record(SYSTEM_RUNS_TABLE, airtable_record_id, patch)
         except Exception as e:
             final_status = SR_STATUS_ERROR
-            result = {
-                "error": "Airtable update failed",
-                "detail": str(e),
-                "previous_result": result,
-            }
+            result = {"error": "Airtable update failed", "detail": str(e), "previous_result": result}
 
-    ok = final_status == SR_STATUS_DONE
-    if result is None or not isinstance(result, dict):
-        result = {"value": result}
+         
 
-    return RunResponse(
-        ok=ok,
-        worker=worker_name,
-        capability=capability,
-        priority=priority,
-        idempotency_key=idem,
-        run_id=run_id,
-        airtable_record_id=airtable_record_id or "",
-        result=result,
-    )
+
+        ok = final_status == SR_STATUS_DONE
+
+        # GARDE-FOU BOSAI — jamais None
+        
+        if result is None:
+            result = {}
+
+        if payload is None: 
+            payload = {}
+            
+
+        return RunResponse(
+            ok=ok,
+            worker=worker_name,
+            capability=capability,
+            priority=priority,
+            idempotency_key=idem,
+            run_id=run_id,
+            airtable_record_id=airtable_record_id or "",
+            result=result if isinstance(result, dict) else {"value": result},
+    
+)
