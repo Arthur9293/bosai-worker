@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
-PORT="${PORT:-8000}"
-exec uvicorn app.worker:app --host 0.0.0.0 --port "$PORT"
+: "${PORT:=8000}"
+exec python -m uvicorn app.worker:app --host 0.0.0.0 --port "$PORT"
