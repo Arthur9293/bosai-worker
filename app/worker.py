@@ -8,7 +8,7 @@ import secrets
 import requests
 
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 # Version / Identity
 # ============================================================
 
-WORKER_VERSION = "2.2.2"  # bump patch: fixed syntax + duplicates + canonical orchestrator
+WORKER_VERSION = "2.2.3"  # fixed merge conflict + linked-record Linked_Run handling
 DEFAULT_WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 DEFAULT_APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
 DEFAULT_ENV = os.getenv("APP_ENV", "local").strip()
@@ -92,7 +92,7 @@ CMD_DURATION_MS = os.getenv("CMD_DURATION_MS", "Duration_ms").strip()
 CMD_IS_LOCKED = os.getenv("CMD_IS_LOCKED", "Is_Locked").strip()
 CMD_LOCKED_AT = os.getenv("CMD_LOCKED_AT", "Locked_At").strip()
 CMD_LOCKED_BY = os.getenv("CMD_LOCKED_BY", "Locked_By").strip()
-CMD_LINKED_RUN = os.getenv("CMD_LINKED_RUN", "Linked_Run").strip()
+CMD_LINKED_RUN = os.getenv("CMD_LINKED_RUN", "Linked_Run").strip()  # should be linked to System_Runs
 
 
 # ============================================================
@@ -101,8 +101,7 @@ CMD_LINKED_RUN = os.getenv("CMD_LINKED_RUN", "Linked_Run").strip()
 
 LE_SLA_STATUS = os.getenv("LE_SLA_STATUS", "SLA_Status").strip()
 LE_LAST_SLA_CHECK = os.getenv("LE_LAST_SLA_CHECK", "Last_SLA_Check").strip()
-LE_LINKED_RUN = os.getenv("LE_LINKED_RUN", "Linked_Run").strip()
-
+LE_LINKED_RUN = os.getenv("LE_LINKED_RUN", "Linked_Run").strip()  # linked to System_Runs
 LE_SLA_REMAINING_MINUTES = os.getenv("LE_SLA_REMAINING_MINUTES", "SLA_Remaining_Minutes").strip()
 
 SLA_OK = os.getenv("SLA_OK", "OK").strip()
@@ -184,14 +183,18 @@ def airtable_list_records(
 ) -> List[Dict[str, Any]]:
     _require_airtable()
     url = _airtable_table_url(table)
-    params: Dict[str, Any] = {"pageSize": max_records}
+
+    params_list: List[Tuple[str, Any]] = [("pageSize", max_records)]
     if view:
-        params["view"] = view
+        params_list.append(("view", view))
     if filter_by_formula:
-        params["filterByFormula"] = filter_by_formula
+        params_list.append(("filterByFormula", filter_by_formula))
     if fields:
-        params["fields[]"] = fields  # Airtable supports repeated fields[]
-    resp = requests.get(url, headers=_airtable_headers(), params=params, timeout=30)
+        # Airtable expects repeated fields[] params
+        for f in fields:
+            params_list.append(("fields[]", f))
+
+    resp = requests.get(url, headers=_airtable_headers(), params=params_list, timeout=30)
     if resp.status_code >= 400:
         raise RuntimeError(f"Airtable list failed ({table}): {resp.status_code} {resp.text}")
     return resp.json().get("records", [])
@@ -260,6 +263,17 @@ def _set_if(fields: Dict[str, Any], name: str, value: Any) -> None:
     if not name:
         return
     fields[name] = value
+
+
+def _set_linked_run(fields: Dict[str, Any], field_name: str, system_runs_record_id: Optional[str]) -> None:
+    """
+    Linked_Run is a linked-record field to System_Runs.
+    Airtable expects: [ "recXXXX" ]
+    """
+    if not field_name:
+        return
+    if system_runs_record_id:
+        fields[field_name] = [system_runs_record_id]
 
 
 # ============================================================
@@ -391,13 +405,8 @@ def sla_machine_execute(
             LE_LAST_SLA_CHECK: now_iso,
         }
 
-<<<<<<< HEAD
-        if system_runs_record_id:
-            patch[LE_LINKED_RUN] = [system_runs_record_id]
-=======
-        # Linked_Run est un champ Texte court (pas un linked record)
-        patch[LE_LINKED_RUN] = run_id
->>>>>>> 3166510 (update worker SLA + linked_run)
+        # Linked_Run is linked-record to System_Runs
+        _set_linked_run(patch, LE_LINKED_RUN, system_runs_record_id)
 
         patch = filter_allowed_fields(patch, LOGS_ERRORS_FIELDS_ALLOWED)
 
@@ -489,8 +498,10 @@ def command_orchestrator_execute(
         _set_if(lock_patch, CMD_IS_LOCKED, True)
         _set_if(lock_patch, CMD_LOCKED_AT, started_at)
         _set_if(lock_patch, CMD_LOCKED_BY, DEFAULT_WORKER_NAME)
-        _set_if(lock_patch, CMD_LINKED_RUN, run_id)
         _set_if(lock_patch, CMD_STARTED_AT, started_at)
+
+        # If Commands.Linked_Run is also a linked record to System_Runs, set it properly:
+        _set_linked_run(lock_patch, CMD_LINKED_RUN, system_runs_record_id)
 
         if not dry_run:
             airtable_update_record(COMMANDS_TABLE, cmd_record_id, lock_patch)
@@ -537,7 +548,8 @@ def command_orchestrator_execute(
         _set_if(final_patch, CMD_RETRY_COUNT, retry_count)
         _set_if(final_patch, CMD_RESULT_JSON, json_dumps_safe(cmd_result))
         _set_if(final_patch, CMD_LAST_ERROR, cmd_result.get("error") if isinstance(cmd_result, dict) else None)
-        _set_if(final_patch, CMD_LINKED_RUN, run_id)
+
+        _set_linked_run(final_patch, CMD_LINKED_RUN, system_runs_record_id)
 
         if not dry_run:
             airtable_update_record(COMMANDS_TABLE, cmd_record_id, final_patch)
