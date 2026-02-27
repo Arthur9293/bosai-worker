@@ -1,8 +1,9 @@
 # app/worker.py  — BOSAI Worker (v2.3.1)
-# Basé sur ton fichier v2.3.0, mise à jour SAFE (sans casser le baseline):
-# - Pagination Airtable (view/list) via offset (évite la limite 100 records)
+# Basé sur ton fichier v2.3.0, patch SAFE (sans casser le baseline):
+# - Ajout route "/" (évite 404 Render healthcheck)
+# - Pagination Airtable (view/list) via offset (évite limite 100)
+# - URL encoding des noms de tables Airtable (sécurise espaces / caractères)
 # - run_id cohérent en mode idempotent (toujours Airtable record id)
-# - URL encoding des noms de tables Airtable (sécurise les espaces / caractères)
 # - Timebox RUN_MAX_SECONDS appliqué aussi pendant l'exécution
 # - /health renvoie aussi les versions des dépendances (FastAPI, Uvicorn, Requests, Pydantic)
 
@@ -80,20 +81,16 @@ app = FastAPI(title=APP_NAME, version=APP_VERSION)
 # ============================================================
 
 class RunRequest(BaseModel):
-    # Forbid extra keys by default (anti-chaos)
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid")  # anti-chaos
 
     worker: str = Field(default=WORKER_NAME)
 
-    # Canon: capability (Airtable aussi)
-    # Alias acceptés: capacity (legacy)
     capability: str = Field(
         ...,
         validation_alias=AliasChoices("capability", "capacity"),
         description="Capability name (canonical: capability).",
     )
 
-    # Canon: idempotency_key
     idempotency_key: str = Field(
         ...,
         validation_alias=AliasChoices("idempotency_key", "idempotencyKey"),
@@ -101,8 +98,6 @@ class RunRequest(BaseModel):
 
     priority: int = 1
 
-    # Canon: input
-    # Alias: inputs (legacy)
     input: Dict[str, Any] = Field(
         default_factory=dict,
         validation_alias=AliasChoices("input", "inputs"),
@@ -110,7 +105,6 @@ class RunRequest(BaseModel):
 
     dry_run: bool = False
 
-    # Optional knobs (used by command orchestrator)
     view: Optional[str] = None
     max_commands: int = 0
     command_id: Optional[str] = None
@@ -138,7 +132,6 @@ def _require_airtable() -> None:
         raise HTTPException(status_code=500, detail="Airtable env not configured (AIRTABLE_API_KEY / AIRTABLE_BASE_ID).")
 
 def _airtable_url(table_name: str) -> str:
-    # SAFE: encode table name (handles spaces/special chars)
     return f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{quote(table_name, safe='')}"
 
 def _airtable_headers() -> Dict[str, str]:
@@ -184,10 +177,6 @@ def airtable_find_first(table_name: str, formula: str, max_records: int = 1) -> 
     return records[0] if records else None
 
 def airtable_list_view(table_name: str, view_name: str, max_records: int = 100) -> List[Dict[str, Any]]:
-    """
-    SAFE patch: Airtable renvoie max 100 records/page.
-    On itère avec offset jusqu'à max_records.
-    """
     _require_airtable()
 
     collected: List[Dict[str, Any]] = []
@@ -200,7 +189,7 @@ def airtable_list_view(table_name: str, view_name: str, max_records: int = 100) 
 
         page_size = min(100, remaining)
 
-        params: Dict[str, Any] = {"view": view_name, "maxRecords": str(page_size)}
+        params: Dict[str, Any] = {"view": view_name, "pageSize": str(page_size)}
         if offset:
             params["offset"] = offset
 
@@ -225,7 +214,7 @@ def airtable_list_view(table_name: str, view_name: str, max_records: int = 100) 
 
 def verify_signature_or_401(raw_body: bytes, signature_header: Optional[str]) -> None:
     if not RUN_SHARED_SECRET:
-        return  # signature not enforced
+        return
 
     if not signature_header or not signature_header.startswith("sha256="):
         raise HTTPException(status_code=401, detail="Missing or invalid x-run-signature (expected sha256=...)")
@@ -280,8 +269,6 @@ def fail_system_run(record_id: str, error_message: str, meta: Optional[Dict[str,
     airtable_update(SYSTEM_RUNS_TABLE_NAME, record_id, fields)
 
 def idempotency_lookup(req: RunRequest) -> Optional[Dict[str, Any]]:
-    # If a previous run exists for this key+capability+worker AND is Done/Error,
-    # return it. (Deterministic behavior)
     formula = (
         f"AND("
         f"{{Worker}}='{req.worker}',"
@@ -348,8 +335,7 @@ def capability_sla_machine(req: RunRequest, run_record_id: str) -> Dict[str, Any
         if "Last_SLA_Check" in LOGS_ERRORS_FIELDS_ALLOWED:
             update_fields["Last_SLA_Check"] = utc_now_iso()
         if "Linked_Run" in LOGS_ERRORS_FIELDS_ALLOWED:
-            # Linked record expects array of record IDs
-            update_fields["Linked_Run"] = [run_record_id]
+            update_fields["Linked_Run"] = [run_record_id]  # linked record => array of record ids
 
         if not update_fields:
             skipped += 1
@@ -387,11 +373,7 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="HTTP_EXEC invalid method.")
 
     r = requests.request(method, url, headers=headers, json=body, timeout=HTTP_TIMEOUT_SECONDS)
-    return {
-        "ok": True,
-        "status_code": r.status_code,
-        "text": r.text[:2000],
-    }
+    return {"ok": True, "status_code": r.status_code, "text": r.text[:2000]}
 
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     max_cmds = int(req.max_commands or 0)
@@ -410,7 +392,6 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         "commands_record_ids": [c.get("id") for c in cmds],
     }
 
-
 CAPABILITIES = {
     "health_tick": capability_health_tick,
     "sla_machine": capability_sla_machine,
@@ -424,12 +405,15 @@ CAPABILITIES = {
 # ============================================================
 
 def _pkg_version(name: str) -> Optional[str]:
-    # SAFE: no new dependency; uses stdlib (py>=3.8)
     try:
-        from importlib import metadata as importlib_metadata  # type: ignore
+        from importlib import metadata as importlib_metadata  # py>=3.8
         return importlib_metadata.version(name)
     except Exception:
         return None
+
+@app.get("/")
+def root() -> Dict[str, Any]:
+    return {"ok": True, "service": APP_NAME, "version": APP_VERSION, "ts": utc_now_iso()}
 
 @app.get("/health")
 def health() -> Dict[str, Any]:
@@ -469,22 +453,18 @@ async def run(request: Request) -> RunResponse:
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body.")
 
-    # Parse with pydantic (anti-chaos)
     req = RunRequest.model_validate(payload)
 
     _timebox_or_408(started, "before_start")
 
-    # Idempotency: if already done/error, return existing result deterministically
     existing = idempotency_lookup(req)
     if existing:
         fields = existing.get("fields", {})
-        existing_result: Dict[str, Any]
         try:
             existing_result = json.loads(fields.get("Result_JSON", "{}") or "{}")
         except Exception:
             existing_result = {"note": "Result_JSON unreadable"}
 
-        # SAFE: keep run_id consistent (Airtable record id)
         existing_record_id = existing.get("id") or "unknown"
 
         return RunResponse(
@@ -497,7 +477,6 @@ async def run(request: Request) -> RunResponse:
             result={"idempotent_replay": True, "previous": existing_result},
         )
 
-    # Create System_Runs record
     run_record_id = create_system_run(req)
 
     try:
@@ -521,7 +500,6 @@ async def run(request: Request) -> RunResponse:
                 result=result_obj,
             )
 
-        # Execute capability
         result_obj = fn(req, run_record_id)
 
         _timebox_or_408(started, "after_execute")
@@ -539,7 +517,6 @@ async def run(request: Request) -> RunResponse:
         )
 
     except HTTPException as e:
-        # Log full detail (safe) + propagate
         fail_system_run(run_record_id, str(e.detail), meta={"status_code": e.status_code})
         raise
     except Exception as e:
