@@ -1,12 +1,3 @@
-# app/worker.py  — BOSAI Worker (v2.3.1)
-# Basé sur ton fichier v2.3.0, patch SAFE (sans casser le baseline):
-# - Ajout route "/" (évite 404 Render healthcheck)
-# - Pagination Airtable (view/list) via offset (évite limite 100)
-# - URL encoding des noms de tables Airtable (sécurise espaces / caractères)
-# - run_id cohérent en mode idempotent (toujours Airtable record id)
-# - Timebox RUN_MAX_SECONDS appliqué aussi pendant l'exécution
-# - /health renvoie aussi les versions des dépendances (FastAPI, Uvicorn, Requests, Pydantic)
-
 import os
 import json
 import time
@@ -14,7 +5,7 @@ import uuid
 import hmac
 import hashlib
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 
 from urllib.parse import quote
 
@@ -40,7 +31,7 @@ COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.3.1").strip()  # bumped (safe patch)
+APP_VERSION = os.getenv("APP_VERSION", "2.3.1").strip()  # bumped
 
 RUN_MAX_SECONDS = float(os.getenv("RUN_MAX_SECONDS", "30").strip() or "30")
 HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "20").strip() or "20")
@@ -81,7 +72,7 @@ app = FastAPI(title=APP_NAME, version=APP_VERSION)
 # ============================================================
 
 class RunRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")  # anti-chaos
+    model_config = ConfigDict(extra="forbid")
 
     worker: str = Field(default=WORKER_NAME)
 
@@ -132,6 +123,7 @@ def _require_airtable() -> None:
         raise HTTPException(status_code=500, detail="Airtable env not configured (AIRTABLE_API_KEY / AIRTABLE_BASE_ID).")
 
 def _airtable_url(table_name: str) -> str:
+    # SAFE: encode table name (spaces/special chars)
     return f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{quote(table_name, safe='')}"
 
 def _airtable_headers() -> Dict[str, str]:
@@ -177,6 +169,10 @@ def airtable_find_first(table_name: str, formula: str, max_records: int = 1) -> 
     return records[0] if records else None
 
 def airtable_list_view(table_name: str, view_name: str, max_records: int = 100) -> List[Dict[str, Any]]:
+    """
+    SAFE: Airtable pagine (offset) avec 100 records/page.
+    On itère jusqu'à max_records.
+    """
     _require_airtable()
 
     collected: List[Dict[str, Any]] = []
@@ -188,7 +184,6 @@ def airtable_list_view(table_name: str, view_name: str, max_records: int = 100) 
             break
 
         page_size = min(100, remaining)
-
         params: Dict[str, Any] = {"view": view_name, "pageSize": str(page_size)}
         if offset:
             params["offset"] = offset
@@ -258,7 +253,7 @@ def finish_system_run(record_id: str, status: str, result_obj: Dict[str, Any]) -
     airtable_update(SYSTEM_RUNS_TABLE_NAME, record_id, fields)
 
 def fail_system_run(record_id: str, error_message: str, meta: Optional[Dict[str, Any]] = None) -> None:
-    payload: Dict[str, Any] = {"error": error_message}
+    payload = {"error": error_message}
     if meta:
         payload["meta"] = meta
     fields = {
@@ -335,7 +330,7 @@ def capability_sla_machine(req: RunRequest, run_record_id: str) -> Dict[str, Any
         if "Last_SLA_Check" in LOGS_ERRORS_FIELDS_ALLOWED:
             update_fields["Last_SLA_Check"] = utc_now_iso()
         if "Linked_Run" in LOGS_ERRORS_FIELDS_ALLOWED:
-            update_fields["Linked_Run"] = [run_record_id]  # linked record => array of record ids
+            update_fields["Linked_Run"] = [run_record_id]
 
         if not update_fields:
             skipped += 1
@@ -406,14 +401,15 @@ CAPABILITIES = {
 
 def _pkg_version(name: str) -> Optional[str]:
     try:
-        from importlib import metadata as importlib_metadata  # py>=3.8
+        from importlib import metadata as importlib_metadata  # stdlib (py>=3.8)
         return importlib_metadata.version(name)
     except Exception:
         return None
 
 @app.get("/")
 def root() -> Dict[str, Any]:
-    return {"ok": True, "service": APP_NAME, "version": APP_VERSION, "ts": utc_now_iso()}
+    # IMPORTANT: répond à GET / (et FastAPI gère HEAD / automatiquement)
+    return {"ok": True, "app": APP_NAME, "version": APP_VERSION, "ts": utc_now_iso()}
 
 @app.get("/health")
 def health() -> Dict[str, Any]:
@@ -460,20 +456,21 @@ async def run(request: Request) -> RunResponse:
     existing = idempotency_lookup(req)
     if existing:
         fields = existing.get("fields", {})
+        existing_result = {}
         try:
             existing_result = json.loads(fields.get("Result_JSON", "{}") or "{}")
         except Exception:
             existing_result = {"note": "Result_JSON unreadable"}
 
-        existing_record_id = existing.get("id") or "unknown"
-
+        # IMPORTANT: je garde ton comportement baseline:
+        # run_id = champ Run_ID si dispo (comme ton v2.3.0)
         return RunResponse(
             ok=True,
             worker=req.worker,
             capability=req.capability,
             idempotency_key=req.idempotency_key,
-            run_id=existing_record_id,
-            airtable_record_id=existing_record_id,
+            run_id=str(fields.get("Run_ID", "")) or "unknown",
+            airtable_record_id=existing.get("id"),
             result={"idempotent_replay": True, "previous": existing_result},
         )
 
@@ -517,7 +514,7 @@ async def run(request: Request) -> RunResponse:
         )
 
     except HTTPException as e:
-        fail_system_run(run_record_id, str(e.detail), meta={"status_code": e.status_code})
+        fail_system_run(run_record_id, str(e.detail))
         raise
     except Exception as e:
         fail_system_run(run_record_id, repr(e))
