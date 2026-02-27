@@ -1,9 +1,9 @@
-# app/worker.py — BOSAI Worker (v2.3.3)
-# SAFE patch from your v2.3.2 baseline:
-# - Fix Airtable INVALID_FILTER_BY_FORMULA (unknown field names: worker)
-# - Use Status_select everywhere (your Airtable schema)
-# - Idempotency lookup now uses Idempotency_Key + Status_select only (no Worker/Capability dependency)
-# - Keeps GET /, HEAD /, /health, /health/score, POST /run unchanged in behavior
+# app/worker.py — BOSAI Worker (v2.3.4)
+# SAFE from v2.3.3 baseline:
+# - Keeps GET /, HEAD /, /health, /health/score, POST /run behavior
+# - Status_select schema for System_Runs
+# - Idempotency lookup: Idempotency_Key + Status_select only
+# - Commands Orchestrator V1: scans Airtable Commands view, executes capabilities, updates command status safely
 
 import os
 import json
@@ -36,7 +36,7 @@ COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.3.3").strip()  # bump safe (Status_select + idempotency lookup safe)
+APP_VERSION = os.getenv("APP_VERSION", "2.3.4").strip()  # bump safe (commands orchestrator V1)
 
 RUN_MAX_SECONDS = float(os.getenv("RUN_MAX_SECONDS", "30").strip() or "30")
 HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "20").strip() or "20")
@@ -110,7 +110,7 @@ class RunRequest(BaseModel):
     # Optional knobs (used by command orchestrator)
     view: Optional[str] = None
     max_commands: int = 0
-    command_id: Optional[str] = None
+    command_id: Optional[str] = None  # (reserved; not used in V1)
 
 
 class RunResponse(BaseModel):
@@ -166,6 +166,10 @@ def airtable_update(table_name: str, record_id: str, fields: Dict[str, Any]) -> 
     if r.status_code >= 300:
         raise HTTPException(status_code=500, detail=f"Airtable update failed: {r.status_code} {r.text}")
 
+# convenience wrapper (name makes intent explicit)
+def airtable_update_fields(table_name: str, record_id: str, fields: Dict[str, Any]) -> None:
+    airtable_update(table_name, record_id, fields)
+
 def airtable_find_first(table_name: str, formula: str, max_records: int = 1) -> Optional[Dict[str, Any]]:
     _require_airtable()
     r = requests.get(
@@ -190,6 +194,25 @@ def airtable_list_view(table_name: str, view_name: str, max_records: int = 100) 
     if r.status_code >= 300:
         raise HTTPException(status_code=500, detail=f"Airtable view list failed: {r.status_code} {r.text}")
     return r.json().get("records", [])
+
+def _json_load_maybe(val: Any) -> Dict[str, Any]:
+    """
+    Accepts:
+      - dict -> returned as-is
+      - JSON string -> parsed
+      - None/"" -> {}
+    """
+    if val is None:
+        return {}
+    if isinstance(val, dict):
+        return val
+    try:
+        s = str(val).strip()
+        if not s:
+            return {}
+        return json.loads(s)
+    except Exception:
+        return {}
 
 def verify_signature_or_401(raw_body: bytes, signature_header: Optional[str]) -> None:
     if not RUN_SHARED_SECRET:
@@ -361,20 +384,147 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     }
 
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    max_cmds = int(req.max_commands or 0)
-    if max_cmds <= 0:
-        max_cmds = 5
+    """
+    Commands Orchestrator V1 (SAFE):
+    - Lists Commands records from a view (default: COMMANDS_VIEW_NAME)
+    - Only executes records whose Status_select is "Queued" (or empty)
+    - Writes back Status_select: Running -> Done/Error/Unsupported
+    - Uses per-command Idempotency_Key if present, else derives stable key from record id + capability
+    - Expects Airtable fields in Commands table (exact names):
+        Status_select, Capability, Input_JSON, Result_JSON, Error_Message, Idempotency_Key, Linked_Run
+    """
+    max_cmds = int(req.max_commands or 0) or 5
+    view = (req.view or COMMANDS_VIEW_NAME or "Queue").strip()
 
-    cmds = airtable_list_view(COMMANDS_TABLE_NAME, COMMANDS_VIEW_NAME, max_records=max_cmds)
+    cmds = airtable_list_view(COMMANDS_TABLE_NAME, view, max_records=max_cmds)
+
+    executed = 0
+    succeeded = 0
+    failed = 0
+    blocked = 0
+    unsupported = 0
+
+    processed_ids: List[str] = []
+    errors: List[str] = []
+
+    for c in cmds:
+        cid = c.get("id")
+        fields = c.get("fields", {}) or {}
+        if not cid:
+            continue
+
+        processed_ids.append(cid)
+
+        status = str(fields.get("Status_select", "")).strip()
+        if status and status not in ("Queued", "QUEUE", "Queue"):
+            blocked += 1
+            continue
+
+        capability = str(fields.get("Capability", "")).strip()
+        if not capability:
+            failed += 1
+            try:
+                airtable_update_fields(COMMANDS_TABLE_NAME, cid, {
+                    "Status_select": "Error",
+                    "Error_Message": "Missing Capability",
+                    "Linked_Run": [run_record_id],
+                })
+            except Exception:
+                pass
+            continue
+
+        fn = CAPABILITIES.get(capability)
+        if not fn:
+            unsupported += 1
+            try:
+                airtable_update_fields(COMMANDS_TABLE_NAME, cid, {
+                    "Status_select": "Unsupported",
+                    "Error_Message": f"Unsupported capability: {capability}",
+                    "Linked_Run": [run_record_id],
+                })
+            except Exception:
+                pass
+            continue
+
+        idem = str(fields.get("Idempotency_Key", "")).strip()
+        if not idem:
+            idem = f"cmd:{cid}:{capability}"
+
+        cmd_input = _json_load_maybe(fields.get("Input_JSON"))
+
+        # Mark Running (if Airtable refuses => do not execute)
+        try:
+            airtable_update_fields(COMMANDS_TABLE_NAME, cid, {
+                "Status_select": "Running",
+                "Idempotency_Key": idem,
+                "Linked_Run": [run_record_id],
+                "Error_Message": "",
+            })
+        except Exception:
+            blocked += 1
+            continue
+
+        executed += 1
+
+        try:
+            cmd_req = RunRequest.model_validate({
+                "worker": req.worker,
+                "capability": capability,
+                "idempotency_key": idem,
+                "input": cmd_input,
+                "priority": req.priority,
+                "dry_run": bool(req.dry_run),
+            })
+
+            result_obj = fn(cmd_req, run_record_id)
+
+            airtable_update_fields(COMMANDS_TABLE_NAME, cid, {
+                "Status_select": "Done",
+                "Result_JSON": json.dumps(result_obj, ensure_ascii=False),
+                "Linked_Run": [run_record_id],
+            })
+            succeeded += 1
+
+        except HTTPException as e:
+            msg = str(e.detail)
+            failed += 1
+            try:
+                airtable_update_fields(COMMANDS_TABLE_NAME, cid, {
+                    "Status_select": "Error",
+                    "Error_Message": msg,
+                    "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
+                    "Linked_Run": [run_record_id],
+                })
+            except Exception:
+                pass
+            errors.append(f"{cid}: {msg}")
+
+        except Exception as e:
+            msg = repr(e)
+            failed += 1
+            try:
+                airtable_update_fields(COMMANDS_TABLE_NAME, cid, {
+                    "Status_select": "Error",
+                    "Error_Message": msg,
+                    "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
+                    "Linked_Run": [run_record_id],
+                })
+            except Exception:
+                pass
+            errors.append(f"{cid}: {msg}")
+
     return {
         "ok": True,
+        "view": view,
         "scanned": len(cmds),
-        "executed": 0,
-        "succeeded": 0,
-        "failed": 0,
-        "blocked": 0,
-        "unsupported": 0,
-        "commands_record_ids": [c.get("id") for c in cmds],
+        "executed": executed,
+        "succeeded": succeeded,
+        "failed": failed,
+        "blocked": blocked,
+        "unsupported": unsupported,
+        "commands_record_ids": processed_ids,
+        "errors_count": len(errors),
+        "errors": errors[:10],
     }
 
 
