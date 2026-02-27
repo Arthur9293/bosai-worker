@@ -1,3 +1,11 @@
+# app/worker.py  — BOSAI Worker (v2.3.1)
+# Basé sur ton fichier v2.3.0, mise à jour SAFE (sans casser le baseline):
+# - Pagination Airtable (view/list) via offset (évite la limite 100 records)
+# - run_id cohérent en mode idempotent (toujours Airtable record id)
+# - URL encoding des noms de tables Airtable (sécurise les espaces / caractères)
+# - Timebox RUN_MAX_SECONDS appliqué aussi pendant l'exécution
+# - /health renvoie aussi les versions des dépendances (FastAPI, Uvicorn, Requests, Pydantic)
+
 import os
 import json
 import time
@@ -5,7 +13,9 @@ import uuid
 import hmac
 import hashlib
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List
+
+from urllib.parse import quote
 
 import requests
 from fastapi import FastAPI, HTTPException, Request
@@ -29,7 +39,7 @@ COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.3.0").strip()
+APP_VERSION = os.getenv("APP_VERSION", "2.3.1").strip()  # bumped (safe patch)
 
 RUN_MAX_SECONDS = float(os.getenv("RUN_MAX_SECONDS", "30").strip() or "30")
 HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "20").strip() or "20")
@@ -128,7 +138,8 @@ def _require_airtable() -> None:
         raise HTTPException(status_code=500, detail="Airtable env not configured (AIRTABLE_API_KEY / AIRTABLE_BASE_ID).")
 
 def _airtable_url(table_name: str) -> str:
-    return f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_name}"
+    # SAFE: encode table name (handles spaces/special chars)
+    return f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{quote(table_name, safe='')}"
 
 def _airtable_headers() -> Dict[str, str]:
     return {
@@ -173,16 +184,44 @@ def airtable_find_first(table_name: str, formula: str, max_records: int = 1) -> 
     return records[0] if records else None
 
 def airtable_list_view(table_name: str, view_name: str, max_records: int = 100) -> List[Dict[str, Any]]:
+    """
+    SAFE patch: Airtable renvoie max 100 records/page.
+    On itère avec offset jusqu'à max_records.
+    """
     _require_airtable()
-    r = requests.get(
-        _airtable_url(table_name),
-        headers=_airtable_headers(),
-        params={"view": view_name, "maxRecords": str(max_records)},
-        timeout=HTTP_TIMEOUT_SECONDS,
-    )
-    if r.status_code >= 300:
-        raise HTTPException(status_code=500, detail=f"Airtable view list failed: {r.status_code} {r.text}")
-    return r.json().get("records", [])
+
+    collected: List[Dict[str, Any]] = []
+    offset: Optional[str] = None
+
+    while True:
+        remaining = max_records - len(collected)
+        if remaining <= 0:
+            break
+
+        page_size = min(100, remaining)
+
+        params: Dict[str, Any] = {"view": view_name, "maxRecords": str(page_size)}
+        if offset:
+            params["offset"] = offset
+
+        r = requests.get(
+            _airtable_url(table_name),
+            headers=_airtable_headers(),
+            params=params,
+            timeout=HTTP_TIMEOUT_SECONDS,
+        )
+        if r.status_code >= 300:
+            raise HTTPException(status_code=500, detail=f"Airtable view list failed: {r.status_code} {r.text}")
+
+        data = r.json()
+        records = data.get("records", [])
+        collected.extend(records)
+
+        offset = data.get("offset")
+        if not offset:
+            break
+
+    return collected
 
 def verify_signature_or_401(raw_body: bytes, signature_header: Optional[str]) -> None:
     if not RUN_SHARED_SECRET:
@@ -196,6 +235,10 @@ def verify_signature_or_401(raw_body: bytes, signature_header: Optional[str]) ->
     if not hmac.compare_digest(their_hex, ours):
         raise HTTPException(status_code=401, detail="Invalid x-run-signature")
 
+def _timebox_or_408(started_ts: float, stage: str) -> None:
+    if (time.time() - started_ts) > RUN_MAX_SECONDS:
+        raise HTTPException(status_code=408, detail=f"Request timed out ({stage}).")
+
 
 # ============================================================
 # System_Runs helpers
@@ -205,7 +248,6 @@ def create_system_run(req: RunRequest) -> str:
     fields = {
         "Run_ID": str(uuid.uuid4()),
         "Worker": req.worker,
-        # Canon field name everywhere: capability
         "Capability": req.capability,
         "Idempotency_Key": req.idempotency_key,
         "Status": "Running",
@@ -227,7 +269,7 @@ def finish_system_run(record_id: str, status: str, result_obj: Dict[str, Any]) -
     airtable_update(SYSTEM_RUNS_TABLE_NAME, record_id, fields)
 
 def fail_system_run(record_id: str, error_message: str, meta: Optional[Dict[str, Any]] = None) -> None:
-    payload = {"error": error_message}
+    payload: Dict[str, Any] = {"error": error_message}
     if meta:
         payload["meta"] = meta
     fields = {
@@ -256,7 +298,6 @@ def idempotency_lookup(req: RunRequest) -> Optional[Dict[str, Any]]:
 # ============================================================
 
 def capability_health_tick(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    # Minimal: just proves Airtable write works + returns probe
     return {"ok": True, "probe": "airtable_ok", "ts": utc_now_iso()}
 
 def _parse_float(val: Any) -> Optional[float]:
@@ -278,7 +319,6 @@ def _sla_status_for_remaining(remaining_min: float) -> str:
     return SLA_STATUS_OK
 
 def capability_sla_machine(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    # Reads Logs_Erreurs view "Active", updates SLA_Status/Last_SLA_Check/Linked_Run
     records = airtable_list_view(LOGS_ERRORS_TABLE_NAME, LOGS_ERRORS_VIEW_NAME, max_records=200)
 
     updated = 0
@@ -295,7 +335,6 @@ def capability_sla_machine(req: RunRequest, run_record_id: str) -> Dict[str, Any
             continue
 
         current_status = str(fields.get("SLA_Status", "")).strip()
-        # If already escalated, keep it
         if current_status == SLA_STATUS_ESCALATED:
             skipped += 1
             continue
@@ -355,8 +394,6 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     }
 
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    # Minimal orchestrator: just scans the view and returns count.
-    # (No write-back here to avoid chaos unless you want it.)
     max_cmds = int(req.max_commands or 0)
     if max_cmds <= 0:
         max_cmds = 5
@@ -386,6 +423,14 @@ CAPABILITIES = {
 # Routes
 # ============================================================
 
+def _pkg_version(name: str) -> Optional[str]:
+    # SAFE: no new dependency; uses stdlib (py>=3.8)
+    try:
+        from importlib import metadata as importlib_metadata  # type: ignore
+        return importlib_metadata.version(name)
+    except Exception:
+        return None
+
 @app.get("/health")
 def health() -> Dict[str, Any]:
     return {
@@ -393,12 +438,17 @@ def health() -> Dict[str, Any]:
         "app": APP_NAME,
         "version": APP_VERSION,
         "worker": WORKER_NAME,
+        "deps": {
+            "fastapi": _pkg_version("fastapi"),
+            "uvicorn": _pkg_version("uvicorn"),
+            "requests": _pkg_version("requests"),
+            "pydantic": _pkg_version("pydantic"),
+        },
         "ts": utc_now_iso(),
     }
 
 @app.get("/health/score")
 def health_score() -> Dict[str, Any]:
-    # Simple deterministic score (expand later if needed)
     score = 100
     issues = []
     if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
@@ -422,26 +472,28 @@ async def run(request: Request) -> RunResponse:
     # Parse with pydantic (anti-chaos)
     req = RunRequest.model_validate(payload)
 
-    # Strict timebox
-    if (time.time() - started) > RUN_MAX_SECONDS:
-        raise HTTPException(status_code=408, detail="Request timed out before start.")
+    _timebox_or_408(started, "before_start")
 
     # Idempotency: if already done/error, return existing result deterministically
     existing = idempotency_lookup(req)
     if existing:
         fields = existing.get("fields", {})
-        existing_result = {}
+        existing_result: Dict[str, Any]
         try:
             existing_result = json.loads(fields.get("Result_JSON", "{}") or "{}")
         except Exception:
             existing_result = {"note": "Result_JSON unreadable"}
+
+        # SAFE: keep run_id consistent (Airtable record id)
+        existing_record_id = existing.get("id") or "unknown"
+
         return RunResponse(
             ok=True,
             worker=req.worker,
             capability=req.capability,
             idempotency_key=req.idempotency_key,
-            run_id=str(fields.get("Run_ID", "")) or "unknown",
-            airtable_record_id=existing.get("id"),
+            run_id=existing_record_id,
+            airtable_record_id=existing_record_id,
             result={"idempotent_replay": True, "previous": existing_result},
         )
 
@@ -453,6 +505,8 @@ async def run(request: Request) -> RunResponse:
         if not fn:
             finish_system_run(run_record_id, "Unsupported", {"ok": False, "error": "unsupported_capability"})
             raise HTTPException(status_code=400, detail=f"Unsupported capability: {req.capability}")
+
+        _timebox_or_408(started, "after_create")
 
         if req.dry_run:
             result_obj = {"ok": True, "dry_run": True, "would_execute": req.capability}
@@ -467,7 +521,11 @@ async def run(request: Request) -> RunResponse:
                 result=result_obj,
             )
 
+        # Execute capability
         result_obj = fn(req, run_record_id)
+
+        _timebox_or_408(started, "after_execute")
+
         finish_system_run(run_record_id, "Done", result_obj)
 
         return RunResponse(
@@ -481,7 +539,8 @@ async def run(request: Request) -> RunResponse:
         )
 
     except HTTPException as e:
-        fail_system_run(run_record_id, str(e.detail))
+        # Log full detail (safe) + propagate
+        fail_system_run(run_record_id, str(e.detail), meta={"status_code": e.status_code})
         raise
     except Exception as e:
         fail_system_run(run_record_id, repr(e))
