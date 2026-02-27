@@ -1,7 +1,9 @@
 # app/worker.py — BOSAI Worker (v2.3.3)
 # SAFE patch from your v2.3.2 baseline:
-# - Uses Status_select everywhere for System_Runs (create/finish/fail + idempotency lookup)
-# - Keeps HEAD /, health, signature verification, and /run behavior unchanged
+# - Fix Airtable INVALID_FILTER_BY_FORMULA (unknown field names: worker)
+# - Use Status_select everywhere (your Airtable schema)
+# - Idempotency lookup now uses Idempotency_Key + Status_select only (no Worker/Capability dependency)
+# - Keeps GET /, HEAD /, /health, /health/score, POST /run unchanged in behavior
 
 import os
 import json
@@ -10,7 +12,7 @@ import uuid
 import hmac
 import hashlib
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List
 
 import requests
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -34,7 +36,7 @@ COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.3.3").strip()  # bump safe (Status_select)
+APP_VERSION = os.getenv("APP_VERSION", "2.3.3").strip()  # bump safe (Status_select + idempotency lookup safe)
 
 RUN_MAX_SECONDS = float(os.getenv("RUN_MAX_SECONDS", "30").strip() or "30")
 HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "20").strip() or "20")
@@ -203,7 +205,7 @@ def verify_signature_or_401(raw_body: bytes, signature_header: Optional[str]) ->
 
 
 # ============================================================
-# System_Runs helpers
+# System_Runs helpers (Status_select schema)
 # ============================================================
 
 def create_system_run(req: RunRequest) -> str:
@@ -242,15 +244,21 @@ def fail_system_run(record_id: str, error_message: str, meta: Optional[Dict[str,
     airtable_update(SYSTEM_RUNS_TABLE_NAME, record_id, fields)
 
 def idempotency_lookup(req: RunRequest) -> Optional[Dict[str, Any]]:
+    # SAFE: do not depend on {Worker}/{Capability} field names.
+    # Idempotency_Key must be unique across the system.
     formula = (
         f"AND("
-        f"{{Worker}}='{req.worker}',"
-        f"{{Capability}}='{req.capability}',"
         f"{{Idempotency_Key}}='{req.idempotency_key}',"
         f"OR({{Status_select}}='Done',{{Status_select}}='Error')"
         f")"
     )
-    return airtable_find_first(SYSTEM_RUNS_TABLE_NAME, formula=formula, max_records=1)
+    try:
+        return airtable_find_first(SYSTEM_RUNS_TABLE_NAME, formula=formula, max_records=1)
+    except HTTPException as e:
+        # Anti-chaos: if formula mismatches schema, do not crash the worker.
+        if "INVALID_FILTER_BY_FORMULA" in str(e.detail):
+            return None
+        raise
 
 
 # ============================================================
@@ -432,11 +440,12 @@ async def run(request: Request) -> RunResponse:
     existing = idempotency_lookup(req)
     if existing:
         fields = existing.get("fields", {})
-        existing_result = {}
+        existing_result: Dict[str, Any] = {}
         try:
             existing_result = json.loads(fields.get("Result_JSON", "{}") or "{}")
         except Exception:
             existing_result = {"note": "Result_JSON unreadable"}
+
         return RunResponse(
             ok=True,
             worker=req.worker,
