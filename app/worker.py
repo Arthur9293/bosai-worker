@@ -7,10 +7,8 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List, Tuple
 
-from urllib.parse import quote
-
 import requests
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field, ConfigDict
 from pydantic.aliases import AliasChoices
 
@@ -31,7 +29,7 @@ COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.3.1").strip()  # bumped
+APP_VERSION = os.getenv("APP_VERSION", "2.3.1").strip()  # bump safe
 
 RUN_MAX_SECONDS = float(os.getenv("RUN_MAX_SECONDS", "30").strip() or "30")
 HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "20").strip() or "20")
@@ -72,16 +70,20 @@ app = FastAPI(title=APP_NAME, version=APP_VERSION)
 # ============================================================
 
 class RunRequest(BaseModel):
+    # Forbid extra keys by default (anti-chaos)
     model_config = ConfigDict(extra="forbid")
 
     worker: str = Field(default=WORKER_NAME)
 
+    # Canon: capability (Airtable aussi)
+    # Alias acceptés: capacity (legacy)
     capability: str = Field(
         ...,
         validation_alias=AliasChoices("capability", "capacity"),
         description="Capability name (canonical: capability).",
     )
 
+    # Canon: idempotency_key
     idempotency_key: str = Field(
         ...,
         validation_alias=AliasChoices("idempotency_key", "idempotencyKey"),
@@ -89,6 +91,8 @@ class RunRequest(BaseModel):
 
     priority: int = 1
 
+    # Canon: input
+    # Alias: inputs (legacy)
     input: Dict[str, Any] = Field(
         default_factory=dict,
         validation_alias=AliasChoices("input", "inputs"),
@@ -96,6 +100,7 @@ class RunRequest(BaseModel):
 
     dry_run: bool = False
 
+    # Optional knobs (used by command orchestrator)
     view: Optional[str] = None
     max_commands: int = 0
     command_id: Optional[str] = None
@@ -123,8 +128,7 @@ def _require_airtable() -> None:
         raise HTTPException(status_code=500, detail="Airtable env not configured (AIRTABLE_API_KEY / AIRTABLE_BASE_ID).")
 
 def _airtable_url(table_name: str) -> str:
-    # SAFE: encode table name (spaces/special chars)
-    return f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{quote(table_name, safe='')}"
+    return f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_name}"
 
 def _airtable_headers() -> Dict[str, str]:
     return {
@@ -169,47 +173,20 @@ def airtable_find_first(table_name: str, formula: str, max_records: int = 1) -> 
     return records[0] if records else None
 
 def airtable_list_view(table_name: str, view_name: str, max_records: int = 100) -> List[Dict[str, Any]]:
-    """
-    SAFE: Airtable pagine (offset) avec 100 records/page.
-    On itère jusqu'à max_records.
-    """
     _require_airtable()
-
-    collected: List[Dict[str, Any]] = []
-    offset: Optional[str] = None
-
-    while True:
-        remaining = max_records - len(collected)
-        if remaining <= 0:
-            break
-
-        page_size = min(100, remaining)
-        params: Dict[str, Any] = {"view": view_name, "pageSize": str(page_size)}
-        if offset:
-            params["offset"] = offset
-
-        r = requests.get(
-            _airtable_url(table_name),
-            headers=_airtable_headers(),
-            params=params,
-            timeout=HTTP_TIMEOUT_SECONDS,
-        )
-        if r.status_code >= 300:
-            raise HTTPException(status_code=500, detail=f"Airtable view list failed: {r.status_code} {r.text}")
-
-        data = r.json()
-        records = data.get("records", [])
-        collected.extend(records)
-
-        offset = data.get("offset")
-        if not offset:
-            break
-
-    return collected
+    r = requests.get(
+        _airtable_url(table_name),
+        headers=_airtable_headers(),
+        params={"view": view_name, "maxRecords": str(max_records)},
+        timeout=HTTP_TIMEOUT_SECONDS,
+    )
+    if r.status_code >= 300:
+        raise HTTPException(status_code=500, detail=f"Airtable view list failed: {r.status_code} {r.text}")
+    return r.json().get("records", [])
 
 def verify_signature_or_401(raw_body: bytes, signature_header: Optional[str]) -> None:
     if not RUN_SHARED_SECRET:
-        return
+        return  # signature not enforced
 
     if not signature_header or not signature_header.startswith("sha256="):
         raise HTTPException(status_code=401, detail="Missing or invalid x-run-signature (expected sha256=...)")
@@ -218,10 +195,6 @@ def verify_signature_or_401(raw_body: bytes, signature_header: Optional[str]) ->
     ours = hmac.new(RUN_SHARED_SECRET.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(their_hex, ours):
         raise HTTPException(status_code=401, detail="Invalid x-run-signature")
-
-def _timebox_or_408(started_ts: float, stage: str) -> None:
-    if (time.time() - started_ts) > RUN_MAX_SECONDS:
-        raise HTTPException(status_code=408, detail=f"Request timed out ({stage}).")
 
 
 # ============================================================
@@ -368,7 +341,11 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="HTTP_EXEC invalid method.")
 
     r = requests.request(method, url, headers=headers, json=body, timeout=HTTP_TIMEOUT_SECONDS)
-    return {"ok": True, "status_code": r.status_code, "text": r.text[:2000]}
+    return {
+        "ok": True,
+        "status_code": r.status_code,
+        "text": r.text[:2000],
+    }
 
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     max_cmds = int(req.max_commands or 0)
@@ -387,6 +364,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         "commands_record_ids": [c.get("id") for c in cmds],
     }
 
+
 CAPABILITIES = {
     "health_tick": capability_health_tick,
     "sla_machine": capability_sla_machine,
@@ -399,17 +377,10 @@ CAPABILITIES = {
 # Routes
 # ============================================================
 
-def _pkg_version(name: str) -> Optional[str]:
-    try:
-        from importlib import metadata as importlib_metadata  # stdlib (py>=3.8)
-        return importlib_metadata.version(name)
-    except Exception:
-        return None
-
 @app.get("/")
 def root() -> Dict[str, Any]:
-    # IMPORTANT: répond à GET / (et FastAPI gère HEAD / automatiquement)
-    return {"ok": True, "app": APP_NAME, "version": APP_VERSION, "ts": utc_now_iso()}
+    # Render health pings "/" (GET/HEAD). This prevents 404/405 in logs.
+    return {"ok": True, "service": APP_NAME, "version": APP_VERSION}
 
 @app.get("/health")
 def health() -> Dict[str, Any]:
@@ -418,12 +389,6 @@ def health() -> Dict[str, Any]:
         "app": APP_NAME,
         "version": APP_VERSION,
         "worker": WORKER_NAME,
-        "deps": {
-            "fastapi": _pkg_version("fastapi"),
-            "uvicorn": _pkg_version("uvicorn"),
-            "requests": _pkg_version("requests"),
-            "pydantic": _pkg_version("pydantic"),
-        },
         "ts": utc_now_iso(),
     }
 
@@ -451,7 +416,8 @@ async def run(request: Request) -> RunResponse:
 
     req = RunRequest.model_validate(payload)
 
-    _timebox_or_408(started, "before_start")
+    if (time.time() - started) > RUN_MAX_SECONDS:
+        raise HTTPException(status_code=408, detail="Request timed out before start.")
 
     existing = idempotency_lookup(req)
     if existing:
@@ -461,9 +427,6 @@ async def run(request: Request) -> RunResponse:
             existing_result = json.loads(fields.get("Result_JSON", "{}") or "{}")
         except Exception:
             existing_result = {"note": "Result_JSON unreadable"}
-
-        # IMPORTANT: je garde ton comportement baseline:
-        # run_id = champ Run_ID si dispo (comme ton v2.3.0)
         return RunResponse(
             ok=True,
             worker=req.worker,
@@ -482,8 +445,6 @@ async def run(request: Request) -> RunResponse:
             finish_system_run(run_record_id, "Unsupported", {"ok": False, "error": "unsupported_capability"})
             raise HTTPException(status_code=400, detail=f"Unsupported capability: {req.capability}")
 
-        _timebox_or_408(started, "after_create")
-
         if req.dry_run:
             result_obj = {"ok": True, "dry_run": True, "would_execute": req.capability}
             finish_system_run(run_record_id, "Done", result_obj)
@@ -498,9 +459,6 @@ async def run(request: Request) -> RunResponse:
             )
 
         result_obj = fn(req, run_record_id)
-
-        _timebox_or_408(started, "after_execute")
-
         finish_system_run(run_record_id, "Done", result_obj)
 
         return RunResponse(
