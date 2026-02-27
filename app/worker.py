@@ -1,7 +1,7 @@
-# app/worker.py — BOSAI Worker (v2.3.2)
-# SAFE patch from your v2.3.1 baseline:
-# - Adds HEAD / to stop Render 405 on health ping (GET/HEAD on "/")
-# - Keeps everything else unchanged
+# app/worker.py — BOSAI Worker (v2.3.3)
+# SAFE patch from your v2.3.2 baseline:
+# - Uses Status_select everywhere for System_Runs (create/finish/fail + idempotency lookup)
+# - Keeps HEAD /, health, signature verification, and /run behavior unchanged
 
 import os
 import json
@@ -34,7 +34,7 @@ COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.3.2").strip()  # bump safe (HEAD /)
+APP_VERSION = os.getenv("APP_VERSION", "2.3.3").strip()  # bump safe (Status_select)
 
 RUN_MAX_SECONDS = float(os.getenv("RUN_MAX_SECONDS", "30").strip() or "30")
 HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "20").strip() or "20")
@@ -212,7 +212,7 @@ def create_system_run(req: RunRequest) -> str:
         "Worker": req.worker,
         "Capability": req.capability,
         "Idempotency_Key": req.idempotency_key,
-        "Status": "Running",
+        "Status_select": "Running",
         "Started_At": utc_now_iso(),
         "Priority": req.priority,
         "Dry_Run": bool(req.dry_run),
@@ -224,7 +224,7 @@ def create_system_run(req: RunRequest) -> str:
 
 def finish_system_run(record_id: str, status: str, result_obj: Dict[str, Any]) -> None:
     fields = {
-        "Status": status,
+        "Status_select": status,
         "Finished_At": utc_now_iso(),
         "Result_JSON": json.dumps(result_obj, ensure_ascii=False),
     }
@@ -235,7 +235,7 @@ def fail_system_run(record_id: str, error_message: str, meta: Optional[Dict[str,
     if meta:
         payload["meta"] = meta
     fields = {
-        "Status": "Error",
+        "Status_select": "Error",
         "Finished_At": utc_now_iso(),
         "Result_JSON": json.dumps(payload, ensure_ascii=False),
     }
@@ -247,7 +247,7 @@ def idempotency_lookup(req: RunRequest) -> Optional[Dict[str, Any]]:
         f"{{Worker}}='{req.worker}',"
         f"{{Capability}}='{req.capability}',"
         f"{{Idempotency_Key}}='{req.idempotency_key}',"
-        f"OR({{Status}}='Done',{{Status}}='Error')"
+        f"OR({{Status_select}}='Done',{{Status_select}}='Error')"
         f")"
     )
     return airtable_find_first(SYSTEM_RUNS_TABLE_NAME, formula=formula, max_records=1)
