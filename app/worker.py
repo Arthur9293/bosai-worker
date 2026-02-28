@@ -1,5 +1,5 @@
-# app/worker.py — BOSAI Worker (v2.3.6)
-# SAFE from v2.3.5 baseline:
+# app/worker.py — BOSAI Worker (v2.3.7)
+# SAFE from v2.3.6 baseline:
 # - Keeps GET /, HEAD /, /health, /health/score, POST /run behavior
 # - Status_select schema for System_Runs
 # - Idempotency replay: Idempotency_Key + Status_select only
@@ -9,12 +9,15 @@
 # - State table support unchanged
 # IMPORTANT: No Is_bad (removed entirely)
 #
-# PATCH (SAFE): HTTP_EXEC now supports:
-# - input.url OR input.http_target OR input.target OR input.tool
-# - alias resolution via HTTP_EXEC_TARGETS_JSON
-# - stricter allowlist by host (supports *.domain.tld)
-# - optional secret headers via ENV (no secrets in Airtable)
-# - blocks localhost/private nets by default
+# PATCH (SAFE): HTTP_EXEC hardened + compatibility:
+# - Normalizes allowlist entries: accepts host OR full URL (https://hook.../ => host)
+# - Supports inputs:
+#   - input.url OR input.http_target OR input.target OR input.tool
+#   - ALSO supports nested shapes: input.input.url, input.args.url (safe fallback)
+# - Alias resolution via HTTP_EXEC_TARGETS_JSON unchanged
+# - Stricter allowlist by host (supports *.domain.tld)
+# - Optional secret headers via ENV (no secrets in Airtable)
+# - Blocks localhost/private nets by default
 
 import os
 import json
@@ -52,7 +55,7 @@ COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.3.6").strip()
+APP_VERSION = os.getenv("APP_VERSION", "2.3.7").strip()
 
 RUN_MAX_SECONDS = float(os.getenv("RUN_MAX_SECONDS", "30").strip() or "30")
 HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "20").strip() or "20")
@@ -85,6 +88,7 @@ STATE_LOCK_ACTIVE = os.getenv("STATE_LOCK_ACTIVE", "Active").strip()
 STATE_LOCK_RELEASED = os.getenv("STATE_LOCK_RELEASED", "Released").strip()
 STATE_LOCK_EXPIRED = os.getenv("STATE_LOCK_EXPIRED", "Expired").strip()
 
+
 # ============================================================
 # HTTP_EXEC (PATCH)
 # ============================================================
@@ -95,7 +99,8 @@ HTTP_EXEC_MAX_RESPONSE_BYTES = int(os.getenv("HTTP_EXEC_MAX_RESPONSE_BYTES", "25
 
 # Allowlist strict by hostname. Examples:
 # HTTP_EXEC_ALLOWLIST=hook.make.com,api.airtable.com,api.openai.com,*.supabase.co
-HTTP_EXEC_ALLOWLIST = [x.strip() for x in os.getenv("HTTP_EXEC_ALLOWLIST", "").split(",") if x.strip()]
+# NOTE: now also accepts full URLs in this ENV: https://hook.make.com/xxx (we normalize to host)
+HTTP_EXEC_ALLOWLIST_RAW = os.getenv("HTTP_EXEC_ALLOWLIST", "").strip()
 
 # Alias -> URL mapping (so you can keep "make_webhook_test" in Airtable)
 # HTTP_EXEC_TARGETS_JSON='{"make_webhook_test":"https://hook.make.com/xxxx"}'
@@ -109,6 +114,7 @@ HTTP_EXEC_BLOCK_PRIVATE_NETS = (os.getenv("HTTP_EXEC_BLOCK_PRIVATE_NETS", "1").s
 # HTTP_EXEC_SECRET_HEADER_PREFIX=HTTP_EXEC_HEADER_AUTH_
 # HTTP_EXEC_HEADER_AUTH_make=Bearer xxx
 HTTP_EXEC_SECRET_HEADER_PREFIX = os.getenv("HTTP_EXEC_SECRET_HEADER_PREFIX", "HTTP_EXEC_HEADER_AUTH_").strip()
+
 
 # ============================================================
 # FastAPI
@@ -506,9 +512,77 @@ def capability_sla_machine(req: RunRequest, run_record_id: str) -> Dict[str, Any
         "errors": errors[:10],
     }
 
+
 # ----------------------------
 # HTTP_EXEC (PATCH HELPERS)
 # ----------------------------
+
+def _to_dict(x: Any) -> Dict[str, Any]:
+    return x if isinstance(x, dict) else {}
+
+def _pick_first(*vals):
+    for v in vals:
+        if v is None:
+            continue
+        if isinstance(v, str) and v.strip() == "":
+            continue
+        return v
+    return None
+
+def _normalize_allowlist_hosts(raw: str) -> List[str]:
+    """
+    Accepts:
+      - "https://hook.eu1.make.com/,https://httpbin.org/"
+      - "hook.eu1.make.com,httpbin.org"
+      - "*.supabase.co"
+    Returns list of host rules (lowercased, deduped):
+      - ["hook.eu1.make.com","httpbin.org","*.supabase.co"]
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    out: List[str] = []
+    seen = set()
+
+    for p in parts:
+        pl = p.strip().lower()
+        if not pl:
+            continue
+
+        # keep wildcard host as-is
+        if pl.startswith("*.") and "/" not in pl and "://" not in pl:
+            if pl not in seen:
+                seen.add(pl)
+                out.append(pl)
+            continue
+
+        # if full URL, extract hostname
+        if "://" in pl:
+            try:
+                pu = urlparse(pl)
+                h = (pu.hostname or "").strip().lower()
+                if h and h not in seen:
+                    seen.add(h)
+                    out.append(h)
+                continue
+            except Exception:
+                # fall through to host cleanup
+                pass
+
+        # host-only, but user might have pasted "host/path"
+        if "/" in pl:
+            pl = pl.split("/", 1)[0].strip()
+
+        if pl and pl not in seen:
+            seen.add(pl)
+            out.append(pl)
+
+    return out
+
+# normalized allowlist (IMPORTANT)
+HTTP_EXEC_ALLOWLIST = _normalize_allowlist_hosts(HTTP_EXEC_ALLOWLIST_RAW)
 
 _PRIVATE_HOST_PATTERNS = [
     r"^localhost$",
@@ -533,7 +607,9 @@ def _host_matches_allowlist(host: str, allowlist: List[str]) -> bool:
         return False
     host = host.lower()
     for rule in allowlist:
-        rule_l = rule.lower()
+        rule_l = (rule or "").lower()
+        if not rule_l:
+            continue
         if rule_l.startswith("*."):
             suffix = rule_l[1:]  # ".example.com"
             if host.endswith(suffix):
@@ -606,65 +682,127 @@ def _build_secret_headers(header_keys: List[str]) -> Dict[str, str]:
         env_name = f"{HTTP_EXEC_SECRET_HEADER_PREFIX}{str(key).strip()}"
         val = os.getenv(env_name, "").strip()
         if val:
+            # Deterministic: single Authorization header (last wins if multiple keys)
             out["Authorization"] = val
     return out
+
+def _extract_http_exec_input(inp: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    SAFE compatibility:
+    - accepts url/http_target/target/tool at top-level
+    - also accepts nested shapes:
+        inp["input"]["url"], inp["args"]["url"]
+    This DOES NOT change RunRequest schema; it's only internal parsing.
+    """
+    inp0 = _to_dict(inp)
+    nested_input = _to_dict(inp0.get("input"))
+    nested_args = _to_dict(inp0.get("args"))
+
+    # prefer top-level, then nested
+    url_like = _pick_first(
+        inp0.get("url"),
+        inp0.get("http_target"),
+        inp0.get("target"),
+        inp0.get("tool"),
+        nested_input.get("url"),
+        nested_input.get("http_target"),
+        nested_input.get("target"),
+        nested_input.get("tool"),
+        nested_args.get("url"),
+        nested_args.get("http_target"),
+        nested_args.get("target"),
+        nested_args.get("tool"),
+    )
+
+    method = _pick_first(
+        inp0.get("method"),
+        nested_input.get("method"),
+        nested_args.get("method"),
+    )
+
+    headers = _pick_first(
+        inp0.get("headers"),
+        nested_input.get("headers"),
+        nested_args.get("headers"),
+    )
+    headers = headers if isinstance(headers, dict) else {}
+
+    secret_keys = _pick_first(
+        inp0.get("secret_header_keys"),
+        nested_input.get("secret_header_keys"),
+        nested_args.get("secret_header_keys"),
+    )
+    secret_keys = secret_keys if isinstance(secret_keys, list) else []
+
+    json_body = _pick_first(
+        inp0.get("json"),
+        inp0.get("body"),
+        nested_input.get("json"),
+        nested_input.get("body"),
+        nested_args.get("json"),
+        nested_args.get("body"),
+    )
+
+    raw_data = _pick_first(
+        inp0.get("data"),
+        nested_input.get("data"),
+        nested_args.get("data"),
+    )
+
+    return {
+        "raw_target": str(url_like or "").strip(),
+        "method": str(method or "POST").strip().upper(),
+        "headers": headers,
+        "secret_header_keys": secret_keys,
+        "json_body": json_body,
+        "raw_data": raw_data,
+    }
+
 
 def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     """
     Supports inputs:
       - url OR http_target OR target OR tool
+      - also supports nested shapes: input.input.*, input.args.* (safe fallback)
       - alias resolution via HTTP_EXEC_TARGETS_JSON
     Payload supported:
       - headers (dict)
       - body (any JSON-serializable) OR json (alias of body)
-      - data (raw string) optional (mutually exclusive with body/json)
+      - data (raw string/bytes) optional (mutually exclusive with body/json)
       - secret_header_keys (list) -> Authorization from ENV (no secrets in Airtable)
       - method (GET/POST/PUT/PATCH/DELETE)
     """
     inp = req.input or {}
+    extracted = _extract_http_exec_input(inp)
 
-    # 1) pick target field (url/http_target/target/tool)
-    raw_target = (
-        str(inp.get("url") or "").strip()
-        or str(inp.get("http_target") or "").strip()
-        or str(inp.get("target") or "").strip()
-        or str(inp.get("tool") or "").strip()
-    )
+    raw_target = extracted["raw_target"]
 
-    # 2) resolve alias -> URL
+    # 1) resolve alias -> URL
     url = _resolve_http_target(raw_target)
     if not url:
         raise HTTPException(
             status_code=400,
-            detail="HTTP_EXEC missing url (provide input.url or input.http_target/target/tool; "
-                   "or set HTTP_EXEC_TARGETS_JSON for alias resolution).",
+            detail=(
+                "HTTP_EXEC missing url (provide input.url or input.http_target/target/tool; "
+                "or set HTTP_EXEC_TARGETS_JSON for alias resolution)."
+            ),
         )
 
     meta = _validate_http_exec_url(url)
 
-    method = str(inp.get("method", "POST")).strip().upper()
+    method = extracted["method"]
     if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
         raise HTTPException(status_code=400, detail=f"HTTP_EXEC invalid method: {method}")
 
-    headers_in = inp.get("headers") or {}
-    if not isinstance(headers_in, dict):
-        raise HTTPException(status_code=400, detail="HTTP_EXEC headers must be an object.")
-
-    secret_keys = inp.get("secret_header_keys") or []
-    if not isinstance(secret_keys, list):
-        raise HTTPException(status_code=400, detail="HTTP_EXEC secret_header_keys must be a list.")
+    headers_in = extracted["headers"]
+    secret_keys = extracted["secret_header_keys"]
 
     secret_headers = _build_secret_headers(secret_keys)
     headers = {**headers_in, **secret_headers}
 
-    # body selection
-    json_body = inp.get("json", None)
-    body = inp.get("body", None)
+    json_body = extracted["json_body"]
+    raw_data = extracted["raw_data"]
 
-    if json_body is None and body is not None:
-        json_body = body  # treat body as json
-
-    raw_data = inp.get("data", None)
     if raw_data is not None and json_body is not None:
         raise HTTPException(status_code=400, detail="HTTP_EXEC use json/body OR data, not both.")
 
@@ -677,6 +815,7 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
             "method": method,
             "url": url,
             "headers": _safe_headers_for_log(headers),
+            "allowlist": HTTP_EXEC_ALLOWLIST,
             "note": "HTTP call skipped (dry_run).",
         }
 
@@ -735,6 +874,7 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
         "response_text": (text_preview[:2000] if text_preview else None),
     }
 
+
 def capability_state_get(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     key = str(req.input.get("key", "")).strip()
     if not key:
@@ -778,6 +918,7 @@ def capability_lock_release(req: RunRequest, run_record_id: str) -> Dict[str, An
     if not key:
         raise HTTPException(status_code=400, detail="lock_release requires input.key")
     return lock_release(key, holder)
+
 
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     """
