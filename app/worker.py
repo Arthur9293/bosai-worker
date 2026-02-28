@@ -8,6 +8,12 @@
 # NEW (No-Chaos): Lock TTL Cleanup for stale Running runs (Status_select='Running' too old)
 # NEW (No-Chaos): State table support for locks and KV (App_Key, Value_JSON, Updated_At, App_Version, Lock_Status)
 # IMPORTANT: No Is_bad (removed entirely)
+#
+# PATCH (No-Chaos, minimal): HTTP_EXEC now supports:
+# - allowlist env alias: HTTP_EXEC_ALLOWLIST OR HTTPEXEC_ALLOWLIST
+# - targets mapping: HTTP_EXEC_TARGETS_JSON OR HTTPEXEC_TARGETS_JSON
+# - url can be either full https://... OR a key resolved via *_TARGETS_JSON
+# Everything else unchanged.
 
 import os
 import json
@@ -76,8 +82,35 @@ STATE_LOCK_ACTIVE = os.getenv("STATE_LOCK_ACTIVE", "Active").strip()
 STATE_LOCK_RELEASED = os.getenv("STATE_LOCK_RELEASED", "Released").strip()
 STATE_LOCK_EXPIRED = os.getenv("STATE_LOCK_EXPIRED", "Expired").strip()
 
+# ----------------------------
+# HTTP_EXEC (No-Chaos patch)
+# ----------------------------
+
+def _env_csv(*names: str) -> List[str]:
+    for n in names:
+        v = os.getenv(n, "").strip()
+        if v:
+            return [s.strip() for s in v.split(",") if s.strip()]
+    return []
+
+def _env_json_dict(*names: str) -> Dict[str, Any]:
+    for n in names:
+        raw = os.getenv(n, "").strip()
+        if not raw:
+            continue
+        try:
+            obj = json.loads(raw)
+            return obj if isinstance(obj, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
 # HTTP_EXEC allowlist (prefix match). Empty => disabled.
-HTTP_EXEC_ALLOWLIST = [s.strip() for s in os.getenv("HTTP_EXEC_ALLOWLIST", "").split(",") if s.strip()]
+# Accept alias to avoid chaos with existing Render env.
+HTTP_EXEC_ALLOWLIST = _env_csv("HTTP_EXEC_ALLOWLIST", "HTTPEXEC_ALLOWLIST")
+
+# Optional: map short keys -> real URLs (e.g. "make_webhook_test" -> "https://hook.eu1.make.com/xxx")
+HTTP_EXEC_TARGETS = _env_json_dict("HTTP_EXEC_TARGETS_JSON", "HTTPEXEC_TARGETS_JSON")
 
 
 # ============================================================
@@ -488,24 +521,43 @@ def capability_sla_machine(req: RunRequest, run_record_id: str) -> Dict[str, Any
         "errors": errors[:10],
     }
 
+# ----------------------------
+# HTTP_EXEC (patched)
+# ----------------------------
+
+def _resolve_http_exec_url(maybe_key_or_url: str) -> str:
+    s = (maybe_key_or_url or "").strip()
+    if not s:
+        return ""
+    # If it's a key (no http/https), resolve using targets map
+    if not s.lower().startswith("http"):
+        mapped = HTTP_EXEC_TARGETS.get(s)
+        if isinstance(mapped, str) and mapped.strip():
+            return mapped.strip()
+    return s
+
 def _is_url_allowed(url: str) -> bool:
     if not HTTP_EXEC_ALLOWLIST:
         return False
     return any(url.startswith(prefix) for prefix in HTTP_EXEC_ALLOWLIST)
 
 def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    url = str(req.input.get("url", "")).strip()
+    raw_url = str(req.input.get("url", "")).strip()
+    url = _resolve_http_exec_url(raw_url)
+
     method = str(req.input.get("method", "GET")).strip().upper()
     headers = req.input.get("headers") or {}
     body = req.input.get("body")
 
-    if not url or not _is_url_allowed(url):
-        raise HTTPException(status_code=400, detail="HTTP_EXEC url not allowed (check HTTP_EXEC_ALLOWLIST).")
+    if not url:
+        raise HTTPException(status_code=400, detail="HTTP_EXEC missing url.")
+    if not _is_url_allowed(url):
+        raise HTTPException(status_code=400, detail="HTTP_EXEC url not allowed (check HTTP_EXEC_ALLOWLIST / HTTP_EXEC_TARGETS_JSON).")
     if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
         raise HTTPException(status_code=400, detail="HTTP_EXEC invalid method.")
 
     r = requests.request(method, url, headers=headers, json=body, timeout=HTTP_TIMEOUT_SECONDS)
-    return {"ok": True, "status_code": r.status_code, "text": r.text[:2000]}
+    return {"ok": True, "status_code": r.status_code, "text": r.text[:2000], "resolved_url": url}
 
 def capability_state_get(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     key = str(req.input.get("key", "")).strip()
@@ -733,6 +785,8 @@ def health_score() -> Dict[str, Any]:
         issues.append("signature_enforced")
     if not HTTP_EXEC_ALLOWLIST:
         issues.append("http_exec_disabled")
+    if HTTP_EXEC_TARGETS and not isinstance(HTTP_EXEC_TARGETS, dict):
+        issues.append("http_exec_targets_invalid")
     return {"ok": True, "score": max(0, score), "issues": issues, "ts": utc_now_iso()}
 
 @app.post("/run", response_model=RunResponse)
