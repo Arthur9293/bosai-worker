@@ -1,9 +1,10 @@
-# app/worker.py — BOSAI Worker (v2.3.4)
-# SAFE from v2.3.3 baseline:
+# app/worker.py — BOSAI Worker (v2.3.5)
+# SAFE from v2.3.4 baseline:
 # - Keeps GET /, HEAD /, /health, /health/score, POST /run behavior
 # - Status_select schema for System_Runs
 # - Idempotency lookup: Idempotency_Key + Status_select only
-# - Commands Orchestrator V1: scans Airtable Commands view, executes capabilities, updates command status safely
+# - Commands Orchestrator V1 unchanged
+# NEW (No-Chaos): Lock TTL Cleanup for stale Running runs (Status_select='Running' too old)
 
 import os
 import json
@@ -36,10 +37,13 @@ COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.3.4").strip()  # bump safe (commands orchestrator V1)
+APP_VERSION = os.getenv("APP_VERSION", "2.3.5").strip()  # bump safe (lock TTL cleanup)
 
 RUN_MAX_SECONDS = float(os.getenv("RUN_MAX_SECONDS", "30").strip() or "30")
 HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "20").strip() or "20")
+
+# No-Chaos: stale "Running" lock TTL cleanup (seconds)
+RUN_LOCK_TTL_SECONDS = int(os.getenv("RUN_LOCK_TTL_SECONDS", "600").strip() or "600")
 
 # Signature HMAC (optionnelle). Si vide => pas de vérif signature.
 RUN_SHARED_SECRET = os.getenv("RUN_SHARED_SECRET", "").strip()
@@ -225,6 +229,60 @@ def verify_signature_or_401(raw_body: bytes, signature_header: Optional[str]) ->
     ours = hmac.new(RUN_SHARED_SECRET.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(their_hex, ours):
         raise HTTPException(status_code=401, detail="Invalid x-run-signature")
+
+
+def cleanup_stale_runs() -> Dict[str, Any]:
+    """
+    No-Chaos Lock TTL Cleanup (SAFE):
+    - Finds System_Runs stuck in Status_select='Running' with Started_At older than TTL
+    - Marks them as Status_select='Error' with Result_JSON={"error":"lock_ttl_expired"}
+    - Never blocks /run; returns noop report on schema/formula issues
+    """
+    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+        return {"ok": True, "noop": True, "reason": "airtable_env_missing"}
+
+    ttl = int(RUN_LOCK_TTL_SECONDS or 600)
+
+    formula = (
+        "AND("
+        "{Status_select}='Running',"
+        f"DATETIME_DIFF(NOW(), {{Started_At}}, 'seconds') > {ttl}"
+        ")"
+    )
+
+    try:
+        r = requests.get(
+            _airtable_url(SYSTEM_RUNS_TABLE_NAME),
+            headers=_airtable_headers(),
+            params={"filterByFormula": formula, "maxRecords": "10"},
+            timeout=HTTP_TIMEOUT_SECONDS,
+        )
+        if r.status_code >= 300:
+            if "INVALID_FILTER_BY_FORMULA" in r.text:
+                return {"ok": True, "noop": True, "reason": "invalid_filter_formula"}
+            return {"ok": False, "error": f"airtable_list_failed:{r.status_code}"}
+
+        records = r.json().get("records", []) or []
+        cleaned = 0
+
+        for rec in records:
+            rid = rec.get("id")
+            if not rid:
+                continue
+            try:
+                airtable_update_fields(SYSTEM_RUNS_TABLE_NAME, rid, {
+                    "Status_select": "Error",
+                    "Finished_At": utc_now_iso(),
+                    "Result_JSON": json.dumps({"error": "lock_ttl_expired"}, ensure_ascii=False),
+                })
+                cleaned += 1
+            except Exception:
+                continue
+
+        return {"ok": True, "ttl_seconds": ttl, "found": len(records), "cleaned": cleaned}
+
+    except Exception as e:
+        return {"ok": True, "noop": True, "reason": "exception", "detail": repr(e)}
 
 
 # ============================================================
@@ -583,6 +641,9 @@ async def run(request: Request) -> RunResponse:
         raise HTTPException(status_code=400, detail="Invalid JSON body.")
 
     req = RunRequest.model_validate(payload)
+
+    # No-Chaos: cleanup stale running locks (must never block /run)
+    cleanup_stale_runs()
 
     if (time.time() - started) > RUN_MAX_SECONDS:
         raise HTTPException(status_code=408, detail="Request timed out before start.")
