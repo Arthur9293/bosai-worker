@@ -255,7 +255,6 @@ def cleanup_stale_runs() -> Dict[str, Any]:
             timeout=HTTP_TIMEOUT_SECONDS,
         )
         if r.status_code >= 300:
-            # If formula invalid, just noop.
             if "INVALID_FILTER_BY_FORMULA" in r.text:
                 return {"ok": True, "noop": True, "reason": "invalid_filter_formula"}
             return {"ok": False, "error": f"airtable_list_failed:{r.status_code}"}
@@ -320,7 +319,6 @@ def fail_system_run(record_id: str, error_message: str) -> None:
     airtable_update(SYSTEM_RUNS_TABLE_NAME, record_id, fields)
 
 def idempotency_lookup(req: RunRequest) -> Optional[Dict[str, Any]]:
-    # SAFE: only depends on Idempotency_Key + Status_select
     formula = (
         f"AND("
         f"{{Idempotency_Key}}='{req.idempotency_key}',"
@@ -330,7 +328,6 @@ def idempotency_lookup(req: RunRequest) -> Optional[Dict[str, Any]]:
     try:
         return airtable_find_first(SYSTEM_RUNS_TABLE_NAME, formula=formula, max_records=1)
     except HTTPException as e:
-        # No-chaos: if formula invalid due to schema mismatch, no replay.
         if "INVALID_FILTER_BY_FORMULA" in str(e.detail):
             return None
         raise
@@ -338,16 +335,15 @@ def idempotency_lookup(req: RunRequest) -> Optional[Dict[str, Any]]:
 
 # ============================================================
 # State table helpers (KV + Locks)
-# Fields (per your captures):
+# Fields:
 # - App_Key (text)
 # - Value_JSON (long text)
 # - Updated_At (date)
 # - App_Version (text)
-# - Lock_Status (single select) recommended: Active/Released/Expired
+# - Lock_Status (single select): Active/Released/Expired
 # ============================================================
 
 def state_get_record(app_key: str) -> Optional[Dict[str, Any]]:
-    # Exact field name: App_Key
     formula = f"{{App_Key}}='{app_key}'"
     return airtable_find_first(STATE_TABLE_NAME, formula=formula, max_records=1)
 
@@ -366,12 +362,6 @@ def state_put(app_key: str, value_obj: Dict[str, Any]) -> Dict[str, Any]:
     return {"ok": True, "mode": "create", "record_id": rid}
 
 def lock_acquire(lock_key: str, holder: str) -> Dict[str, Any]:
-    """
-    Best-effort lock in State table (single-record lock by App_Key).
-    App_Key = f"lock:{lock_key}"
-    Lock_Status = Active/Released/Expired
-    Value_JSON stores holder + acquired_at
-    """
     app_key = f"lock:{lock_key}"
     rec = state_get_record(app_key)
     now = utc_now_iso()
@@ -380,10 +370,8 @@ def lock_acquire(lock_key: str, holder: str) -> Dict[str, Any]:
         fields = rec.get("fields", {}) or {}
         status = str(fields.get("Lock_Status", "")).strip()
         if status == STATE_LOCK_ACTIVE:
-            # already locked
             return {"ok": False, "locked": True, "record_id": rec["id"], "lock_status": status}
 
-        # reuse record
         new_fields = {
             "App_Key": app_key,
             "Lock_Status": STATE_LOCK_ACTIVE,
@@ -413,7 +401,6 @@ def lock_release(lock_key: str, holder: str) -> Dict[str, Any]:
     val = _json_load_maybe(fields.get("Value_JSON"))
     current_holder = str(val.get("holder", "")).strip()
 
-    # No-chaos: allow release if same holder OR empty holder
     if current_holder and current_holder != holder:
         return {"ok": False, "released": False, "reason": "holder_mismatch", "current_holder": current_holder}
 
@@ -474,7 +461,6 @@ def capability_sla_machine(req: RunRequest, run_record_id: str) -> Dict[str, Any
             continue
 
         new_status = _sla_status_for_remaining(remaining)
-
         update_fields: Dict[str, Any] = {}
 
         if "SLA_Status" in LOGS_ERRORS_FIELDS_ALLOWED:
@@ -515,7 +501,6 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
 
     if not url or not _is_url_allowed(url):
         raise HTTPException(status_code=400, detail="HTTP_EXEC url not allowed (check HTTP_EXEC_ALLOWLIST).")
-
     if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
         raise HTTPException(status_code=400, detail="HTTP_EXEC invalid method.")
 
@@ -569,10 +554,6 @@ def capability_lock_release(req: RunRequest, run_record_id: str) -> Dict[str, An
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     """
     Commands Orchestrator V1 (unchanged logic):
-    - Reads Commands from a view (default Queue)
-    - Only executes when Status_select is empty or Queued-like
-    - Writes Status_select: Running -> Done/Error/Unsupported
-    - Uses Idempotency_Key if present else cmd:<record_id>:<capability>
     Expected Commands fields:
       Status_select, Capability, Input_JSON, Result_JSON, Error_Message, Idempotency_Key, Linked_Run
     """
@@ -629,13 +610,9 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                 pass
             continue
 
-        idem = str(fields.get("Idempotency_Key", "")).strip()
-        if not idem:
-            idem = f"cmd:{cid}:{capability}"
-
+        idem = str(fields.get("Idempotency_Key", "")).strip() or f"cmd:{cid}:{capability}"
         cmd_input = _json_load_maybe(fields.get("Input_JSON"))
 
-        # Mark Running (if Airtable refuses => do not execute)
         try:
             airtable_update(COMMANDS_TABLE_NAME, cid, {
                 "Status_select": "Running",
@@ -771,13 +748,11 @@ async def run(request: Request) -> RunResponse:
 
     req = RunRequest.model_validate(payload)
 
-    # No-Chaos: cleanup stale running locks (must never block /run)
     cleanup_stale_runs()
 
     if (time.time() - started) > RUN_MAX_SECONDS:
         raise HTTPException(status_code=408, detail="Request timed out before start.")
 
-    # Idempotency replay
     existing = idempotency_lookup(req)
     if existing:
         fields = existing.get("fields", {}) or {}
@@ -797,7 +772,6 @@ async def run(request: Request) -> RunResponse:
             result={"idempotent_replay": True, "previous": previous_result},
         )
 
-    # Create run in System_Runs
     run_record_id = create_system_run(req)
 
     try:
@@ -835,6 +809,7 @@ async def run(request: Request) -> RunResponse:
     except HTTPException as e:
         fail_system_run(run_record_id, str(e.detail))
         raise
+
     except Exception as e:
         fail_system_run(run_record_id, repr(e))
         raise HTTPException(status_code=500, detail="Internal error.")
