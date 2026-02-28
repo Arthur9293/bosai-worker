@@ -15,6 +15,13 @@
 # - url can be either full https://... OR a key resolved via *_TARGETS_JSON
 # Everything else unchanged.
 
+# app/worker.py — BOSAI Worker (v2.3.6)
+# Patch ciblé:
+# - Fix HTTP_EXEC missing url: support input.url OR input.http_target/target
+# - Support alias -> real URL via ENV HTTP_EXEC_TARGETS
+# - Orchestrator fallback: if Input_JSON empty, try HTTP_Payload_JSON (and common variants)
+# SAFE: ne modifie pas health_tick / sla_machine / state / locks / System_Runs schema
+
 import os
 import json
 import time
@@ -49,7 +56,7 @@ COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.3.5").strip()
+APP_VERSION = os.getenv("APP_VERSION", "2.3.6").strip()
 
 RUN_MAX_SECONDS = float(os.getenv("RUN_MAX_SECONDS", "30").strip() or "30")
 HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "20").strip() or "20")
@@ -82,35 +89,24 @@ STATE_LOCK_ACTIVE = os.getenv("STATE_LOCK_ACTIVE", "Active").strip()
 STATE_LOCK_RELEASED = os.getenv("STATE_LOCK_RELEASED", "Released").strip()
 STATE_LOCK_EXPIRED = os.getenv("STATE_LOCK_EXPIRED", "Expired").strip()
 
-# ----------------------------
-# HTTP_EXEC (No-Chaos patch)
-# ----------------------------
-
-def _env_csv(*names: str) -> List[str]:
-    for n in names:
-        v = os.getenv(n, "").strip()
-        if v:
-            return [s.strip() for s in v.split(",") if s.strip()]
-    return []
-
-def _env_json_dict(*names: str) -> Dict[str, Any]:
-    for n in names:
-        raw = os.getenv(n, "").strip()
-        if not raw:
-            continue
-        try:
-            obj = json.loads(raw)
-            return obj if isinstance(obj, dict) else {}
-        except Exception:
-            return {}
-    return {}
-
 # HTTP_EXEC allowlist (prefix match). Empty => disabled.
-# Accept alias to avoid chaos with existing Render env.
-HTTP_EXEC_ALLOWLIST = _env_csv("HTTP_EXEC_ALLOWLIST", "HTTPEXEC_ALLOWLIST")
+HTTP_EXEC_ALLOWLIST = [s.strip() for s in os.getenv("HTTP_EXEC_ALLOWLIST", "").split(",") if s.strip()]
 
-# Optional: map short keys -> real URLs (e.g. "make_webhook_test" -> "https://hook.eu1.make.com/xxx")
-HTTP_EXEC_TARGETS = _env_json_dict("HTTP_EXEC_TARGETS_JSON", "HTTPEXEC_TARGETS_JSON")
+# PATCH: HTTP_EXEC_TARGETS — mapping alias->URL (CSV "key=https://...,key2=https://...")
+# Example:
+# HTTP_EXEC_TARGETS=make_webhook_test=https://hook.eu1.make.com/xxx,airtable=https://api.airtable.com/v0/...
+HTTP_EXEC_TARGETS_RAW = os.getenv("HTTP_EXEC_TARGETS", "").strip()
+HTTP_EXEC_TARGETS: Dict[str, str] = {}
+if HTTP_EXEC_TARGETS_RAW:
+    for part in HTTP_EXEC_TARGETS_RAW.split(","):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+        if k and v:
+            HTTP_EXEC_TARGETS[k] = v
 
 
 # ============================================================
@@ -368,12 +364,6 @@ def idempotency_lookup(req: RunRequest) -> Optional[Dict[str, Any]]:
 
 # ============================================================
 # State table helpers (KV + Locks)
-# Fields:
-# - App_Key (text)
-# - Value_JSON (long text)
-# - Updated_At (date)
-# - App_Version (text)
-# - Lock_Status (single select): Active/Released/Expired
 # ============================================================
 
 def state_get_record(app_key: str) -> Optional[Dict[str, Any]]:
@@ -521,28 +511,33 @@ def capability_sla_machine(req: RunRequest, run_record_id: str) -> Dict[str, Any
         "errors": errors[:10],
     }
 
-# ----------------------------
-# HTTP_EXEC (patched)
-# ----------------------------
-
-def _resolve_http_exec_url(maybe_key_or_url: str) -> str:
-    s = (maybe_key_or_url or "").strip()
-    if not s:
-        return ""
-    # If it's a key (no http/https), resolve using targets map
-    if not s.lower().startswith("http"):
-        mapped = HTTP_EXEC_TARGETS.get(s)
-        if isinstance(mapped, str) and mapped.strip():
-            return mapped.strip()
-    return s
-
 def _is_url_allowed(url: str) -> bool:
     if not HTTP_EXEC_ALLOWLIST:
         return False
     return any(url.startswith(prefix) for prefix in HTTP_EXEC_ALLOWLIST)
 
+def _resolve_http_exec_url(raw: str) -> str:
+    """
+    PATCH:
+    - if raw starts with http(s) => use it
+    - else treat as alias and resolve from HTTP_EXEC_TARGETS
+    """
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    if s.startswith("http://") or s.startswith("https://"):
+        return s
+    return (HTTP_EXEC_TARGETS.get(s) or "").strip()
+
 def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    raw_url = str(req.input.get("url", "")).strip()
+    """
+    PATCH:
+    Accept url from:
+    - input.url (canonical)
+    - OR input.http_target / input.target (your Airtable column naming)
+    Support alias via HTTP_EXEC_TARGETS.
+    """
+    raw_url = str(req.input.get("url") or req.input.get("http_target") or req.input.get("target") or "").strip()
     url = _resolve_http_exec_url(raw_url)
 
     method = str(req.input.get("method", "GET")).strip().upper()
@@ -550,14 +545,16 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     body = req.input.get("body")
 
     if not url:
-        raise HTTPException(status_code=400, detail="HTTP_EXEC missing url.")
+        # clearer error for your current case
+        raise HTTPException(status_code=400, detail="HTTP_EXEC missing url (provide input.url or input.http_target, or configure HTTP_EXEC_TARGETS for alias).")
+
     if not _is_url_allowed(url):
-        raise HTTPException(status_code=400, detail="HTTP_EXEC url not allowed (check HTTP_EXEC_ALLOWLIST / HTTP_EXEC_TARGETS_JSON).")
+        raise HTTPException(status_code=400, detail="HTTP_EXEC url not allowed (check HTTP_EXEC_ALLOWLIST).")
     if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
         raise HTTPException(status_code=400, detail="HTTP_EXEC invalid method.")
 
     r = requests.request(method, url, headers=headers, json=body, timeout=HTTP_TIMEOUT_SECONDS)
-    return {"ok": True, "status_code": r.status_code, "text": r.text[:2000], "resolved_url": url}
+    return {"ok": True, "status_code": r.status_code, "text": r.text[:2000], "resolved_url": url, "raw_url": raw_url}
 
 def capability_state_get(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     key = str(req.input.get("key", "")).strip()
@@ -605,9 +602,11 @@ def capability_lock_release(req: RunRequest, run_record_id: str) -> Dict[str, An
 
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     """
-    Commands Orchestrator V1 (unchanged logic):
+    Commands Orchestrator V1 (logic inchangée sauf fallback payload):
     Expected Commands fields:
       Status_select, Capability, Input_JSON, Result_JSON, Error_Message, Idempotency_Key, Linked_Run
+    PATCH:
+      If Input_JSON empty, try HTTP_Payload_JSON (and common variants) to avoid "missing url".
     """
     max_cmds = int(req.max_commands or 0) or 5
     view = (req.view or COMMANDS_VIEW_NAME or "Queue").strip()
@@ -622,6 +621,14 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
 
     processed_ids: List[str] = []
     errors: List[str] = []
+
+    payload_fallback_fields = [
+        "HTTP_Payload_JSON",
+        "HTTP_Payload_JS",
+        "HTTP_Payload_JSO",
+        "HTTP_Payload",
+        "Payload_JSON",
+    ]
 
     for c in cmds:
         cid = c.get("id")
@@ -663,7 +670,15 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             continue
 
         idem = str(fields.get("Idempotency_Key", "")).strip() or f"cmd:{cid}:{capability}"
+
+        # PATCH: read payload
         cmd_input = _json_load_maybe(fields.get("Input_JSON"))
+        if not cmd_input:
+            for k in payload_fallback_fields:
+                if k in fields and fields.get(k) not in (None, "", {}):
+                    cmd_input = _json_load_maybe(fields.get(k))
+                    if cmd_input:
+                        break
 
         try:
             airtable_update(COMMANDS_TABLE_NAME, cid, {
@@ -785,8 +800,8 @@ def health_score() -> Dict[str, Any]:
         issues.append("signature_enforced")
     if not HTTP_EXEC_ALLOWLIST:
         issues.append("http_exec_disabled")
-    if HTTP_EXEC_TARGETS and not isinstance(HTTP_EXEC_TARGETS, dict):
-        issues.append("http_exec_targets_invalid")
+    if HTTP_EXEC_TARGETS:
+        issues.append("http_exec_targets_enabled")
     return {"ok": True, "score": max(0, score), "issues": issues, "ts": utc_now_iso()}
 
 @app.post("/run", response_model=RunResponse)
