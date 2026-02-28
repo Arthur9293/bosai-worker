@@ -773,9 +773,15 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
       - method (GET/POST/PUT/PATCH/DELETE)
     """
     inp = req.input or {}
-    extracted = _extract_http_exec_input(inp)
 
-    raw_target = extracted["raw_target"]
+    # SAFE: tolerate nested payload shape: {"input": {"input": {...}}}
+    # This does NOT break the normal shape {"input": {...}}.
+    if isinstance(inp.get("input"), dict) and inp.get("input"):
+        nested = inp.get("input")
+        if any(k in nested for k in ("url", "http_target", "target", "tool", "method", "headers", "json", "body", "data", "secret_header_keys")):
+            inp = nested
+
+    extracted = _extract_http_exec_input(inp)
 
     # 1) resolve alias -> URL
     url = _resolve_http_target(raw_target)
@@ -1182,3 +1188,4 @@ async def run(request: Request) -> RunResponse:
     except Exception as e:
         fail_system_run(run_record_id, repr(e))
         raise HTTPException(status_code=500, detail="Internal error.")
+(.venv) kellynjoseph@MacBook-Air-darthur bosai-worker % ;2 
