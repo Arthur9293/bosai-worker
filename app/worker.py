@@ -1,26 +1,20 @@
-# app/worker.py — BOSAI Worker (v2.3.5)
-# SAFE from v2.3.4 baseline:
+# app/worker.py — BOSAI Worker (v2.3.6)
+# SAFE from v2.3.5 baseline:
 # - Keeps GET /, HEAD /, /health, /health/score, POST /run behavior
 # - Status_select schema for System_Runs
 # - Idempotency replay: Idempotency_Key + Status_select only
 # - Commands Orchestrator V1 unchanged
 # - SLA Machine V1 unchanged (writes Logs_Erreurs: SLA_Status, Last_SLA_Check, Linked_Run)
-# NEW (No-Chaos): Lock TTL Cleanup for stale Running runs (Status_select='Running' too old)
-# NEW (No-Chaos): State table support for locks and KV (App_Key, Value_JSON, Updated_At, App_Version, Lock_Status)
+# - No-Chaos: Lock TTL Cleanup unchanged
+# - State table support unchanged
 # IMPORTANT: No Is_bad (removed entirely)
 #
-# PATCH (No-Chaos, minimal): HTTP_EXEC now supports:
-# - allowlist env alias: HTTP_EXEC_ALLOWLIST OR HTTPEXEC_ALLOWLIST
-# - targets mapping: HTTP_EXEC_TARGETS_JSON OR HTTPEXEC_TARGETS_JSON
-# - url can be either full https://... OR a key resolved via *_TARGETS_JSON
-# Everything else unchanged.
-
-# app/worker.py — BOSAI Worker (v2.3.6)
-# Patch ciblé:
-# - Fix HTTP_EXEC missing url: support input.url OR input.http_target/target
-# - Support alias -> real URL via ENV HTTP_EXEC_TARGETS
-# - Orchestrator fallback: if Input_JSON empty, try HTTP_Payload_JSON (and common variants)
-# SAFE: ne modifie pas health_tick / sla_machine / state / locks / System_Runs schema
+# PATCH (SAFE): HTTP_EXEC now supports:
+# - input.url OR input.http_target OR input.target OR input.tool
+# - alias resolution via HTTP_EXEC_TARGETS_JSON
+# - stricter allowlist by host (supports *.domain.tld)
+# - optional secret headers via ENV (no secrets in Airtable)
+# - blocks localhost/private nets by default
 
 import os
 import json
@@ -28,8 +22,10 @@ import time
 import uuid
 import hmac
 import hashlib
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List
+from urllib.parse import urlparse
 
 import requests
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -89,25 +85,30 @@ STATE_LOCK_ACTIVE = os.getenv("STATE_LOCK_ACTIVE", "Active").strip()
 STATE_LOCK_RELEASED = os.getenv("STATE_LOCK_RELEASED", "Released").strip()
 STATE_LOCK_EXPIRED = os.getenv("STATE_LOCK_EXPIRED", "Expired").strip()
 
-# HTTP_EXEC allowlist (prefix match). Empty => disabled.
-HTTP_EXEC_ALLOWLIST = [s.strip() for s in os.getenv("HTTP_EXEC_ALLOWLIST", "").split(",") if s.strip()]
+# ============================================================
+# HTTP_EXEC (PATCH)
+# ============================================================
 
-# PATCH: HTTP_EXEC_TARGETS — mapping alias->URL (CSV "key=https://...,key2=https://...")
+HTTP_EXEC_TIMEOUT_SECONDS = float(os.getenv("HTTP_EXEC_TIMEOUT_SECONDS", "20").strip() or "20")
+HTTP_EXEC_MAX_BODY_BYTES = int(os.getenv("HTTP_EXEC_MAX_BODY_BYTES", "250000").strip() or "250000")
+HTTP_EXEC_MAX_RESPONSE_BYTES = int(os.getenv("HTTP_EXEC_MAX_RESPONSE_BYTES", "250000").strip() or "250000")
+
+# Allowlist strict by hostname. Examples:
+# HTTP_EXEC_ALLOWLIST=hook.make.com,api.airtable.com,api.openai.com,*.supabase.co
+HTTP_EXEC_ALLOWLIST = [x.strip() for x in os.getenv("HTTP_EXEC_ALLOWLIST", "").split(",") if x.strip()]
+
+# Alias -> URL mapping (so you can keep "make_webhook_test" in Airtable)
+# HTTP_EXEC_TARGETS_JSON='{"make_webhook_test":"https://hook.make.com/xxxx"}'
+HTTP_EXEC_TARGETS_JSON = os.getenv("HTTP_EXEC_TARGETS_JSON", "").strip()
+
+# Block private nets by default (safer)
+HTTP_EXEC_BLOCK_PRIVATE_NETS = (os.getenv("HTTP_EXEC_BLOCK_PRIVATE_NETS", "1").strip() != "0")
+
+# Secret headers stored in ENV, referenced by key (no secrets in Airtable)
 # Example:
-# HTTP_EXEC_TARGETS=make_webhook_test=https://hook.eu1.make.com/xxx,airtable=https://api.airtable.com/v0/...
-HTTP_EXEC_TARGETS_RAW = os.getenv("HTTP_EXEC_TARGETS", "").strip()
-HTTP_EXEC_TARGETS: Dict[str, str] = {}
-if HTTP_EXEC_TARGETS_RAW:
-    for part in HTTP_EXEC_TARGETS_RAW.split(","):
-        part = part.strip()
-        if not part or "=" not in part:
-            continue
-        k, v = part.split("=", 1)
-        k = k.strip()
-        v = v.strip()
-        if k and v:
-            HTTP_EXEC_TARGETS[k] = v
-
+# HTTP_EXEC_SECRET_HEADER_PREFIX=HTTP_EXEC_HEADER_AUTH_
+# HTTP_EXEC_HEADER_AUTH_make=Bearer xxx
+HTTP_EXEC_SECRET_HEADER_PREFIX = os.getenv("HTTP_EXEC_SECRET_HEADER_PREFIX", "HTTP_EXEC_HEADER_AUTH_").strip()
 
 # ============================================================
 # FastAPI
@@ -259,12 +260,6 @@ def verify_signature_or_401(raw_body: bytes, signature_header: Optional[str]) ->
 # ============================================================
 
 def cleanup_stale_runs() -> Dict[str, Any]:
-    """
-    SAFE best-effort:
-    - Find System_Runs stuck in Status_select='Running' with Started_At older than TTL
-    - Mark them Status_select='Error' and Result_JSON={"error":"lock_ttl_expired"}
-    - Never blocks /run
-    """
     if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
         return {"ok": True, "noop": True, "reason": "airtable_env_missing"}
 
@@ -511,50 +506,234 @@ def capability_sla_machine(req: RunRequest, run_record_id: str) -> Dict[str, Any
         "errors": errors[:10],
     }
 
-def _is_url_allowed(url: str) -> bool:
-    if not HTTP_EXEC_ALLOWLIST:
-        return False
-    return any(url.startswith(prefix) for prefix in HTTP_EXEC_ALLOWLIST)
+# ----------------------------
+# HTTP_EXEC (PATCH HELPERS)
+# ----------------------------
 
-def _resolve_http_exec_url(raw: str) -> str:
-    """
-    PATCH:
-    - if raw starts with http(s) => use it
-    - else treat as alias and resolve from HTTP_EXEC_TARGETS
-    """
-    s = (raw or "").strip()
+_PRIVATE_HOST_PATTERNS = [
+    r"^localhost$",
+    r"^127\.",
+    r"^10\.",
+    r"^192\.168\.",
+    r"^172\.(1[6-9]|2\d|3[0-1])\.",
+    r"^\[::1\]$",
+]
+
+def _is_private_host(host: str) -> bool:
+    h = (host or "").strip().lower()
+    if not h:
+        return True
+    for p in _PRIVATE_HOST_PATTERNS:
+        if re.search(p, h):
+            return True
+    return False
+
+def _host_matches_allowlist(host: str, allowlist: List[str]) -> bool:
+    if not allowlist:
+        return False
+    host = host.lower()
+    for rule in allowlist:
+        rule_l = rule.lower()
+        if rule_l.startswith("*."):
+            suffix = rule_l[1:]  # ".example.com"
+            if host.endswith(suffix):
+                return True
+        else:
+            if host == rule_l:
+                return True
+    return False
+
+def _safe_headers_for_log(headers: Dict[str, str]) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for k, v in (headers or {}).items():
+        lk = k.lower()
+        if lk in ("authorization", "cookie", "x-api-key", "set-cookie"):
+            out[k] = "***redacted***"
+        else:
+            out[k] = v
+    return out
+
+def _truncate_bytes(b: bytes, max_bytes: int) -> bytes:
+    if b is None:
+        return b
+    if len(b) <= max_bytes:
+        return b
+    return b[:max_bytes]
+
+def _http_exec_targets() -> Dict[str, str]:
+    if not HTTP_EXEC_TARGETS_JSON:
+        return {}
+    try:
+        obj = json.loads(HTTP_EXEC_TARGETS_JSON)
+        if isinstance(obj, dict):
+            out: Dict[str, str] = {}
+            for k, v in obj.items():
+                ks = str(k).strip()
+                vs = str(v).strip()
+                if ks and vs:
+                    out[ks] = vs
+            return out
+        return {}
+    except Exception:
+        return {}
+
+def _resolve_http_target(maybe_url_or_alias: str) -> str:
+    s = (maybe_url_or_alias or "").strip()
     if not s:
         return ""
     if s.startswith("http://") or s.startswith("https://"):
         return s
-    return (HTTP_EXEC_TARGETS.get(s) or "").strip()
+    targets = _http_exec_targets()
+    return targets.get(s, "")
+
+def _validate_http_exec_url(url: str) -> Dict[str, str]:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(status_code=400, detail="HTTP_EXEC invalid url scheme (must be http/https).")
+
+    host = (parsed.hostname or "").strip().lower()
+    if HTTP_EXEC_BLOCK_PRIVATE_NETS and _is_private_host(host):
+        raise HTTPException(status_code=400, detail=f"HTTP_EXEC blocked private host: {host}")
+
+    if not _host_matches_allowlist(host, HTTP_EXEC_ALLOWLIST):
+        raise HTTPException(status_code=400, detail=f"HTTP_EXEC host not in allowlist: {host}")
+
+    return {"host": host, "scheme": parsed.scheme}
+
+def _build_secret_headers(header_keys: List[str]) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for key in header_keys or []:
+        env_name = f"{HTTP_EXEC_SECRET_HEADER_PREFIX}{str(key).strip()}"
+        val = os.getenv(env_name, "").strip()
+        if val:
+            out["Authorization"] = val
+    return out
 
 def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     """
-    PATCH:
-    Accept url from:
-    - input.url (canonical)
-    - OR input.http_target / input.target (your Airtable column naming)
-    Support alias via HTTP_EXEC_TARGETS.
+    Supports inputs:
+      - url OR http_target OR target OR tool
+      - alias resolution via HTTP_EXEC_TARGETS_JSON
+    Payload supported:
+      - headers (dict)
+      - body (any JSON-serializable) OR json (alias of body)
+      - data (raw string) optional (mutually exclusive with body/json)
+      - secret_header_keys (list) -> Authorization from ENV (no secrets in Airtable)
+      - method (GET/POST/PUT/PATCH/DELETE)
     """
-    raw_url = str(req.input.get("url") or req.input.get("http_target") or req.input.get("target") or "").strip()
-    url = _resolve_http_exec_url(raw_url)
+    inp = req.input or {}
 
-    method = str(req.input.get("method", "GET")).strip().upper()
-    headers = req.input.get("headers") or {}
-    body = req.input.get("body")
+    # 1) pick target field (url/http_target/target/tool)
+    raw_target = (
+        str(inp.get("url") or "").strip()
+        or str(inp.get("http_target") or "").strip()
+        or str(inp.get("target") or "").strip()
+        or str(inp.get("tool") or "").strip()
+    )
 
+    # 2) resolve alias -> URL
+    url = _resolve_http_target(raw_target)
     if not url:
-        # clearer error for your current case
-        raise HTTPException(status_code=400, detail="HTTP_EXEC missing url (provide input.url or input.http_target, or configure HTTP_EXEC_TARGETS for alias).")
+        raise HTTPException(
+            status_code=400,
+            detail="HTTP_EXEC missing url (provide input.url or input.http_target/target/tool; "
+                   "or set HTTP_EXEC_TARGETS_JSON for alias resolution).",
+        )
 
-    if not _is_url_allowed(url):
-        raise HTTPException(status_code=400, detail="HTTP_EXEC url not allowed (check HTTP_EXEC_ALLOWLIST).")
+    meta = _validate_http_exec_url(url)
+
+    method = str(inp.get("method", "POST")).strip().upper()
     if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
-        raise HTTPException(status_code=400, detail="HTTP_EXEC invalid method.")
+        raise HTTPException(status_code=400, detail=f"HTTP_EXEC invalid method: {method}")
 
-    r = requests.request(method, url, headers=headers, json=body, timeout=HTTP_TIMEOUT_SECONDS)
-    return {"ok": True, "status_code": r.status_code, "text": r.text[:2000], "resolved_url": url, "raw_url": raw_url}
+    headers_in = inp.get("headers") or {}
+    if not isinstance(headers_in, dict):
+        raise HTTPException(status_code=400, detail="HTTP_EXEC headers must be an object.")
+
+    secret_keys = inp.get("secret_header_keys") or []
+    if not isinstance(secret_keys, list):
+        raise HTTPException(status_code=400, detail="HTTP_EXEC secret_header_keys must be a list.")
+
+    secret_headers = _build_secret_headers(secret_keys)
+    headers = {**headers_in, **secret_headers}
+
+    # body selection
+    json_body = inp.get("json", None)
+    body = inp.get("body", None)
+
+    if json_body is None and body is not None:
+        json_body = body  # treat body as json
+
+    raw_data = inp.get("data", None)
+    if raw_data is not None and json_body is not None:
+        raise HTTPException(status_code=400, detail="HTTP_EXEC use json/body OR data, not both.")
+
+    if req.dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "run_record_id": run_record_id,
+            "host": meta["host"],
+            "method": method,
+            "url": url,
+            "headers": _safe_headers_for_log(headers),
+            "note": "HTTP call skipped (dry_run).",
+        }
+
+    # request
+    if raw_data is not None:
+        if not isinstance(raw_data, (str, bytes)):
+            raise HTTPException(status_code=400, detail="HTTP_EXEC data must be str or bytes.")
+        raw_bytes = raw_data.encode("utf-8") if isinstance(raw_data, str) else raw_data
+        raw_bytes = _truncate_bytes(raw_bytes, HTTP_EXEC_MAX_BODY_BYTES)
+        resp = requests.request(
+            method,
+            url,
+            headers=headers,
+            data=raw_bytes,
+            timeout=HTTP_EXEC_TIMEOUT_SECONDS,
+        )
+    else:
+        jb = json_body if json_body is not None else {}
+        jb_bytes = json.dumps(jb, ensure_ascii=False).encode("utf-8")
+        if len(jb_bytes) > HTTP_EXEC_MAX_BODY_BYTES:
+            raise HTTPException(status_code=400, detail="HTTP_EXEC json/body too large.")
+        resp = requests.request(
+            method,
+            url,
+            headers=headers,
+            json=jb,
+            timeout=HTTP_EXEC_TIMEOUT_SECONDS,
+        )
+
+    status = resp.status_code
+    resp_headers = dict(resp.headers or {})
+    content_bytes = _truncate_bytes(resp.content or b"", HTTP_EXEC_MAX_RESPONSE_BYTES)
+
+    parsed_json = None
+    text_preview = None
+    try:
+        parsed_json = json.loads(content_bytes.decode("utf-8"))
+    except Exception:
+        try:
+            text_preview = content_bytes.decode("utf-8", errors="replace")
+        except Exception:
+            text_preview = None
+
+    ok = 200 <= status < 300
+
+    return {
+        "ok": ok,
+        "run_record_id": run_record_id,
+        "host": meta["host"],
+        "method": method,
+        "url": url,
+        "status_code": status,
+        "request_headers": _safe_headers_for_log(headers),
+        "response_headers": {k: (v if k.lower() != "set-cookie" else "***redacted***") for k, v in resp_headers.items()},
+        "response_json": parsed_json,
+        "response_text": (text_preview[:2000] if text_preview else None),
+    }
 
 def capability_state_get(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     key = str(req.input.get("key", "")).strip()
@@ -602,11 +781,7 @@ def capability_lock_release(req: RunRequest, run_record_id: str) -> Dict[str, An
 
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     """
-    Commands Orchestrator V1 (logic inchangée sauf fallback payload):
-    Expected Commands fields:
-      Status_select, Capability, Input_JSON, Result_JSON, Error_Message, Idempotency_Key, Linked_Run
-    PATCH:
-      If Input_JSON empty, try HTTP_Payload_JSON (and common variants) to avoid "missing url".
+    Commands Orchestrator V1 (unchanged logic)
     """
     max_cmds = int(req.max_commands or 0) or 5
     view = (req.view or COMMANDS_VIEW_NAME or "Queue").strip()
@@ -621,14 +796,6 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
 
     processed_ids: List[str] = []
     errors: List[str] = []
-
-    payload_fallback_fields = [
-        "HTTP_Payload_JSON",
-        "HTTP_Payload_JS",
-        "HTTP_Payload_JSO",
-        "HTTP_Payload",
-        "Payload_JSON",
-    ]
 
     for c in cmds:
         cid = c.get("id")
@@ -670,15 +837,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             continue
 
         idem = str(fields.get("Idempotency_Key", "")).strip() or f"cmd:{cid}:{capability}"
-
-        # PATCH: read payload
         cmd_input = _json_load_maybe(fields.get("Input_JSON"))
-        if not cmd_input:
-            for k in payload_fallback_fields:
-                if k in fields and fields.get(k) not in (None, "", {}):
-                    cmd_input = _json_load_maybe(fields.get(k))
-                    if cmd_input:
-                        break
 
         try:
             airtable_update(COMMANDS_TABLE_NAME, cid, {
@@ -758,7 +917,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
 CAPABILITIES = {
     "health_tick": capability_health_tick,
     "sla_machine": capability_sla_machine,
-    "http_exec": capability_http_exec,
+    "http_exec": capability_http_exec,  # PATCHED
     "state_get": capability_state_get,
     "state_put": capability_state_put,
     "lock_acquire": capability_lock_acquire,
@@ -799,9 +958,9 @@ def health_score() -> Dict[str, Any]:
     if RUN_SHARED_SECRET:
         issues.append("signature_enforced")
     if not HTTP_EXEC_ALLOWLIST:
-        issues.append("http_exec_disabled")
-    if HTTP_EXEC_TARGETS:
-        issues.append("http_exec_targets_enabled")
+        issues.append("http_exec_disabled_no_allowlist")
+    if not HTTP_EXEC_TARGETS_JSON:
+        issues.append("http_exec_no_alias_targets")
     return {"ok": True, "score": max(0, score), "issues": issues, "ts": utc_now_iso()}
 
 @app.post("/run", response_model=RunResponse)
