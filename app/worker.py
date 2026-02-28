@@ -2,9 +2,14 @@
 # SAFE from v2.3.4 baseline:
 # - Keeps GET /, HEAD /, /health, /health/score, POST /run behavior
 # - Status_select schema for System_Runs
-# - Idempotency lookup: Idempotency_Key + Status_select only
+# - Idempotency lookup: Idempotency_Key + Status_select only (Done/Error)
 # - Commands Orchestrator V1 unchanged
-# NEW (No-Chaos): Lock TTL Cleanup for stale Running runs (Status_select='Running' too old)
+# - SLA Machine unchanged
+#
+# NEW in v2.3.5 (No-Chaos Lock TTL v1):
+# - Adds a simple lock on System_Runs to avoid concurrent duplicates
+# - Uses fields: Lock_Status, Lock_Expires_At, Lock_Key, Lock_Owner, Locked_At, Lock_TTL_Seconds (optional)
+# - Lock is released at end (Done/Error) and expired opportunistically
 
 import os
 import json
@@ -12,7 +17,7 @@ import time
 import uuid
 import hmac
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, List
 
 import requests
@@ -37,16 +42,16 @@ COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.3.5").strip()  # bump safe (lock TTL cleanup)
+APP_VERSION = os.getenv("APP_VERSION", "2.3.5").strip()  # bump safe (Lock TTL v1)
 
 RUN_MAX_SECONDS = float(os.getenv("RUN_MAX_SECONDS", "30").strip() or "30")
 HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "20").strip() or "20")
 
-# No-Chaos: stale "Running" lock TTL cleanup (seconds)
-RUN_LOCK_TTL_SECONDS = int(os.getenv("RUN_LOCK_TTL_SECONDS", "600").strip() or "600")
-
 # Signature HMAC (optionnelle). Si vide => pas de vérif signature.
 RUN_SHARED_SECRET = os.getenv("RUN_SHARED_SECRET", "").strip()
+
+# No-Chaos Lock TTL (seconds)
+LOCK_TTL_SECONDS = int(os.getenv("LOCK_TTL_SECONDS", "120").strip() or "120")
 
 # SLA thresholds (minutes)
 SLA_WARNING_THRESHOLD_MIN = float(os.getenv("SLA_WARNING_THRESHOLD_MIN", "60").strip() or "60")
@@ -131,8 +136,14 @@ class RunResponse(BaseModel):
 # Utilities
 # ============================================================
 
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return utc_now().isoformat()
+
+def utc_plus_seconds_iso(seconds: int) -> str:
+    return (utc_now() + timedelta(seconds=max(1, int(seconds)))).isoformat()
 
 def _require_airtable() -> None:
     if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
@@ -231,65 +242,15 @@ def verify_signature_or_401(raw_body: bytes, signature_header: Optional[str]) ->
         raise HTTPException(status_code=401, detail="Invalid x-run-signature")
 
 
-def cleanup_stale_runs() -> Dict[str, Any]:
-    """
-    No-Chaos Lock TTL Cleanup (SAFE):
-    - Finds System_Runs stuck in Status_select='Running' with Started_At older than TTL
-    - Marks them as Status_select='Error' with Result_JSON={"error":"lock_ttl_expired"}
-    - Never blocks /run; returns noop report on schema/formula issues
-    """
-    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
-        return {"ok": True, "noop": True, "reason": "airtable_env_missing"}
-
-    ttl = int(RUN_LOCK_TTL_SECONDS or 600)
-
-    formula = (
-        "AND("
-        "{Status_select}='Running',"
-        f"DATETIME_DIFF(NOW(), {{Started_At}}, 'seconds') > {ttl}"
-        ")"
-    )
-
-    try:
-        r = requests.get(
-            _airtable_url(SYSTEM_RUNS_TABLE_NAME),
-            headers=_airtable_headers(),
-            params={"filterByFormula": formula, "maxRecords": "10"},
-            timeout=HTTP_TIMEOUT_SECONDS,
-        )
-        if r.status_code >= 300:
-            if "INVALID_FILTER_BY_FORMULA" in r.text:
-                return {"ok": True, "noop": True, "reason": "invalid_filter_formula"}
-            return {"ok": False, "error": f"airtable_list_failed:{r.status_code}"}
-
-        records = r.json().get("records", []) or []
-        cleaned = 0
-
-        for rec in records:
-            rid = rec.get("id")
-            if not rid:
-                continue
-            try:
-                airtable_update_fields(SYSTEM_RUNS_TABLE_NAME, rid, {
-                    "Status_select": "Error",
-                    "Finished_At": utc_now_iso(),
-                    "Result_JSON": json.dumps({"error": "lock_ttl_expired"}, ensure_ascii=False),
-                })
-                cleaned += 1
-            except Exception:
-                continue
-
-        return {"ok": True, "ttl_seconds": ttl, "found": len(records), "cleaned": cleaned}
-
-    except Exception as e:
-        return {"ok": True, "noop": True, "reason": "exception", "detail": repr(e)}
-
-
 # ============================================================
 # System_Runs helpers (Status_select schema)
 # ============================================================
 
 def create_system_run(req: RunRequest) -> str:
+    # Lock v1: record-level lock stored in System_Runs
+    lock_key = req.idempotency_key
+    ttl = max(1, int(LOCK_TTL_SECONDS))
+
     fields = {
         "Run_ID": str(uuid.uuid4()),
         "Worker": req.worker,
@@ -302,14 +263,29 @@ def create_system_run(req: RunRequest) -> str:
         "Input_JSON": json.dumps(req.input, ensure_ascii=False),
         "App_Name": APP_NAME,
         "App_Version": APP_VERSION,
+
+        # ---- Lock v1 fields (must exist in Airtable for full No-Chaos) ----
+        "Lock_Status": "Active",
+        "Lock_Key": lock_key,
+        "Lock_Owner": req.worker,
+        "Locked_At": utc_now_iso(),
+        "Lock_Expires_At": utc_plus_seconds_iso(ttl),
+        "Lock_TTL_Seconds": ttl,
     }
     return airtable_create(SYSTEM_RUNS_TABLE_NAME, fields)
+
+def _release_lock_fields() -> Dict[str, Any]:
+    return {
+        "Lock_Status": "Released",
+        "Lock_Expires_At": utc_now_iso(),
+    }
 
 def finish_system_run(record_id: str, status: str, result_obj: Dict[str, Any]) -> None:
     fields = {
         "Status_select": status,
         "Finished_At": utc_now_iso(),
         "Result_JSON": json.dumps(result_obj, ensure_ascii=False),
+        **_release_lock_fields(),
     }
     airtable_update(SYSTEM_RUNS_TABLE_NAME, record_id, fields)
 
@@ -321,6 +297,7 @@ def fail_system_run(record_id: str, error_message: str, meta: Optional[Dict[str,
         "Status_select": "Error",
         "Finished_At": utc_now_iso(),
         "Result_JSON": json.dumps(payload, ensure_ascii=False),
+        **_release_lock_fields(),
     }
     airtable_update(SYSTEM_RUNS_TABLE_NAME, record_id, fields)
 
@@ -340,6 +317,74 @@ def idempotency_lookup(req: RunRequest) -> Optional[Dict[str, Any]]:
         if "INVALID_FILTER_BY_FORMULA" in str(e.detail):
             return None
         raise
+
+
+# ============================================================
+# No-Chaos Lock TTL v1
+# ============================================================
+
+def _lock_lookup_active_not_expired(idem_key: str) -> Optional[Dict[str, Any]]:
+    # Finds an active lock that has NOT expired yet.
+    # Requires fields Lock_Key, Lock_Status, Lock_Expires_At.
+    formula = (
+        f"AND("
+        f"{{Lock_Key}}='{idem_key}',"
+        f"{{Lock_Status}}='Active',"
+        f"IS_AFTER({{Lock_Expires_At}}, NOW())"
+        f")"
+    )
+    try:
+        return airtable_find_first(SYSTEM_RUNS_TABLE_NAME, formula=formula, max_records=1)
+    except HTTPException as e:
+        if "INVALID_FILTER_BY_FORMULA" in str(e.detail):
+            return None
+        raise
+
+def _lock_lookup_active_expired(idem_key: str) -> Optional[Dict[str, Any]]:
+    # Finds an active lock that IS expired (cleanup opportuniste).
+    formula = (
+        f"AND("
+        f"{{Lock_Key}}='{idem_key}',"
+        f"{{Lock_Status}}='Active',"
+        f"IS_BEFORE({{Lock_Expires_At}}, NOW())"
+        f")"
+    )
+    try:
+        return airtable_find_first(SYSTEM_RUNS_TABLE_NAME, formula=formula, max_records=1)
+    except HTTPException as e:
+        if "INVALID_FILTER_BY_FORMULA" in str(e.detail):
+            return None
+        raise
+
+def _mark_lock_expired(record_id: str) -> None:
+    try:
+        airtable_update_fields(SYSTEM_RUNS_TABLE_NAME, record_id, {
+            "Lock_Status": "Expired",
+            "Lock_Expires_At": utc_now_iso(),
+        })
+    except Exception:
+        # No-chaos: never block a run if cleanup fails
+        pass
+
+def enforce_lock_or_409(req: RunRequest) -> None:
+    # Opportunistic cleanup: if an old Active lock is expired, mark it Expired.
+    expired = _lock_lookup_active_expired(req.idempotency_key)
+    if expired and expired.get("id"):
+        _mark_lock_expired(expired["id"])
+
+    active = _lock_lookup_active_not_expired(req.idempotency_key)
+    if active:
+        rid = active.get("id")
+        fields = active.get("fields", {}) or {}
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "locked",
+                "lock_record_id": rid,
+                "lock_owner": fields.get("Lock_Owner"),
+                "lock_expires_at": fields.get("Lock_Expires_At"),
+            },
+        )
 
 
 # ============================================================
@@ -627,6 +672,9 @@ def health_score() -> Dict[str, Any]:
         issues.append("airtable_env_missing")
     if RUN_SHARED_SECRET:
         issues.append("signature_enforced")
+    if LOCK_TTL_SECONDS <= 0:
+        issues.append("lock_ttl_invalid")
+        score -= 10
     return {"ok": True, "score": max(0, score), "issues": issues, "ts": utc_now_iso()}
 
 @app.post("/run", response_model=RunResponse)
@@ -642,12 +690,10 @@ async def run(request: Request) -> RunResponse:
 
     req = RunRequest.model_validate(payload)
 
-    # No-Chaos: cleanup stale running locks (must never block /run)
-    cleanup_stale_runs()
-
     if (time.time() - started) > RUN_MAX_SECONDS:
         raise HTTPException(status_code=408, detail="Request timed out before start.")
 
+    # 1) Idempotency replay (unchanged): Done/Error -> replay
     existing = idempotency_lookup(req)
     if existing:
         fields = existing.get("fields", {})
@@ -667,6 +713,10 @@ async def run(request: Request) -> RunResponse:
             result={"idempotent_replay": True, "previous": existing_result},
         )
 
+    # 2) No-Chaos lock (new): prevent concurrent double-run for same idempotency_key
+    enforce_lock_or_409(req)
+
+    # 3) Create system run (creates Active lock)
     run_record_id = create_system_run(req)
 
     try:
