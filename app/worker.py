@@ -1,4 +1,4 @@
-# app/worker.py — BOSAI Worker (v2.4.0)
+# app/worker.py — BOSAI Worker (v2.4.1)
 # SAFE from v2.3.9 baseline:
 # - Keeps GET /, HEAD /, /health, /health/score, POST /run behavior
 # - Status_select schema for System_Runs unchanged
@@ -21,6 +21,10 @@
 # IMPORTANT:
 # - No schema changes required to run (Tool_Key optional).
 # - This is conservative: only gates http_exec when Tool_Key is provided.
+#
+# v2.4.1 SAFE fixes:
+# - from_payload(): pop alias keys after mapping (prevents Pydantic forbid extra)
+# - http_exec: if Tool_Key provided and url unresolved, fallback to ToolCatalog.URL
 
 import os
 import json
@@ -58,7 +62,7 @@ COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.4.0").strip()
+APP_VERSION = os.getenv("APP_VERSION", "2.4.1").strip()
 
 RUN_MAX_SECONDS = float((os.getenv("RUN_MAX_SECONDS", "30") or "30").strip())
 HTTP_TIMEOUT_SECONDS = float((os.getenv("HTTP_TIMEOUT_SECONDS", "20") or "20").strip())
@@ -140,15 +144,18 @@ class RunRequest(BaseModel):
 
         p = dict(payload)
 
-        # compat keys
+        # compat keys (SAFE): map + remove aliases to satisfy extra="forbid"
         if "capability" not in p and "capacity" in p:
             p["capability"] = p.get("capacity")
+        p.pop("capacity", None)
 
         if "idempotency_key" not in p and "idempotencyKey" in p:
             p["idempotency_key"] = p.get("idempotencyKey")
+        p.pop("idempotencyKey", None)
 
         if "input" not in p and "inputs" in p:
             p["input"] = p.get("inputs")
+        p.pop("inputs", None)
 
         if "worker" not in p or not str(p.get("worker") or "").strip():
             p["worker"] = WORKER_NAME
@@ -312,7 +319,6 @@ def cleanup_stale_runs() -> Dict[str, Any]:
 
     ttl = int(RUN_LOCK_TTL_SECONDS or 600)
 
-    # SAFE: relies on Started_At existing; if not, we noop.
     formula = (
         "AND("
         "{Status_select}='Running',"
@@ -405,7 +411,6 @@ def fail_system_run(record_id: str, error_message: str) -> None:
 
 
 def idempotency_lookup(req: RunRequest) -> Optional[Dict[str, Any]]:
-    # SAFE: unchanged logic
     formula = (
         f"AND("
         f"{{Idempotency_Key}}='{req.idempotency_key}',"
@@ -516,10 +521,6 @@ _TOOLCATALOG_CACHE: Dict[str, Any] = {"ts": 0.0, "by_key": {}}
 
 
 def _toolcatalog_fetch_map(force: bool = False) -> Dict[str, Dict[str, Any]]:
-    """
-    Returns map: Tool_Key -> ToolCatalog Airtable record dict (id+fields).
-    Cached for TOOLCATALOG_CACHE_SECONDS to reduce Airtable calls during cron.
-    """
     now = time.time()
     ts = float(_TOOLCATALOG_CACHE.get("ts") or 0.0)
     if not force and (now - ts) < float(TOOLCATALOG_CACHE_SECONDS):
@@ -532,7 +533,6 @@ def _toolcatalog_fetch_map(force: bool = False) -> Dict[str, Dict[str, Any]]:
         _TOOLCATALOG_CACHE["by_key"] = {}
         return {}
 
-    # SAFE: no view required; we keep a small max to avoid over-fetch.
     try:
         r = requests.get(
             _airtable_url(TOOLCATALOG_TABLE_NAME),
@@ -572,15 +572,11 @@ def _toolcatalog_get(tool_key: str) -> Optional[Dict[str, Any]]:
     rec = m.get(tool_key)
     if rec:
         return rec
-    # one forced refresh attempt (SAFE)
     m2 = _toolcatalog_fetch_map(force=True)
     return m2.get(tool_key)
 
 
 def _extract_tool_meta(inp: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Reads tool fields from input (supports different naming styles).
-    """
     inp0 = _to_dict(inp)
     nested_input = _to_dict(inp0.get("input"))
     nested_args = _to_dict(inp0.get("args"))
@@ -642,10 +638,6 @@ def _extract_tool_meta(inp: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _toolcatalog_list_field(fields: Dict[str, Any], name: str) -> List[str]:
-    """
-    Airtable multi-select typically returns a list of strings.
-    Fallback: comma-separated string => split.
-    """
     v = fields.get(name)
     if isinstance(v, list):
         return [str(x).strip() for x in v if str(x).strip()]
@@ -658,10 +650,6 @@ def _toolcatalog_list_field(fields: Dict[str, Any], name: str) -> List[str]:
 
 
 def _toolcatalog_enforce_or_raise(req: RunRequest, tool_key: str, tool_mode: str, tool_intent: str, approved: bool) -> Dict[str, Any]:
-    """
-    Validates ToolCatalog constraints.
-    Returns ToolCatalog fields if allowed.
-    """
     rec = _toolcatalog_get(tool_key)
     if not rec:
         raise HTTPException(status_code=400, detail=f"ToolCatalog: unknown Tool_Key: {tool_key}")
@@ -672,7 +660,6 @@ def _toolcatalog_enforce_or_raise(req: RunRequest, tool_key: str, tool_mode: str
     if enabled is not None and not _as_bool(enabled):
         raise HTTPException(status_code=400, detail=f"ToolCatalog: tool disabled: {tool_key}")
 
-    # Allowed_Modes / Allowed_Intents checks (only if provided in input or present in catalog)
     allowed_modes = _toolcatalog_list_field(fields, "Allowed_Modes")
     allowed_intents = _toolcatalog_list_field(fields, "Allowed_Intents")
 
@@ -684,7 +671,6 @@ def _toolcatalog_enforce_or_raise(req: RunRequest, tool_key: str, tool_mode: str
         if allowed_intents and tool_intent not in allowed_intents:
             raise HTTPException(status_code=400, detail=f"ToolCatalog: intent not allowed: {tool_intent} for {tool_key}")
 
-    # Approval gate (SAFE): dry_run always allowed
     requires_approval = fields.get("Requires_Approval")
     if _as_bool(requires_approval) and (not req.dry_run) and (not approved):
         raise HTTPException(status_code=400, detail=f"ToolCatalog: requires approval: {tool_key}")
@@ -693,11 +679,6 @@ def _toolcatalog_enforce_or_raise(req: RunRequest, tool_key: str, tool_mode: str
 
 
 def _toolcatalog_minimal_args_check(fields: Dict[str, Any], args_obj: Dict[str, Any]) -> None:
-    """
-    Minimal enforcement for Args_Schema_JSON:
-    If schema has {"required":[...]} ensure keys exist in args_obj.
-    No full JSON Schema validation (keeps deps minimal + SAFE).
-    """
     schema = _json_load_maybe(fields.get("Args_Schema_JSON"))
     if not schema:
         return
@@ -1091,23 +1072,14 @@ def _extract_http_exec_input(inp: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _toolcatalog_apply_overrides(tool_fields: Dict[str, Any], extracted: Dict[str, Any]) -> Tuple[str, str, Dict[str, str], float]:
-    """
-    If TOOLCATALOG_OVERRIDE_HTTP is enabled, override url/method/headers/timeout when present in ToolCatalog.
-    - URL: from ToolCatalog.URL (preferred) or Base_URL + URL (optional) if you store that style.
-    - Method: from ToolCatalog.Method
-    - Headers: merge ToolCatalog.Headers_JSON then extracted.headers (extracted wins last)
-    - Timeout: ToolCatalog.Timeout_S (float)
-    """
     url_override = str(tool_fields.get("URL", "") or "").strip()
     base_url = str(tool_fields.get("Base_URL", "") or "").strip()
     method_override = str(tool_fields.get("Method", "") or "").strip().upper()
 
-    # Build URL:
     url_final = extracted.get("raw_target", "")
     if url_override:
         url_final = url_override
     elif base_url and url_final and not url_final.startswith("http"):
-        # optional pattern: base_url + relative path
         url_final = base_url.rstrip("/") + "/" + url_final.lstrip("/")
 
     method_final = extracted.get("method", "POST")
@@ -1141,7 +1113,6 @@ def _toolcatalog_apply_overrides(tool_fields: Dict[str, Any], extracted: Dict[st
 def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     inp = req.input or {}
 
-    # tolerate nesting: {"input": {...}}
     if isinstance(inp.get("input"), dict) and inp.get("input"):
         nested = inp.get("input")
         if any(
@@ -1171,9 +1142,6 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
 
     extracted = _extract_http_exec_input(inp)
 
-    # ------------------------------------------------------------
-    # ToolCatalog enforcement (SAFE, only if Tool_Key is present)
-    # ------------------------------------------------------------
     tool_meta = _extract_tool_meta(inp)
     tool_key = tool_meta["tool_key"]
     tool_mode = tool_meta["tool_mode"]
@@ -1184,20 +1152,16 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     if TOOLCATALOG_ENFORCE_HTTP_EXEC and tool_key:
         tool_fields = _toolcatalog_enforce_or_raise(req, tool_key, tool_mode, tool_intent, approved)
 
-        # Minimal args required enforcement (SAFE): we check args against json_body if present, else {}.
         args_obj = {}
         if isinstance(extracted.get("json_body"), dict):
             args_obj = extracted.get("json_body")  # type: ignore
         _toolcatalog_minimal_args_check(tool_fields, args_obj)
 
-        # Optional overrides (SAFE)
         if TOOLCATALOG_OVERRIDE_HTTP:
-            # apply tool overrides BEFORE resolving allowlist
             url_final, method_final, headers_final, timeout_s = _toolcatalog_apply_overrides(tool_fields, extracted)
             extracted["raw_target"] = url_final
             extracted["method"] = method_final
             extracted["headers"] = headers_final
-            # override runtime timeout
             local_timeout = timeout_s
         else:
             local_timeout = HTTP_EXEC_TIMEOUT_SECONDS
@@ -1207,6 +1171,11 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     raw_target = extracted["raw_target"]
 
     url = _resolve_http_target(raw_target)
+
+    # SAFE fallback: if Tool_Key provided and still no url, use ToolCatalog.URL
+    if not url and tool_fields:
+        url = str(tool_fields.get("URL", "") or "").strip()
+
     if not url:
         raise HTTPException(
             status_code=400,
@@ -1296,17 +1265,7 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     }
 
 
-# ----------------------------
-# SAFE: command input composition (PATCH v2.3.9 preserved)
-# ----------------------------
-
 def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Prefers a single canonical JSON field if present:
-      Command_JSON > Payload_JSON > Input_JSON
-    Then SAFE fallback from separate columns used in your base:
-      http_target, HTTP_Method, HTTP_Payload_JSON
-    """
     for key in ("Command_JSON", "Payload_JSON", "Input_JSON"):
         obj = _json_load_maybe(fields.get(key))
         if isinstance(obj, dict) and obj:
@@ -1330,7 +1289,6 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(payload_raw, str) and payload_raw.strip():
             built["data"] = payload_raw.strip()
 
-    # NEW (SAFE): if you store ToolCatalog fields in Commands columns, forward them (optional)
     tool_key = str(fields.get("Tool_Key", "") or "").strip()
     if tool_key:
         built["Tool_Key"] = tool_key
@@ -1346,10 +1304,6 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
 
     return built
 
-
-# ----------------------------
-# State + Locks capabilities
-# ----------------------------
 
 def capability_state_get(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     key = str(req.input.get("key", "")).strip()
@@ -1399,12 +1353,7 @@ def capability_lock_release(req: RunRequest, run_record_id: str) -> Dict[str, An
     return lock_release(key, holder)
 
 
-# ----------------------------
-# Commands Orchestrator (SAFE + PATCH preserved)
-# ----------------------------
-
 def _read_command_status(fields: Dict[str, Any]) -> str:
-    # Robust: supports multiple historical field names without changing schema.
     return str(
         fields.get(
             "Status_select",
@@ -1479,8 +1428,6 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             continue
 
         idem = str(fields.get("Idempotency_Key", "")).strip() or f"cmd:{cid}:{capability}"
-
-        # PATCH: compose input from JSON OR from columns (prevents missing url)
         cmd_input = _compose_command_input(fields)
 
         try:
@@ -1589,10 +1536,6 @@ CAPABILITIES = {
 }
 
 
-# ============================================================
-# Routes
-# ============================================================
-
 @app.get("/")
 def root() -> Dict[str, Any]:
     return {"ok": True, "service": APP_NAME, "version": APP_VERSION}
@@ -1639,7 +1582,6 @@ async def run(request: Request) -> RunResponse:
 
     req = RunRequest.from_payload(payload)
 
-    # SAFE: cleanup best-effort; does not block run
     cleanup_stale_runs()
 
     if (time.time() - started) > RUN_MAX_SECONDS:
@@ -1701,3 +1643,7 @@ async def run(request: Request) -> RunResponse:
     except HTTPException as e:
         fail_system_run(run_record_id, str(e.detail))
         raise
+
+    except Exception as e:
+        fail_system_run(run_record_id, repr(e))
+        raise HTTPException(status_code=500, detail="Internal error.")
