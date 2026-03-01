@@ -1,12 +1,9 @@
-
 # app/capabilities/http_exec.py
-
 
 from __future__ import annotations
 
 import json
 import os
-import re
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlparse
@@ -94,10 +91,6 @@ def _sanitize_headers(headers: Optional[Dict[str, Any]]) -> Dict[str, str]:
         if isinstance(v, (str, int, float, bool)):
             out[key] = str(v)
         else:
-<<<<<<< HEAD
-            # on refuse les structures (dict/list) dans les headers
-=======
->>>>>>> 4af5724 (BOSAI Worker: Make API integration + http_exec)
             out[key] = str(v)
     return out
 
@@ -120,10 +113,6 @@ def _coerce_body(body: Any) -> Tuple[Optional[bytes], Optional[str], Optional[Di
         b = str(body).encode("utf-8")
         return b, "text/plain; charset=utf-8", None
 
-<<<<<<< HEAD
-    # fallback
-=======
->>>>>>> 4af5724 (BOSAI Worker: Make API integration + http_exec)
     b = _safe_json(body).encode("utf-8")
     return b, "application/json", None
 
@@ -171,10 +160,6 @@ def run_http_exec(input_data: Dict[str, Any]) -> Dict[str, Any]:
     if not url:
         return {"ok": False, "error": "missing_url"}
 
-<<<<<<< HEAD
-    # validate URL
-=======
->>>>>>> 4af5724 (BOSAI Worker: Make API integration + http_exec)
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         return {"ok": False, "error": f"invalid_scheme:{parsed.scheme or 'none'}"}
@@ -186,10 +171,6 @@ def run_http_exec(input_data: Dict[str, Any]) -> Dict[str, Any]:
     if method not in allowed_methods:
         return {"ok": False, "error": f"method_not_allowed:{method}"}
 
-<<<<<<< HEAD
-    # timeout override (clamp)
-=======
->>>>>>> 4af5724 (BOSAI Worker: Make API integration + http_exec)
     try:
         timeout_req = float(input_data.get("timeout_seconds", timeout_env))
     except Exception:
@@ -203,10 +184,6 @@ def run_http_exec(input_data: Dict[str, Any]) -> Dict[str, Any]:
     if inferred_ct and "Content-Type" not in headers and "content-type" not in {k.lower() for k in headers.keys()}:
         headers["Content-Type"] = inferred_ct
 
-<<<<<<< HEAD
-    # execute
-=======
->>>>>>> 4af5724 (BOSAI Worker: Make API integration + http_exec)
     try:
         resp = requests.request(
             method=method,
@@ -222,10 +199,6 @@ def run_http_exec(input_data: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         return {"ok": False, "error": f"request_failed:{type(e).__name__}:{str(e)[:200]}"}
 
-<<<<<<< HEAD
-    # prepare response (truncate)
-=======
->>>>>>> 4af5724 (BOSAI Worker: Make API integration + http_exec)
     elapsed_ms = int(getattr(resp, "elapsed", None).total_seconds() * 1000) if getattr(resp, "elapsed", None) else 0
     content = resp.content or b""
     truncated = False
@@ -233,35 +206,19 @@ def run_http_exec(input_data: Dict[str, Any]) -> Dict[str, Any]:
         content = content[:max_bytes]
         truncated = True
 
-<<<<<<< HEAD
-    # headers (keep small)
     resp_headers: Dict[str, str] = {}
     for k, v in (resp.headers or {}).items():
         if isinstance(k, str) and isinstance(v, str):
-            # avoid giant headers
-=======
-    resp_headers: Dict[str, str] = {}
-    for k, v in (resp.headers or {}).items():
-        if isinstance(k, str) and isinstance(v, str):
->>>>>>> 4af5724 (BOSAI Worker: Make API integration + http_exec)
             resp_headers[k] = v[:500]
 
     text: Optional[str] = None
     js: Optional[Any] = None
 
-<<<<<<< HEAD
-    # try JSON first if content-type indicates json
-=======
->>>>>>> 4af5724 (BOSAI Worker: Make API integration + http_exec)
     ctype = (resp.headers.get("Content-Type", "") or "").lower()
     if "application/json" in ctype or "json" in ctype:
         try:
             js = resp.json()
         except Exception:
-<<<<<<< HEAD
-            # fallback to text
-=======
->>>>>>> 4af5724 (BOSAI Worker: Make API integration + http_exec)
             try:
                 text = content.decode("utf-8", errors="replace")
             except Exception:
