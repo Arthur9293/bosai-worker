@@ -8,12 +8,6 @@
 # - No Is_bad (removed entirely)
 #
 # PATCH (SAFE, additive):
-# - Commands lock (Airtable source of truth) to prevent double execution when local+render run:
-#   Uses Commands fields: Locked_At, Locked_By, Lock_TTL_Min, Status_select
-#   Lock rule:
-#     - lockable if Status_select == 'Queued' AND (Locked_At empty OR expired by TTL)
-#     - acquire lock by patching Locked_At/Locked_By + Status_select='Running'
-#     - re-read to confirm lock ownership
 # - ToolCatalog enforcement for http_exec (optional, backward compatible):
 #   If a command/input provides Tool_Key (or tool_key), we enforce:
 #     - Tool exists + Enabled=true
@@ -26,7 +20,7 @@
 #
 # IMPORTANT:
 # - No schema changes required to run (Tool_Key optional).
-# - Conservative: only gates http_exec when Tool_Key is provided.
+# - This is conservative: only gates http_exec when Tool_Key is provided.
 
 import os
 import json
@@ -43,7 +37,7 @@ import requests
 from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-#from app.capabilities.http_exec import run_http_exec  # noqa: F401
+from app.capabilities.http_exec import run_http_exec  # noqa: F401
 
 
 # ============================================================
@@ -94,10 +88,6 @@ SLA_STATUS_ESCALATED = os.getenv("SLA_STATUS_ESCALATED", "Escalated").strip()
 STATE_LOCK_ACTIVE = os.getenv("STATE_LOCK_ACTIVE", "Active").strip()
 STATE_LOCK_RELEASED = os.getenv("STATE_LOCK_RELEASED", "Released").strip()
 STATE_LOCK_EXPIRED = os.getenv("STATE_LOCK_EXPIRED", "Expired").strip()
-
-# Commands lock defaults (SAFE)
-DEFAULT_COMMAND_LOCK_TTL_MIN = float((os.getenv("DEFAULT_COMMAND_LOCK_TTL_MIN", "10") or "10").strip())
-COMMAND_LOCK_CONFIRM_WINDOW_SEC = float((os.getenv("COMMAND_LOCK_CONFIRM_WINDOW_SEC", "15") or "15").strip())
 
 
 # ============================================================
@@ -264,18 +254,6 @@ def airtable_list_view(table_name: str, view_name: str, max_records: int = 100) 
     return r.json().get("records", [])
 
 
-def airtable_read(table_name: str, record_id: str) -> Dict[str, Any]:
-    _require_airtable()
-    r = requests.get(
-        f"{_airtable_url(table_name)}/{record_id}",
-        headers=_airtable_headers(),
-        timeout=HTTP_TIMEOUT_SECONDS,
-    )
-    if r.status_code >= 300:
-        raise HTTPException(status_code=500, detail=f"Airtable read failed: {r.status_code} {r.text}")
-    return r.json()
-
-
 def _json_load_maybe(val: Any) -> Dict[str, Any]:
     if val is None:
         return {}
@@ -324,132 +302,8 @@ def _as_bool(v: Any) -> bool:
     return s in ("1", "true", "yes", "y", "ok")
 
 
-def _parse_airtable_dt(val: Any) -> Optional[datetime]:
-    if not val:
-        return None
-    if isinstance(val, datetime):
-        if val.tzinfo is None:
-            return val.replace(tzinfo=timezone.utc)
-        return val
-    try:
-        s = str(val).strip()
-        if not s:
-            return None
-        # Airtable usually returns ISO like 2026-03-01T17:20:00.000Z
-        if s.endswith("Z"):
-            s = s.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(s)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except Exception:
-        return None
-
-
-def _parse_float(val: Any) -> Optional[float]:
-    if val is None:
-        return None
-    try:
-        if isinstance(val, (int, float)):
-            return float(val)
-        s = str(val).strip().replace(",", ".")
-        return float(s)
-    except Exception:
-        return None
-
-
 # ============================================================
-# Commands Lock (Airtable source of truth)
-# ============================================================
-
-def _command_ttl_min(fields: Dict[str, Any]) -> float:
-    # Prefer record field Lock_TTL_Min; fallback to env default
-    v = fields.get("Lock_TTL_Min")
-    f = _parse_float(v)
-    if f is None or f <= 0:
-        return DEFAULT_COMMAND_LOCK_TTL_MIN
-    return float(f)
-
-
-def _command_is_lockable(fields: Dict[str, Any]) -> bool:
-    status = str(fields.get("Status_select", "") or "").strip()
-    if status and status != "Queued":
-        return False
-
-    locked_by = str(fields.get("Locked_By", "") or "").strip()
-    locked_at_raw = fields.get("Locked_At")
-    locked_at = _parse_airtable_dt(locked_at_raw)
-
-    # no lock -> lockable
-    if not locked_at:
-        return True
-
-    # lock exists: check expiry
-    ttl_min = _command_ttl_min(fields)
-    ttl_sec = max(60.0, ttl_min * 60.0)  # safety floor
-    age = (datetime.now(timezone.utc) - locked_at).total_seconds()
-    if age > ttl_sec:
-        return True
-
-    # not expired => not lockable (even if Locked_By empty)
-    if locked_by:
-        return False
-    return False
-
-
-def _command_try_acquire_lock(command_id: str, req_worker: str, run_record_id: str) -> Dict[str, Any]:
-    """
-    Best-effort lock acquisition:
-      1) Read record
-      2) If lockable => patch Locked_At/Locked_By + Status_select=Running
-      3) Re-read and confirm Locked_By == req_worker and Locked_At is fresh
-    """
-    rec = airtable_read(COMMANDS_TABLE_NAME, command_id)
-    fields = rec.get("fields", {}) or {}
-
-    if not _command_is_lockable(fields):
-        return {"ok": False, "locked": False, "reason": "not_lockable"}
-
-    now_iso = utc_now_iso()
-    try:
-        airtable_update(
-            COMMANDS_TABLE_NAME,
-            command_id,
-            {
-                "Locked_At": now_iso,
-                "Locked_By": req_worker,
-                "Status_select": "Running",
-                "Linked_Run": [run_record_id],
-                "Error_Message": "",
-            },
-        )
-    except Exception as e:
-        return {"ok": False, "locked": False, "reason": "update_failed", "detail": repr(e)}
-
-    # confirm
-    try:
-        rerec = airtable_read(COMMANDS_TABLE_NAME, command_id)
-    except Exception:
-        # if we can't re-read, assume lock acquired (conservative)
-        return {"ok": True, "locked": True, "confirmed": False}
-
-    rfields = rerec.get("fields", {}) or {}
-    r_locked_by = str(rfields.get("Locked_By", "") or "").strip()
-    r_locked_at = _parse_airtable_dt(rfields.get("Locked_At"))
-
-    if r_locked_by != req_worker or not r_locked_at:
-        return {"ok": False, "locked": False, "reason": "lock_lost"}
-
-    age = (datetime.now(timezone.utc) - r_locked_at).total_seconds()
-    if age > COMMAND_LOCK_CONFIRM_WINDOW_SEC:
-        # still ours but too old => accept as locked (network delay)
-        return {"ok": True, "locked": True, "confirmed": True, "note": "confirm_window_exceeded"}
-
-    return {"ok": True, "locked": True, "confirmed": True}
-
-
-# ============================================================
-# No-Chaos: stale Running TTL cleanup (System_Runs)
+# No-Chaos: stale Running TTL cleanup
 # ============================================================
 
 def cleanup_stale_runs() -> Dict[str, Any]:
@@ -678,6 +532,7 @@ def _toolcatalog_fetch_map(force: bool = False) -> Dict[str, Dict[str, Any]]:
         _TOOLCATALOG_CACHE["by_key"] = {}
         return {}
 
+    # SAFE: no view required; we keep a small max to avoid over-fetch.
     try:
         r = requests.get(
             _airtable_url(TOOLCATALOG_TABLE_NAME),
@@ -717,11 +572,15 @@ def _toolcatalog_get(tool_key: str) -> Optional[Dict[str, Any]]:
     rec = m.get(tool_key)
     if rec:
         return rec
+    # one forced refresh attempt (SAFE)
     m2 = _toolcatalog_fetch_map(force=True)
     return m2.get(tool_key)
 
 
 def _extract_tool_meta(inp: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Reads tool fields from input (supports different naming styles).
+    """
     inp0 = _to_dict(inp)
     nested_input = _to_dict(inp0.get("input"))
     nested_args = _to_dict(inp0.get("args"))
@@ -783,6 +642,10 @@ def _extract_tool_meta(inp: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _toolcatalog_list_field(fields: Dict[str, Any], name: str) -> List[str]:
+    """
+    Airtable multi-select typically returns a list of strings.
+    Fallback: comma-separated string => split.
+    """
     v = fields.get(name)
     if isinstance(v, list):
         return [str(x).strip() for x in v if str(x).strip()]
@@ -795,6 +658,10 @@ def _toolcatalog_list_field(fields: Dict[str, Any], name: str) -> List[str]:
 
 
 def _toolcatalog_enforce_or_raise(req: RunRequest, tool_key: str, tool_mode: str, tool_intent: str, approved: bool) -> Dict[str, Any]:
+    """
+    Validates ToolCatalog constraints.
+    Returns ToolCatalog fields if allowed.
+    """
     rec = _toolcatalog_get(tool_key)
     if not rec:
         raise HTTPException(status_code=400, detail=f"ToolCatalog: unknown Tool_Key: {tool_key}")
@@ -805,6 +672,7 @@ def _toolcatalog_enforce_or_raise(req: RunRequest, tool_key: str, tool_mode: str
     if enabled is not None and not _as_bool(enabled):
         raise HTTPException(status_code=400, detail=f"ToolCatalog: tool disabled: {tool_key}")
 
+    # Allowed_Modes / Allowed_Intents checks (only if provided in input or present in catalog)
     allowed_modes = _toolcatalog_list_field(fields, "Allowed_Modes")
     allowed_intents = _toolcatalog_list_field(fields, "Allowed_Intents")
 
@@ -816,6 +684,7 @@ def _toolcatalog_enforce_or_raise(req: RunRequest, tool_key: str, tool_mode: str
         if allowed_intents and tool_intent not in allowed_intents:
             raise HTTPException(status_code=400, detail=f"ToolCatalog: intent not allowed: {tool_intent} for {tool_key}")
 
+    # Approval gate (SAFE): dry_run always allowed
     requires_approval = fields.get("Requires_Approval")
     if _as_bool(requires_approval) and (not req.dry_run) and (not approved):
         raise HTTPException(status_code=400, detail=f"ToolCatalog: requires approval: {tool_key}")
@@ -824,6 +693,11 @@ def _toolcatalog_enforce_or_raise(req: RunRequest, tool_key: str, tool_mode: str
 
 
 def _toolcatalog_minimal_args_check(fields: Dict[str, Any], args_obj: Dict[str, Any]) -> None:
+    """
+    Minimal enforcement for Args_Schema_JSON:
+    If schema has {"required":[...]} ensure keys exist in args_obj.
+    No full JSON Schema validation (keeps deps minimal + SAFE).
+    """
     schema = _json_load_maybe(fields.get("Args_Schema_JSON"))
     if not schema:
         return
@@ -847,6 +721,18 @@ def _toolcatalog_minimal_args_check(fields: Dict[str, Any], args_obj: Dict[str, 
 
 def capability_health_tick(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     return {"ok": True, "probe": "airtable_ok", "ts": utc_now_iso(), "run_record_id": run_record_id}
+
+
+def _parse_float(val: Any) -> Optional[float]:
+    if val is None:
+        return None
+    try:
+        if isinstance(val, (int, float)):
+            return float(val)
+        s = str(val).strip().replace(",", ".")
+        return float(s)
+    except Exception:
+        return None
 
 
 def _sla_status_for_remaining(remaining_min: float) -> str:
@@ -923,10 +809,6 @@ def _airtable_update_best_effort(table_name: str, record_id: str, candidates: Li
 
 
 def capability_commands_tick(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    """
-    SAFE behavior: marks records as Running (legacy use).
-    PATCH: only touches commands that are lockable to avoid stealing locks.
-    """
     inp = req.input or {}
     limit = int(inp.get("limit", 5) or 5)
     if limit <= 0:
@@ -948,23 +830,33 @@ def capability_commands_tick(req: RunRequest, run_record_id: str) -> Dict[str, A
         if not cid:
             continue
 
-        fields = c.get("fields", {}) or {}
-        if not _command_is_lockable(fields):
-            continue
-
         processed.append(cid)
 
         candidates = [
             {
+                "Is_Locked": True,
                 "Locked_At": now,
                 "Locked_By": req.worker,
-                "Status_select": "Running",
+                "Last_Status": "Running",
                 "Last_Error": "",
                 "Linked_Run": [run_record_id],
             },
             {
+                "Is_Locked": True,
                 "Locked_At": now,
                 "Locked_By": req.worker,
+                "Last_Status": "Running",
+            },
+            {
+                "Is_Locked": True,
+                "Locked_By": req.worker,
+            },
+            {
+                "Status_select": "Running",
+                "Linked_Run": [run_record_id],
+                "Error_Message": "",
+            },
+            {
                 "Status_select": "Running",
             },
         ]
@@ -1199,14 +1091,23 @@ def _extract_http_exec_input(inp: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _toolcatalog_apply_overrides(tool_fields: Dict[str, Any], extracted: Dict[str, Any]) -> Tuple[str, str, Dict[str, str], float]:
+    """
+    If TOOLCATALOG_OVERRIDE_HTTP is enabled, override url/method/headers/timeout when present in ToolCatalog.
+    - URL: from ToolCatalog.URL (preferred) or Base_URL + URL (optional) if you store that style.
+    - Method: from ToolCatalog.Method
+    - Headers: merge ToolCatalog.Headers_JSON then extracted.headers (extracted wins last)
+    - Timeout: ToolCatalog.Timeout_S (float)
+    """
     url_override = str(tool_fields.get("URL", "") or "").strip()
     base_url = str(tool_fields.get("Base_URL", "") or "").strip()
     method_override = str(tool_fields.get("Method", "") or "").strip().upper()
 
+    # Build URL:
     url_final = extracted.get("raw_target", "")
     if url_override:
         url_final = url_override
     elif base_url and url_final and not url_final.startswith("http"):
+        # optional pattern: base_url + relative path
         url_final = base_url.rstrip("/") + "/" + url_final.lstrip("/")
 
     method_final = extracted.get("method", "POST")
@@ -1240,6 +1141,7 @@ def _toolcatalog_apply_overrides(tool_fields: Dict[str, Any], extracted: Dict[st
 def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     inp = req.input or {}
 
+    # tolerate nesting: {"input": {...}}
     if isinstance(inp.get("input"), dict) and inp.get("input"):
         nested = inp.get("input")
         if any(
@@ -1269,25 +1171,33 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
 
     extracted = _extract_http_exec_input(inp)
 
+    # ------------------------------------------------------------
+    # ToolCatalog enforcement (SAFE, only if Tool_Key is present)
+    # ------------------------------------------------------------
     tool_meta = _extract_tool_meta(inp)
     tool_key = tool_meta["tool_key"]
     tool_mode = tool_meta["tool_mode"]
     tool_intent = tool_meta["tool_intent"]
     approved = bool(tool_meta["approved"])
 
+    tool_fields: Optional[Dict[str, Any]] = None
     if TOOLCATALOG_ENFORCE_HTTP_EXEC and tool_key:
         tool_fields = _toolcatalog_enforce_or_raise(req, tool_key, tool_mode, tool_intent, approved)
 
+        # Minimal args required enforcement (SAFE): we check args against json_body if present, else {}.
         args_obj = {}
         if isinstance(extracted.get("json_body"), dict):
             args_obj = extracted.get("json_body")  # type: ignore
         _toolcatalog_minimal_args_check(tool_fields, args_obj)
 
+        # Optional overrides (SAFE)
         if TOOLCATALOG_OVERRIDE_HTTP:
+            # apply tool overrides BEFORE resolving allowlist
             url_final, method_final, headers_final, timeout_s = _toolcatalog_apply_overrides(tool_fields, extracted)
             extracted["raw_target"] = url_final
             extracted["method"] = method_final
             extracted["headers"] = headers_final
+            # override runtime timeout
             local_timeout = timeout_s
         else:
             local_timeout = HTTP_EXEC_TIMEOUT_SECONDS
@@ -1398,4 +1308,396 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
       http_target, HTTP_Method, HTTP_Payload_JSON
     """
     for key in ("Command_JSON", "Payload_JSON", "Input_JSON"):
-        obj = _json_load
+        obj = _json_load_maybe(fields.get(key))
+        if isinstance(obj, dict) and obj:
+            return obj
+
+    built: Dict[str, Any] = {}
+
+    http_target = str(fields.get("http_target", "") or "").strip()
+    if http_target:
+        built["http_target"] = http_target
+
+    method = str(fields.get("HTTP_Method", "") or "").strip()
+    if method:
+        built["method"] = method
+
+    payload_raw = fields.get("HTTP_Payload_JSON")
+    payload_obj = _json_load_maybe(payload_raw)
+    if payload_obj:
+        built["json"] = payload_obj
+    else:
+        if isinstance(payload_raw, str) and payload_raw.strip():
+            built["data"] = payload_raw.strip()
+
+    # NEW (SAFE): if you store ToolCatalog fields in Commands columns, forward them (optional)
+    tool_key = str(fields.get("Tool_Key", "") or "").strip()
+    if tool_key:
+        built["Tool_Key"] = tool_key
+    tool_mode = str(fields.get("Tool_Mode", "") or "").strip()
+    if tool_mode:
+        built["Tool_Mode"] = tool_mode
+    tool_intent = str(fields.get("Tool_Intent", "") or "").strip()
+    if tool_intent:
+        built["Tool_Intent"] = tool_intent
+    approved = fields.get("Approved")
+    if approved is not None:
+        built["Approved"] = bool(approved)
+
+    return built
+
+
+# ----------------------------
+# State + Locks capabilities
+# ----------------------------
+
+def capability_state_get(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    key = str(req.input.get("key", "")).strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="state_get requires input.key")
+    rec = state_get_record(key)
+    if not rec:
+        return {"ok": True, "found": False, "key": key}
+    fields = rec.get("fields", {}) or {}
+    return {
+        "ok": True,
+        "found": True,
+        "key": key,
+        "record_id": rec.get("id"),
+        "value": _json_load_maybe(fields.get("Value_JSON")),
+        "updated_at": fields.get("Updated_At"),
+        "app_version": fields.get("App_Version"),
+        "lock_status": fields.get("Lock_Status"),
+    }
+
+
+def capability_state_put(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    key = str(req.input.get("key", "")).strip()
+    value = req.input.get("value")
+    if not key:
+        raise HTTPException(status_code=400, detail="state_put requires input.key")
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=400, detail="state_put requires input.value to be an object (dict)")
+    return state_put(key, value)
+
+
+def capability_lock_acquire(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    key = str(req.input.get("key", "")).strip()
+    holder = str(req.input.get("holder", req.worker)).strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="lock_acquire requires input.key")
+    return lock_acquire(key, holder)
+
+
+def capability_lock_release(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    key = str(req.input.get("key", "")).strip()
+    holder = str(req.input.get("holder", req.worker)).strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="lock_release requires input.key")
+    return lock_release(key, holder)
+
+
+# ----------------------------
+# Commands Orchestrator (SAFE + PATCH preserved)
+# ----------------------------
+
+def _read_command_status(fields: Dict[str, Any]) -> str:
+    # Robust: supports multiple historical field names without changing schema.
+    return str(
+        fields.get(
+            "Status_select",
+            fields.get(
+                "Status",
+                fields.get("Status_raw", ""),
+            ),
+        ) or ""
+    ).strip()
+
+
+def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    max_cmds = int(req.max_commands or 0) or 5
+    view = (req.view or COMMANDS_VIEW_NAME or "Queue").strip()
+
+    cmds = airtable_list_view(COMMANDS_TABLE_NAME, view, max_records=max_cmds)
+
+    executed = 0
+    succeeded = 0
+    failed = 0
+    blocked = 0
+    unsupported = 0
+
+    processed_ids: List[str] = []
+    errors: List[str] = []
+
+    for c in cmds:
+        cid = c.get("id")
+        fields = c.get("fields", {}) or {}
+        if not cid:
+            continue
+
+        processed_ids.append(cid)
+
+        status = _read_command_status(fields)
+        if status and status not in ("Queued", "QUEUE", "Queue"):
+            blocked += 1
+            continue
+
+        capability = str(fields.get("Capability", "")).strip()
+        if not capability:
+            failed += 1
+            try:
+                airtable_update(
+                    COMMANDS_TABLE_NAME,
+                    cid,
+                    {
+                        "Status_select": "Error",
+                        "Error_Message": "Missing Capability",
+                        "Linked_Run": [run_record_id],
+                    },
+                )
+            except Exception:
+                pass
+            continue
+
+        fn = CAPABILITIES.get(capability)
+        if not fn:
+            unsupported += 1
+            try:
+                airtable_update(
+                    COMMANDS_TABLE_NAME,
+                    cid,
+                    {
+                        "Status_select": "Unsupported",
+                        "Error_Message": f"Unsupported capability: {capability}",
+                        "Linked_Run": [run_record_id],
+                    },
+                )
+            except Exception:
+                pass
+            continue
+
+        idem = str(fields.get("Idempotency_Key", "")).strip() or f"cmd:{cid}:{capability}"
+
+        # PATCH: compose input from JSON OR from columns (prevents missing url)
+        cmd_input = _compose_command_input(fields)
+
+        try:
+            airtable_update(
+                COMMANDS_TABLE_NAME,
+                cid,
+                {
+                    "Status_select": "Running",
+                    "Idempotency_Key": idem,
+                    "Linked_Run": [run_record_id],
+                    "Error_Message": "",
+                },
+            )
+        except Exception:
+            blocked += 1
+            continue
+
+        executed += 1
+
+        try:
+            cmd_req = RunRequest.from_payload(
+                {
+                    "worker": req.worker,
+                    "capability": capability,
+                    "idempotency_key": idem,
+                    "input": cmd_input,
+                    "priority": req.priority,
+                    "dry_run": bool(req.dry_run),
+                }
+            )
+
+            result_obj = fn(cmd_req, run_record_id)
+
+            airtable_update(
+                COMMANDS_TABLE_NAME,
+                cid,
+                {
+                    "Status_select": "Done",
+                    "Result_JSON": json.dumps(result_obj, ensure_ascii=False),
+                    "Linked_Run": [run_record_id],
+                },
+            )
+            succeeded += 1
+
+        except HTTPException as e:
+            msg = str(e.detail)
+            failed += 1
+            try:
+                airtable_update(
+                    COMMANDS_TABLE_NAME,
+                    cid,
+                    {
+                        "Status_select": "Error",
+                        "Error_Message": msg,
+                        "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
+                        "Linked_Run": [run_record_id],
+                    },
+                )
+            except Exception:
+                pass
+            errors.append(f"{cid}: {msg}")
+
+        except Exception as e:
+            msg = repr(e)
+            failed += 1
+            try:
+                airtable_update(
+                    COMMANDS_TABLE_NAME,
+                    cid,
+                    {
+                        "Status_select": "Error",
+                        "Error_Message": msg,
+                        "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
+                        "Linked_Run": [run_record_id],
+                    },
+                )
+            except Exception:
+                pass
+            errors.append(f"{cid}: {msg}")
+
+    return {
+        "ok": True,
+        "view": view,
+        "scanned": len(cmds),
+        "executed": executed,
+        "succeeded": succeeded,
+        "failed": failed,
+        "blocked": blocked,
+        "unsupported": unsupported,
+        "commands_record_ids": processed_ids,
+        "errors_count": len(errors),
+        "errors": errors[:10],
+    }
+
+
+CAPABILITIES = {
+    "health_tick": capability_health_tick,
+    "commands_tick": capability_commands_tick,
+    "sla_machine": capability_sla_machine,
+    "http_exec": capability_http_exec,
+    "state_get": capability_state_get,
+    "state_put": capability_state_put,
+    "lock_acquire": capability_lock_acquire,
+    "lock_release": capability_lock_release,
+    "command_orchestrator": capability_command_orchestrator,
+}
+
+
+# ============================================================
+# Routes
+# ============================================================
+
+@app.get("/")
+def root() -> Dict[str, Any]:
+    return {"ok": True, "service": APP_NAME, "version": APP_VERSION}
+
+
+@app.head("/")
+def root_head() -> Response:
+    return Response(status_code=200)
+
+
+@app.get("/health")
+def health() -> Dict[str, Any]:
+    return {"ok": True, "app": APP_NAME, "version": APP_VERSION, "worker": WORKER_NAME, "ts": utc_now_iso()}
+
+
+@app.get("/health/score")
+def health_score() -> Dict[str, Any]:
+    score = 100
+    issues: List[str] = []
+    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+        score -= 50
+        issues.append("airtable_env_missing")
+    if RUN_SHARED_SECRET:
+        issues.append("signature_enforced")
+    if not HTTP_EXEC_ALLOWLIST:
+        issues.append("http_exec_disabled_no_allowlist")
+    if not HTTP_EXEC_TARGETS_JSON:
+        issues.append("http_exec_no_alias_targets")
+    if TOOLCATALOG_ENFORCE_HTTP_EXEC:
+        issues.append("toolcatalog_http_exec_enforced")
+    return {"ok": True, "score": max(0, score), "issues": issues, "ts": utc_now_iso()}
+
+
+@app.post("/run", response_model=RunResponse)
+async def run(request: Request) -> RunResponse:
+    started = time.time()
+    raw = await request.body()
+    verify_signature_or_401(raw, request.headers.get("x-run-signature"))
+
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.")
+
+    req = RunRequest.from_payload(payload)
+
+    # SAFE: cleanup best-effort; does not block run
+    cleanup_stale_runs()
+
+    if (time.time() - started) > RUN_MAX_SECONDS:
+        raise HTTPException(status_code=408, detail="Request timed out before start.")
+
+    existing = idempotency_lookup(req)
+    if existing:
+        fields = existing.get("fields", {}) or {}
+        previous_result: Dict[str, Any] = {}
+        try:
+            previous_result = json.loads(fields.get("Result_JSON", "{}") or "{}")
+        except Exception:
+            previous_result = {"note": "Result_JSON unreadable"}
+
+        return RunResponse(
+            ok=True,
+            worker=req.worker,
+            capability=req.capability,
+            idempotency_key=req.idempotency_key,
+            run_id=str(fields.get("Run_ID", "")) or "unknown",
+            airtable_record_id=existing.get("id"),
+            result={"idempotent_replay": True, "previous": previous_result},
+        )
+
+    run_record_id = create_system_run(req)
+
+    try:
+        fn = CAPABILITIES.get(req.capability)
+        if not fn:
+            finish_system_run(run_record_id, "Unsupported", {"ok": False, "error": "unsupported_capability"})
+            raise HTTPException(status_code=400, detail=f"Unsupported capability: {req.capability}")
+
+        if req.dry_run:
+            result_obj = {"ok": True, "dry_run": True, "would_execute": req.capability}
+            finish_system_run(run_record_id, "Done", result_obj)
+            return RunResponse(
+                ok=True,
+                worker=req.worker,
+                capability=req.capability,
+                idempotency_key=req.idempotency_key,
+                run_id=run_record_id,
+                airtable_record_id=run_record_id,
+                result=result_obj,
+            )
+
+        result_obj = fn(req, run_record_id)
+        finish_system_run(run_record_id, "Done", result_obj)
+
+        return RunResponse(
+            ok=True,
+            worker=req.worker,
+            capability=req.capability,
+            idempotency_key=req.idempotency_key,
+            run_id=run_record_id,
+            airtable_record_id=run_record_id,
+            result=result_obj,
+        )
+
+    except HTTPException as e:
+        fail_system_run(run_record_id, str(e.detail))
+        raise
