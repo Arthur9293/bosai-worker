@@ -1,30 +1,21 @@
-# app/worker.py — BOSAI Worker (v2.4.1)
-# SAFE from v2.3.9 baseline:
-# - Keeps GET /, HEAD /, /health, /health/score, POST /run behavior
-# - Status_select schema for System_Runs unchanged
-# - Idempotency replay unchanged
-# - Commands Orchestrator V1 behavior preserved (input composition unchanged)
-# - SLA Machine V1 unchanged
-# - No Is_bad (removed entirely)
+# app/worker.py — BOSAI Worker (v2.4.2)
+# Base: your v2.4.1 (as pasted)
 #
-# PATCH (SAFE, additive):
-# - ToolCatalog enforcement for http_exec (optional, backward compatible):
-#   If a command/input provides Tool_Key (or tool_key), we enforce:
-#     - Tool exists + Enabled=true
-#     - Allowed_Modes contains Tool_Mode (or tool_mode) when provided
-#     - Allowed_Intents contains Tool_Intent (or tool_intent) when provided
-#     - Requires_Approval => must pass approved=true (or Approved=true) unless dry_run
-#   And we can optionally override:
-#     - URL, Method, Headers_JSON, Timeout_S from ToolCatalog
-#   If Tool_Key is missing, behavior is unchanged (compat).
+# FIXES (SAFE):
+# 1) /run dry_run: DO NOT short-circuit. We call the capability so http_exec returns full dry_run details.
+# 2) http_exec secrets: support BOTH env-var style and Render "Secret Files" style.
+#    - env var:    HTTP_EXEC_HEADER_AUTH_<KEY>
+#    - secret file: /etc/secrets/SECRET_HEADER_<KEY>
+#    - legacy env: SECRET_HEADER_<KEY> (optional)
+#    - convenience: MAKE_API_TOKEN (when KEY=="MAKE")
+# 3) http_exec ToolCatalog: can read optional fields:
+#    - Secret_Header_Keys (list or "A,B,C")
+#    - Authorization_Mode ("token"|"bearer"|"raw")  # optional
+#    If present, merges with request secret_header_keys.
 #
-# IMPORTANT:
-# - No schema changes required to run (Tool_Key optional).
-# - This is conservative: only gates http_exec when Tool_Key is provided.
-#
-# v2.4.1 SAFE fixes:
-# - from_payload(): pop alias keys after mapping (prevents Pydantic forbid extra)
-# - http_exec: if Tool_Key provided and url unresolved, fallback to ToolCatalog.URL
+# NOTE for Make API:
+# - Make v2 API typically expects: Authorization: Token <MAKE_API_TOKEN>
+# - If you stored only the token, we will auto-format to "Token <token>" (configurable by Authorization_Mode).
 
 import os
 import json
@@ -40,8 +31,6 @@ from urllib.parse import urlparse
 import requests
 from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
-
-from app.capabilities.http_exec import run_http_exec  # noqa: F401
 
 
 # ============================================================
@@ -62,7 +51,7 @@ COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.4.1").strip()
+APP_VERSION = os.getenv("APP_VERSION", "2.4.2").strip()
 
 RUN_MAX_SECONDS = float((os.getenv("RUN_MAX_SECONDS", "30") or "30").strip())
 HTTP_TIMEOUT_SECONDS = float((os.getenv("HTTP_TIMEOUT_SECONDS", "20") or "20").strip())
@@ -105,7 +94,12 @@ HTTP_EXEC_MAX_RESPONSE_BYTES = int((os.getenv("HTTP_EXEC_MAX_RESPONSE_BYTES", "2
 HTTP_EXEC_ALLOWLIST_RAW = os.getenv("HTTP_EXEC_ALLOWLIST", "").strip()
 HTTP_EXEC_TARGETS_JSON = os.getenv("HTTP_EXEC_TARGETS_JSON", "").strip()
 HTTP_EXEC_BLOCK_PRIVATE_NETS = (os.getenv("HTTP_EXEC_BLOCK_PRIVATE_NETS", "1").strip() != "0")
+
+# Prefix used for env-var secret headers (you already use this)
 HTTP_EXEC_SECRET_HEADER_PREFIX = os.getenv("HTTP_EXEC_SECRET_HEADER_PREFIX", "HTTP_EXEC_HEADER_AUTH_").strip()
+
+# Additional secret file prefix (Render Secret Files)
+SECRET_FILE_PREFIX = os.getenv("SECRET_FILE_PREFIX", "SECRET_HEADER_").strip()
 
 # ToolCatalog behavior toggles (SAFE defaults)
 TOOLCATALOG_ENFORCE_HTTP_EXEC = (os.getenv("TOOLCATALOG_ENFORCE_HTTP_EXEC", "1").strip() != "0")
@@ -768,6 +762,10 @@ def capability_sla_machine(req: RunRequest, run_record_id: str) -> Dict[str, Any
     return {"ok": True, "updated": updated, "skipped": skipped, "errors_count": len(errors), "errors": errors[:10]}
 
 
+# ----------------------------
+# Commands Tick (SAFE)
+# ----------------------------
+
 def _airtable_update_best_effort(table_name: str, record_id: str, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
     last_err: Optional[str] = None
     for fields in candidates:
@@ -1005,13 +1003,77 @@ def _validate_http_exec_url(url: str) -> Dict[str, str]:
     return {"host": host, "scheme": parsed.scheme}
 
 
-def _build_secret_headers(header_keys: List[str]) -> Dict[str, str]:
+def _read_secret_file(name: str) -> str:
+    # Render Secret Files are available at:
+    # - /etc/secrets/<filename>
+    # - or app root sometimes (but /etc/secrets is canonical)
+    for base in ("/etc/secrets", "."):
+        path = f"{base}/{name}"
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    return (f.read() or "").strip()
+        except Exception:
+            continue
+    return ""
+
+
+def _format_authorization(raw: str, mode: str) -> str:
+    """
+    mode:
+      - raw:    use as-is
+      - token:  "Token <raw>" if raw has no space
+      - bearer: "Bearer <raw>" if raw has no space
+    """
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    if mode == "raw":
+        return s
+    # already formatted
+    if " " in s:
+        return s
+    if mode == "bearer":
+        return f"Bearer {s}"
+    # default: token
+    return f"Token {s}"
+
+
+def _build_secret_headers(header_keys: List[str], auth_mode: str = "token") -> Dict[str, str]:
+    """
+    For each KEY in secret_header_keys:
+      1) env var: HTTP_EXEC_HEADER_AUTH_<KEY>
+      2) env var: SECRET_HEADER_<KEY> (legacy)
+      3) secret file: /etc/secrets/SECRET_HEADER_<KEY>
+      4) if KEY=="MAKE": MAKE_API_TOKEN
+    Sets Authorization header from the first found.
+    """
     out: Dict[str, str] = {}
     for key in header_keys or []:
-        env_name = f"{HTTP_EXEC_SECRET_HEADER_PREFIX}{str(key).strip()}"
-        val = os.getenv(env_name, "").strip()
-        if val:
-            out["Authorization"] = val
+        k = str(key).strip()
+        if not k:
+            continue
+
+        # 1) env var prefix (your current pattern)
+        v = os.getenv(f"{HTTP_EXEC_SECRET_HEADER_PREFIX}{k}", "").strip()
+
+        # 2) legacy env var
+        if not v:
+            v = os.getenv(f"{SECRET_FILE_PREFIX}{k}", "").strip()
+
+        # 3) secret file
+        if not v:
+            v = _read_secret_file(f"{SECRET_FILE_PREFIX}{k}")
+
+        # 4) convenience for Make
+        if not v and k.upper() == "MAKE":
+            v = os.getenv("MAKE_API_TOKEN", "").strip()
+
+        if v:
+            out["Authorization"] = _format_authorization(v, auth_mode)
+            # only one Authorization expected
+            break
+
     return out
 
 
@@ -1106,6 +1168,29 @@ def _toolcatalog_apply_overrides(tool_fields: Dict[str, Any], extracted: Dict[st
     return url_final, method_final, headers_final, timeout_s
 
 
+def _merge_secret_keys(request_keys: List[str], tool_fields: Optional[Dict[str, Any]]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+
+    def add_many(vals: Any):
+        if isinstance(vals, list):
+            for x in vals:
+                xs = str(x).strip()
+                if xs and xs not in seen:
+                    seen.add(xs)
+                    out.append(xs)
+        elif isinstance(vals, str):
+            for x in [p.strip() for p in vals.split(",") if p.strip()]:
+                if x and x not in seen:
+                    seen.add(x)
+                    out.append(x)
+
+    add_many(request_keys or [])
+    if tool_fields:
+        add_many(tool_fields.get("Secret_Header_Keys"))
+    return out
+
+
 def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     inp = req.input or {}
 
@@ -1145,6 +1230,8 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     approved = bool(tool_meta["approved"])
 
     tool_fields: Optional[Dict[str, Any]] = None
+    local_timeout = HTTP_EXEC_TIMEOUT_SECONDS
+
     if TOOLCATALOG_ENFORCE_HTTP_EXEC and tool_key:
         tool_fields = _toolcatalog_enforce_or_raise(req, tool_key, tool_mode, tool_intent, approved)
 
@@ -1158,14 +1245,9 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
             extracted["raw_target"] = url_final
             extracted["method"] = method_final
             extracted["headers"] = headers_final
-            local_timeout = timeout_s
-        else:
-            local_timeout = HTTP_EXEC_TIMEOUT_SECONDS
-    else:
-        local_timeout = HTTP_EXEC_TIMEOUT_SECONDS
+            local_timeout = float(timeout_s)
 
     raw_target = extracted["raw_target"]
-
     url = _resolve_http_target(raw_target)
 
     # SAFE fallback: if Tool_Key provided and still no url, use ToolCatalog.URL
@@ -1188,7 +1270,17 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail=f"HTTP_EXEC invalid method: {method}")
 
     headers_in = extracted["headers"] if isinstance(extracted["headers"], dict) else {}
-    secret_headers = _build_secret_headers(extracted["secret_header_keys"])
+
+    # Auth mode from ToolCatalog (optional)
+    auth_mode = "token"
+    if tool_fields:
+        am = str(tool_fields.get("Authorization_Mode", "") or "").strip().lower()
+        if am in ("raw", "token", "bearer"):
+            auth_mode = am
+
+    merged_secret_keys = _merge_secret_keys(extracted["secret_header_keys"], tool_fields)
+
+    secret_headers = _build_secret_headers(merged_secret_keys, auth_mode=auth_mode)
     headers = {**headers_in, **secret_headers}
 
     json_body = extracted["json_body"]
@@ -1210,6 +1302,7 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
             "tool_key": tool_key or None,
             "tool_mode": tool_mode or None,
             "tool_intent": tool_intent or None,
+            "auth_mode": auth_mode,
             "note": "HTTP call skipped (dry_run).",
         }
 
@@ -1251,6 +1344,7 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
         "tool_key": tool_key or None,
         "tool_mode": tool_mode or None,
         "tool_intent": tool_intent or None,
+        "auth_mode": auth_mode,
         "request_headers": _safe_headers_for_log(headers),
         "response_headers": {
             k: (v if k.lower() != "set-cookie" else "***redacted***")
@@ -1610,20 +1704,11 @@ async def run(request: Request) -> RunResponse:
             finish_system_run(run_record_id, "Unsupported", {"ok": False, "error": "unsupported_capability"})
             raise HTTPException(status_code=400, detail=f"Unsupported capability: {req.capability}")
 
-        if req.dry_run:
-            result_obj = {"ok": True, "dry_run": True, "would_execute": req.capability}
-            finish_system_run(run_record_id, "Done", result_obj)
-            return RunResponse(
-                ok=True,
-                worker=req.worker,
-                capability=req.capability,
-                idempotency_key=req.idempotency_key,
-                run_id=run_record_id,
-                airtable_record_id=run_record_id,
-                result=result_obj,
-            )
-
+        # IMPORTANT FIX:
+        # We always call the capability even in dry_run,
+        # so http_exec returns full "dry_run" details (url/method/headers/allowlist/etc).
         result_obj = fn(req, run_record_id)
+
         finish_system_run(run_record_id, "Done", result_obj)
 
         return RunResponse(
