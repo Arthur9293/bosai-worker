@@ -1,30 +1,18 @@
-# app/worker.py — BOSAI Worker (v2.3.7)
-# SAFE from v2.3.6 baseline:
+# app/worker.py — BOSAI Worker (v2.3.9)
+# SAFE from v2.3.8 baseline:
 # - Keeps GET /, HEAD /, /health, /health/score, POST /run behavior
-# - Status_select schema for System_Runs
-# - Idempotency replay: Idempotency_Key + Status_select only
-# - Commands Orchestrator V1 unchanged
-# - SLA Machine V1 unchanged (writes Logs_Erreurs: SLA_Status, Last_SLA_Check, Linked_Run)
-# - No-Chaos: Lock TTL Cleanup unchanged
-# - State table support unchanged
-# IMPORTANT: No Is_bad (removed entirely)
+# - Status_select schema for System_Runs unchanged
+# - Idempotency replay unchanged
+# - Commands Orchestrator V1 behavior preserved, with SAFE input composition (compat)
+# - SLA Machine V1 unchanged
+# - No Is_bad (removed entirely)
 #
-# PATCH (SAFE): HTTP_EXEC hardened + compatibility:
-# - Normalizes allowlist entries: accepts host OR full URL (https://hook.../ => host)
-# - Supports inputs:
-#   - input.url OR input.http_target OR input.target OR input.tool
-#   - ALSO supports nested shapes: input.input.url, input.args.url (safe fallback)
-# - Alias resolution via HTTP_EXEC_TARGETS_JSON unchanged
-# - Stricter allowlist by host (supports *.domain.tld)
-# - Optional secret headers via ENV (no secrets in Airtable)
-# - Blocks localhost/private nets by default
-# app/worker.py — BOSAI Worker (v2.3.8) — COMPAT (Pydantic v1/v2)
-# SAFE from v2.3.7 baseline (same behavior), with HTTP_EXEC hardened + raw_target fix.
-# IMPORTANT: No Is_bad (removed entirely)
-
-# app/worker.py — BOSAI Worker (v2.3.8) — COMPAT (Pydantic v1/v2)
-# SAFE from v2.3.7 baseline (same behavior), with HTTP_EXEC hardened + raw_target fix.
-# IMPORTANT: No Is_bad (removed entirely)
+# PATCH (SAFE):
+# - command_orchestrator now composes http_exec input from either:
+#   - Command_JSON / Payload_JSON / Input_JSON (preferred)
+#   - OR fallback columns: http_target, HTTP_Method, HTTP_Payload_JSON
+#   => prevents "HTTP_EXEC missing url" when data is stored in columns instead of JSON.
+# - Also reads Status_select OR Status_select (compat)
 
 import os
 import json
@@ -58,7 +46,7 @@ COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.3.8").strip()
+APP_VERSION = os.getenv("APP_VERSION", "2.3.9").strip()
 
 RUN_MAX_SECONDS = float((os.getenv("RUN_MAX_SECONDS", "30") or "30").strip())
 HTTP_TIMEOUT_SECONDS = float((os.getenv("HTTP_TIMEOUT_SECONDS", "20") or "20").strip())
@@ -83,7 +71,7 @@ STATE_LOCK_RELEASED = os.getenv("STATE_LOCK_RELEASED", "Released").strip()
 STATE_LOCK_EXPIRED = os.getenv("STATE_LOCK_EXPIRED", "Expired").strip()
 
 # ============================================================
-# HTTP_EXEC (PATCH)
+# HTTP_EXEC
 # ============================================================
 
 HTTP_EXEC_TIMEOUT_SECONDS = float((os.getenv("HTTP_EXEC_TIMEOUT_SECONDS", "20") or "20").strip())
@@ -118,7 +106,6 @@ class RunRequest(BaseModel):
     class Config:
         extra = "forbid"
 
-    # COMPAT: accept legacy aliases
     @classmethod
     def from_payload(cls, payload: Dict[str, Any]) -> "RunRequest":
         if not isinstance(payload, dict):
@@ -126,32 +113,26 @@ class RunRequest(BaseModel):
 
         p = dict(payload)
 
-        # capability alias
         if "capability" not in p and "capacity" in p:
             p["capability"] = p.get("capacity")
 
-        # idempotency alias
         if "idempotency_key" not in p and "idempotencyKey" in p:
             p["idempotency_key"] = p.get("idempotencyKey")
 
-        # input alias
         if "input" not in p and "inputs" in p:
             p["input"] = p.get("inputs")
 
-        # defaults if missing
         if "worker" not in p or not str(p.get("worker") or "").strip():
             p["worker"] = WORKER_NAME
 
-        # Parse with pydantic v1/v2
         try:
-            # pydantic v2 has model_validate
             mv = getattr(cls, "model_validate", None)
             if callable(mv):
                 return mv(p)  # type: ignore
         except Exception:
             pass
 
-        return cls.parse_obj(p)  # pydantic v1
+        return cls.parse_obj(p)
 
 class RunResponse(BaseModel):
     ok: bool
@@ -374,7 +355,9 @@ def state_put(app_key: str, value_obj: Dict[str, Any]) -> Dict[str, Any]:
         airtable_update(STATE_TABLE_NAME, existing["id"], fields)
         return {"ok": True, "mode": "update", "record_id": existing["id"]}
     rid = airtable_create(STATE_TABLE_NAME, fields)
-    return {"ok": True, "mode": "create", "record_id": rid}
+    return {"ok": True, "mode": "create", "record_id": rid
+
+}
 
 def lock_acquire(lock_key: str, holder: str) -> Dict[str, Any]:
     app_key = f"lock:{lock_key}"
@@ -500,10 +483,6 @@ def capability_sla_machine(req: RunRequest, run_record_id: str) -> Dict[str, Any
 # ----------------------------
 
 def _airtable_update_best_effort(table_name: str, record_id: str, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Try multiple payloads, so we don't break if some Airtable fields do not exist.
-    Only used by commands_tick capability.
-    """
     last_err: Optional[str] = None
     for fields in candidates:
         if not fields:
@@ -520,18 +499,12 @@ def _airtable_update_best_effort(table_name: str, record_id: str, candidates: Li
     return {"ok": False, "error": last_err or "update_failed"}
 
 def capability_commands_tick(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    """
-    Lightweight queue tick:
-    - reads Commands view (default COMMANDS_VIEW_NAME)
-    - best-effort marks records as running/locked (without assuming exact schema)
-    - returns processed ids
-    """
     inp = req.input or {}
     limit = int(inp.get("limit", 5) or 5)
     if limit <= 0:
         limit = 5
     if limit > 50:
-        limit = 50  # hard safety
+        limit = 50
 
     view = (req.view or COMMANDS_VIEW_NAME or "Queue").strip()
     cmds = airtable_list_view(COMMANDS_TABLE_NAME, view, max_records=limit)
@@ -550,7 +523,6 @@ def capability_commands_tick(req: RunRequest, run_record_id: str) -> Dict[str, A
         processed.append(cid)
 
         candidates = [
-            # mobile schema candidates (if present)
             {
                 "Is_Locked": True,
                 "Locked_At": now,
@@ -569,7 +541,6 @@ def capability_commands_tick(req: RunRequest, run_record_id: str) -> Dict[str, A
                 "Is_Locked": True,
                 "Locked_By": req.worker,
             },
-            # orchestrator schema candidates
             {
                 "Status_select": "Running",
                 "Linked_Run": [run_record_id],
@@ -602,7 +573,7 @@ def capability_commands_tick(req: RunRequest, run_record_id: str) -> Dict[str, A
     }
 
 # ----------------------------
-# HTTP_EXEC helpers (PATCH)
+# HTTP_EXEC helpers
 # ----------------------------
 
 def _to_dict(x: Any) -> Dict[str, Any]:
@@ -630,14 +601,12 @@ def _normalize_allowlist_hosts(raw: str) -> List[str]:
         if not pl:
             continue
 
-        # wildcard host
         if pl.startswith("*.") and "/" not in pl and "://" not in pl:
             if pl not in seen:
                 seen.add(pl)
                 out.append(pl)
             continue
 
-        # full URL -> host
         if "://" in pl:
             try:
                 pu = urlparse(pl)
@@ -649,7 +618,6 @@ def _normalize_allowlist_hosts(raw: str) -> List[str]:
             except Exception:
                 pass
 
-        # host/path -> host
         if "/" in pl:
             pl = pl.split("/", 1)[0].strip()
 
@@ -688,7 +656,7 @@ def _host_matches_allowlist(host: str, allowlist: List[str]) -> bool:
         if not rule_l:
             continue
         if rule_l.startswith("*."):
-            suffix = rule_l[1:]  # ".example.com"
+            suffix = rule_l[1:]
             if host.endswith(suffix):
                 return True
         else:
@@ -811,14 +779,13 @@ def _extract_http_exec_input(inp: Dict[str, Any]) -> Dict[str, Any]:
 def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     inp = req.input or {}
 
-    # SAFE: tolerate nested payload shape: {"input": {"input": {...}}}
     if isinstance(inp.get("input"), dict) and inp.get("input"):
         nested = inp.get("input")
         if any(k in nested for k in ("url", "http_target", "target", "tool", "method", "headers", "json", "body", "data", "secret_header_keys")):
             inp = nested
 
     extracted = _extract_http_exec_input(inp)
-    raw_target = extracted["raw_target"]  # FIX v2.3.8
+    raw_target = extracted["raw_target"]
 
     url = _resolve_http_target(raw_target)
     if not url:
@@ -897,6 +864,50 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
         "response_text": (text_preview[:2000] if text_preview else None),
     }
 
+# ----------------------------
+# SAFE: command input composition (PATCH v2.3.9)
+# ----------------------------
+
+def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Prefers a single canonical JSON field if present:
+      Command_JSON > Payload_JSON > Input_JSON
+    Then SAFE fallback from separate columns used in your base:
+      http_target, HTTP_Method, HTTP_Payload_JSON
+    """
+    # 1) Preferred JSON sources (if they exist in the base)
+    for key in ("Command_JSON", "Payload_JSON", "Input_JSON"):
+        obj = _json_load_maybe(fields.get(key))
+        if isinstance(obj, dict) and obj:
+            # If user stored top-level {"input": {...}} keep it; http_exec already tolerates nesting.
+            return obj
+
+    # 2) Fallback: build from separate columns
+    built: Dict[str, Any] = {}
+
+    http_target = str(fields.get("http_target", "") or "").strip()
+    if http_target:
+        built["http_target"] = http_target
+
+    method = str(fields.get("HTTP_Method", "") or "").strip()
+    if method:
+        built["method"] = method
+
+    payload_raw = fields.get("HTTP_Payload_JSON")
+    payload_obj = _json_load_maybe(payload_raw)
+    if payload_obj:
+        built["json"] = payload_obj
+    else:
+        # If it isn't parseable JSON but is a string, keep it as raw data
+        if isinstance(payload_raw, str) and payload_raw.strip():
+            built["data"] = payload_raw.strip()
+
+    return built
+
+# ----------------------------
+# State + Locks capabilities
+# ----------------------------
+
 def capability_state_get(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     key = str(req.input.get("key", "")).strip()
     if not key:
@@ -941,6 +952,10 @@ def capability_lock_release(req: RunRequest, run_record_id: str) -> Dict[str, An
         raise HTTPException(status_code=400, detail="lock_release requires input.key")
     return lock_release(key, holder)
 
+# ----------------------------
+# Commands Orchestrator (SAFE + PATCH)
+# ----------------------------
+
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     max_cmds = int(req.max_commands or 0) or 5
     view = (req.view or COMMANDS_VIEW_NAME or "Queue").strip()
@@ -964,7 +979,8 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
 
         processed_ids.append(cid)
 
-        status = str(fields.get("Status_select", "")).strip()
+        # COMPAT: some bases use Status_select, others Status_select
+        status = str(fields.get("Status_select", fields.get("Status_select", "")) or "").strip()
         if status and status not in ("Queued", "QUEUE", "Queue"):
             blocked += 1
             continue
@@ -996,7 +1012,9 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             continue
 
         idem = str(fields.get("Idempotency_Key", "")).strip() or f"cmd:{cid}:{capability}"
-        cmd_input = _json_load_maybe(fields.get("Input_JSON"))
+
+        # PATCH: compose input from JSON OR from columns (prevents missing url)
+        cmd_input = _compose_command_input(fields)
 
         try:
             airtable_update(COMMANDS_TABLE_NAME, cid, {
