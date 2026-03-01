@@ -26,7 +26,7 @@
 # v2.4.1 SAFE fixes:
 # - from_payload(): pop alias keys after mapping (prevents Pydantic forbid extra)
 # - http_exec: if Tool_Key provided and url unresolved, fallback to ToolCatalog.URL
-=======
+
 # app/worker.py — BOSAI Worker (v2.4.2)
 # Base: your v2.4.1 (as pasted)
 #
@@ -60,11 +60,11 @@ from urllib.parse import urlparse
 import requests
 from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
-<<<<<<< HEAD
+
 
 from app.capabilities.http_exec import run_http_exec  # noqa: F401
-=======
->>>>>>> eafc2a4 (Add Make API integration config)
+
+
 
 
 # ============================================================
@@ -132,10 +132,10 @@ HTTP_EXEC_MAX_RESPONSE_BYTES = int((os.getenv("HTTP_EXEC_MAX_RESPONSE_BYTES", "2
 HTTP_EXEC_ALLOWLIST_RAW = os.getenv("HTTP_EXEC_ALLOWLIST", "").strip()
 HTTP_EXEC_TARGETS_JSON = os.getenv("HTTP_EXEC_TARGETS_JSON", "").strip()
 HTTP_EXEC_BLOCK_PRIVATE_NETS = (os.getenv("HTTP_EXEC_BLOCK_PRIVATE_NETS", "1").strip() != "0")
-<<<<<<< HEAD
+
 HTTP_EXEC_SECRET_HEADER_PREFIX = os.getenv("HTTP_EXEC_SECRET_HEADER_PREFIX", "HTTP_EXEC_HEADER_AUTH_").strip()
 
-=======
+
 
 # Prefix used for env-var secret headers (you already use this)
 HTTP_EXEC_SECRET_HEADER_PREFIX = os.getenv("HTTP_EXEC_SECRET_HEADER_PREFIX", "HTTP_EXEC_HEADER_AUTH_").strip()
@@ -143,7 +143,7 @@ HTTP_EXEC_SECRET_HEADER_PREFIX = os.getenv("HTTP_EXEC_SECRET_HEADER_PREFIX", "HT
 # Additional secret file prefix (Render Secret Files)
 SECRET_FILE_PREFIX = os.getenv("SECRET_FILE_PREFIX", "SECRET_HEADER_").strip()
 
->>>>>>> eafc2a4 (Add Make API integration config)
+
 # ToolCatalog behavior toggles (SAFE defaults)
 TOOLCATALOG_ENFORCE_HTTP_EXEC = (os.getenv("TOOLCATALOG_ENFORCE_HTTP_EXEC", "1").strip() != "0")
 TOOLCATALOG_OVERRIDE_HTTP = (os.getenv("TOOLCATALOG_OVERRIDE_HTTP", "1").strip() != "0")  # URL/Method/Headers/Timeout
