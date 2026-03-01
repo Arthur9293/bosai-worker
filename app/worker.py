@@ -1,22 +1,26 @@
-# app/worker.py — BOSAI Worker (v2.3.9)
-# SAFE from v2.3.8 baseline:
+# app/worker.py — BOSAI Worker (v2.4.0)
+# SAFE from v2.3.9 baseline:
 # - Keeps GET /, HEAD /, /health, /health/score, POST /run behavior
 # - Status_select schema for System_Runs unchanged
 # - Idempotency replay unchanged
-# - Commands Orchestrator V1 behavior preserved, with SAFE input composition (compat)
+# - Commands Orchestrator V1 behavior preserved (input composition unchanged)
 # - SLA Machine V1 unchanged
 # - No Is_bad (removed entirely)
 #
-# PATCH (SAFE):
-# - command_orchestrator now composes http_exec input from either:
-#   - Command_JSON / Payload_JSON / Input_JSON (preferred)
-#   - OR fallback columns: http_target, HTTP_Method, HTTP_Payload_JSON
-#   => prevents "HTTP_EXEC missing url" when data is stored in columns instead of JSON.
-# - Robust status read: supports Status_select OR Status OR Status_raw (compat)
+# PATCH (SAFE, additive):
+# - ToolCatalog enforcement for http_exec (optional, backward compatible):
+#   If a command/input provides Tool_Key (or tool_key), we enforce:
+#     - Tool exists + Enabled=true
+#     - Allowed_Modes contains Tool_Mode (or tool_mode) when provided
+#     - Allowed_Intents contains Tool_Intent (or tool_intent) when provided
+#     - Requires_Approval => must pass approved=true (or Approved=true) unless dry_run
+#   And we can optionally override:
+#     - URL, Method, Headers_JSON, Timeout_S from ToolCatalog
+#   If Tool_Key is missing, behavior is unchanged (compat).
 #
 # IMPORTANT:
-# - This file is intentionally conservative: only fixes necessary parts + adds HTTP_EXEC safely.
-# - Keeps existing behaviors that you already validated.
+# - No schema changes required to run (Tool_Key optional).
+# - This is conservative: only gates http_exec when Tool_Key is provided.
 
 import os
 import json
@@ -26,15 +30,13 @@ import hmac
 import hashlib
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 from urllib.parse import urlparse
 
 import requests
 from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-# NOTE: you requested http_exec capability file earlier; we keep this import for future reuse.
-# Current worker uses capability_http_exec implemented below (already validated/compatible).
 from app.capabilities.http_exec import run_http_exec  # noqa: F401
 
 
@@ -49,13 +51,14 @@ SYSTEM_RUNS_TABLE_NAME = os.getenv("SYSTEM_RUNS_TABLE_NAME", "System_Runs").stri
 COMMANDS_TABLE_NAME = os.getenv("COMMANDS_TABLE_NAME", "Commands").strip()
 LOGS_ERRORS_TABLE_NAME = os.getenv("LOGS_ERRORS_TABLE_NAME", "Logs_Erreurs").strip()
 STATE_TABLE_NAME = os.getenv("STATE_TABLE_NAME", "State").strip()
+TOOLCATALOG_TABLE_NAME = os.getenv("TOOLCATALOG_TABLE_NAME", "ToolCatalog").strip()
 
 LOGS_ERRORS_VIEW_NAME = os.getenv("LOGS_ERRORS_VIEW_NAME", "Active").strip()
 COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.3.9").strip()
+APP_VERSION = os.getenv("APP_VERSION", "2.4.0").strip()
 
 RUN_MAX_SECONDS = float((os.getenv("RUN_MAX_SECONDS", "30") or "30").strip())
 HTTP_TIMEOUT_SECONDS = float((os.getenv("HTTP_TIMEOUT_SECONDS", "20") or "20").strip())
@@ -99,6 +102,11 @@ HTTP_EXEC_ALLOWLIST_RAW = os.getenv("HTTP_EXEC_ALLOWLIST", "").strip()
 HTTP_EXEC_TARGETS_JSON = os.getenv("HTTP_EXEC_TARGETS_JSON", "").strip()
 HTTP_EXEC_BLOCK_PRIVATE_NETS = (os.getenv("HTTP_EXEC_BLOCK_PRIVATE_NETS", "1").strip() != "0")
 HTTP_EXEC_SECRET_HEADER_PREFIX = os.getenv("HTTP_EXEC_SECRET_HEADER_PREFIX", "HTTP_EXEC_HEADER_AUTH_").strip()
+
+# ToolCatalog behavior toggles (SAFE defaults)
+TOOLCATALOG_ENFORCE_HTTP_EXEC = (os.getenv("TOOLCATALOG_ENFORCE_HTTP_EXEC", "1").strip() != "0")
+TOOLCATALOG_OVERRIDE_HTTP = (os.getenv("TOOLCATALOG_OVERRIDE_HTTP", "1").strip() != "0")  # URL/Method/Headers/Timeout
+TOOLCATALOG_CACHE_SECONDS = int((os.getenv("TOOLCATALOG_CACHE_SECONDS", "30") or "30").strip())
 
 
 # ============================================================
@@ -269,6 +277,29 @@ def verify_signature_or_401(raw_body: bytes, signature_header: Optional[str]) ->
     ours = hmac.new(RUN_SHARED_SECRET.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(their_hex, ours):
         raise HTTPException(status_code=401, detail="Invalid x-run-signature")
+
+
+def _to_dict(x: Any) -> Dict[str, Any]:
+    return x if isinstance(x, dict) else {}
+
+
+def _pick_first(*vals):
+    for v in vals:
+        if v is None:
+            continue
+        if isinstance(v, str) and v.strip() == "":
+            continue
+        return v
+    return None
+
+
+def _as_bool(v: Any) -> bool:
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return False
+    s = str(v).strip().lower()
+    return s in ("1", "true", "yes", "y", "ok")
 
 
 # ============================================================
@@ -478,6 +509,213 @@ def lock_release(lock_key: str, holder: str) -> Dict[str, Any]:
 
 
 # ============================================================
+# ToolCatalog cache + enforcement (SAFE, optional)
+# ============================================================
+
+_TOOLCATALOG_CACHE: Dict[str, Any] = {"ts": 0.0, "by_key": {}}
+
+
+def _toolcatalog_fetch_map(force: bool = False) -> Dict[str, Dict[str, Any]]:
+    """
+    Returns map: Tool_Key -> ToolCatalog Airtable record dict (id+fields).
+    Cached for TOOLCATALOG_CACHE_SECONDS to reduce Airtable calls during cron.
+    """
+    now = time.time()
+    ts = float(_TOOLCATALOG_CACHE.get("ts") or 0.0)
+    if not force and (now - ts) < float(TOOLCATALOG_CACHE_SECONDS):
+        by_key = _TOOLCATALOG_CACHE.get("by_key")
+        if isinstance(by_key, dict):
+            return by_key
+
+    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+        _TOOLCATALOG_CACHE["ts"] = now
+        _TOOLCATALOG_CACHE["by_key"] = {}
+        return {}
+
+    # SAFE: no view required; we keep a small max to avoid over-fetch.
+    try:
+        r = requests.get(
+            _airtable_url(TOOLCATALOG_TABLE_NAME),
+            headers=_airtable_headers(),
+            params={"maxRecords": "200"},
+            timeout=HTTP_TIMEOUT_SECONDS,
+        )
+        if r.status_code >= 300:
+            _TOOLCATALOG_CACHE["ts"] = now
+            _TOOLCATALOG_CACHE["by_key"] = {}
+            return {}
+
+        records = r.json().get("records", []) or []
+        out: Dict[str, Dict[str, Any]] = {}
+        for rec in records:
+            fields = rec.get("fields", {}) or {}
+            key = str(fields.get("Tool_Key", "") or "").strip()
+            if not key:
+                continue
+            out[key] = rec
+
+        _TOOLCATALOG_CACHE["ts"] = now
+        _TOOLCATALOG_CACHE["by_key"] = out
+        return out
+
+    except Exception:
+        _TOOLCATALOG_CACHE["ts"] = now
+        _TOOLCATALOG_CACHE["by_key"] = {}
+        return {}
+
+
+def _toolcatalog_get(tool_key: str) -> Optional[Dict[str, Any]]:
+    tool_key = str(tool_key or "").strip()
+    if not tool_key:
+        return None
+    m = _toolcatalog_fetch_map(force=False)
+    rec = m.get(tool_key)
+    if rec:
+        return rec
+    # one forced refresh attempt (SAFE)
+    m2 = _toolcatalog_fetch_map(force=True)
+    return m2.get(tool_key)
+
+
+def _extract_tool_meta(inp: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Reads tool fields from input (supports different naming styles).
+    """
+    inp0 = _to_dict(inp)
+    nested_input = _to_dict(inp0.get("input"))
+    nested_args = _to_dict(inp0.get("args"))
+
+    tool_key = _pick_first(
+        inp0.get("Tool_Key"),
+        inp0.get("tool_key"),
+        inp0.get("toolKey"),
+        nested_input.get("Tool_Key"),
+        nested_input.get("tool_key"),
+        nested_input.get("toolKey"),
+        nested_args.get("Tool_Key"),
+        nested_args.get("tool_key"),
+        nested_args.get("toolKey"),
+    )
+
+    tool_mode = _pick_first(
+        inp0.get("Tool_Mode"),
+        inp0.get("tool_mode"),
+        inp0.get("toolMode"),
+        nested_input.get("Tool_Mode"),
+        nested_input.get("tool_mode"),
+        nested_input.get("toolMode"),
+        nested_args.get("Tool_Mode"),
+        nested_args.get("tool_mode"),
+        nested_args.get("toolMode"),
+    )
+
+    tool_intent = _pick_first(
+        inp0.get("Tool_Intent"),
+        inp0.get("tool_intent"),
+        inp0.get("toolIntent"),
+        nested_input.get("Tool_Intent"),
+        nested_input.get("tool_intent"),
+        nested_input.get("toolIntent"),
+        nested_args.get("Tool_Intent"),
+        nested_args.get("tool_intent"),
+        nested_args.get("toolIntent"),
+    )
+
+    approved = _pick_first(
+        inp0.get("Approved"),
+        inp0.get("approved"),
+        inp0.get("is_approved"),
+        nested_input.get("Approved"),
+        nested_input.get("approved"),
+        nested_input.get("is_approved"),
+        nested_args.get("Approved"),
+        nested_args.get("approved"),
+        nested_args.get("is_approved"),
+    )
+
+    return {
+        "tool_key": str(tool_key or "").strip(),
+        "tool_mode": str(tool_mode or "").strip(),
+        "tool_intent": str(tool_intent or "").strip(),
+        "approved": _as_bool(approved),
+    }
+
+
+def _toolcatalog_list_field(fields: Dict[str, Any], name: str) -> List[str]:
+    """
+    Airtable multi-select typically returns a list of strings.
+    Fallback: comma-separated string => split.
+    """
+    v = fields.get(name)
+    if isinstance(v, list):
+        return [str(x).strip() for x in v if str(x).strip()]
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return []
+        return [p.strip() for p in s.split(",") if p.strip()]
+    return []
+
+
+def _toolcatalog_enforce_or_raise(req: RunRequest, tool_key: str, tool_mode: str, tool_intent: str, approved: bool) -> Dict[str, Any]:
+    """
+    Validates ToolCatalog constraints.
+    Returns ToolCatalog fields if allowed.
+    """
+    rec = _toolcatalog_get(tool_key)
+    if not rec:
+        raise HTTPException(status_code=400, detail=f"ToolCatalog: unknown Tool_Key: {tool_key}")
+
+    fields = rec.get("fields", {}) or {}
+
+    enabled = fields.get("Enabled")
+    if enabled is not None and not _as_bool(enabled):
+        raise HTTPException(status_code=400, detail=f"ToolCatalog: tool disabled: {tool_key}")
+
+    # Allowed_Modes / Allowed_Intents checks (only if provided in input or present in catalog)
+    allowed_modes = _toolcatalog_list_field(fields, "Allowed_Modes")
+    allowed_intents = _toolcatalog_list_field(fields, "Allowed_Intents")
+
+    if tool_mode:
+        if allowed_modes and tool_mode not in allowed_modes:
+            raise HTTPException(status_code=400, detail=f"ToolCatalog: mode not allowed: {tool_mode} for {tool_key}")
+
+    if tool_intent:
+        if allowed_intents and tool_intent not in allowed_intents:
+            raise HTTPException(status_code=400, detail=f"ToolCatalog: intent not allowed: {tool_intent} for {tool_key}")
+
+    # Approval gate (SAFE): dry_run always allowed
+    requires_approval = fields.get("Requires_Approval")
+    if _as_bool(requires_approval) and (not req.dry_run) and (not approved):
+        raise HTTPException(status_code=400, detail=f"ToolCatalog: requires approval: {tool_key}")
+
+    return fields
+
+
+def _toolcatalog_minimal_args_check(fields: Dict[str, Any], args_obj: Dict[str, Any]) -> None:
+    """
+    Minimal enforcement for Args_Schema_JSON:
+    If schema has {"required":[...]} ensure keys exist in args_obj.
+    No full JSON Schema validation (keeps deps minimal + SAFE).
+    """
+    schema = _json_load_maybe(fields.get("Args_Schema_JSON"))
+    if not schema:
+        return
+    required = schema.get("required")
+    if not isinstance(required, list):
+        return
+    missing = []
+    for k in required:
+        ks = str(k).strip()
+        if not ks:
+            continue
+        if ks not in args_obj:
+            missing.append(ks)
+    if missing:
+        raise HTTPException(status_code=400, detail=f"ToolCatalog: missing required args: {', '.join(missing)}")
+
+
+# ============================================================
 # Capabilities
 # ============================================================
 
@@ -649,20 +887,6 @@ def capability_commands_tick(req: RunRequest, run_record_id: str) -> Dict[str, A
 # HTTP_EXEC helpers (SAFE)
 # ----------------------------
 
-def _to_dict(x: Any) -> Dict[str, Any]:
-    return x if isinstance(x, dict) else {}
-
-
-def _pick_first(*vals):
-    for v in vals:
-        if v is None:
-            continue
-        if isinstance(v, str) and v.strip() == "":
-            continue
-        return v
-    return None
-
-
 def _normalize_allowlist_hosts(raw: str) -> List[str]:
     raw = (raw or "").strip()
     if not raw:
@@ -810,7 +1034,6 @@ def _build_secret_headers(header_keys: List[str]) -> Dict[str, str]:
         env_name = f"{HTTP_EXEC_SECRET_HEADER_PREFIX}{str(key).strip()}"
         val = os.getenv(env_name, "").strip()
         if val:
-            # SAFE: single place for auth; if you need multi-headers later, extend.
             out["Authorization"] = val
     return out
 
@@ -867,6 +1090,54 @@ def _extract_http_exec_input(inp: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _toolcatalog_apply_overrides(tool_fields: Dict[str, Any], extracted: Dict[str, Any]) -> Tuple[str, str, Dict[str, str], float]:
+    """
+    If TOOLCATALOG_OVERRIDE_HTTP is enabled, override url/method/headers/timeout when present in ToolCatalog.
+    - URL: from ToolCatalog.URL (preferred) or Base_URL + URL (optional) if you store that style.
+    - Method: from ToolCatalog.Method
+    - Headers: merge ToolCatalog.Headers_JSON then extracted.headers (extracted wins last)
+    - Timeout: ToolCatalog.Timeout_S (float)
+    """
+    url_override = str(tool_fields.get("URL", "") or "").strip()
+    base_url = str(tool_fields.get("Base_URL", "") or "").strip()
+    method_override = str(tool_fields.get("Method", "") or "").strip().upper()
+
+    # Build URL:
+    url_final = extracted.get("raw_target", "")
+    if url_override:
+        url_final = url_override
+    elif base_url and url_final and not url_final.startswith("http"):
+        # optional pattern: base_url + relative path
+        url_final = base_url.rstrip("/") + "/" + url_final.lstrip("/")
+
+    method_final = extracted.get("method", "POST")
+    if method_override in ("GET", "POST", "PUT", "PATCH", "DELETE"):
+        method_final = method_override
+
+    headers_tool = _json_load_maybe(tool_fields.get("Headers_JSON"))
+    headers_tool = headers_tool if isinstance(headers_tool, dict) else {}
+    headers_in = extracted.get("headers") if isinstance(extracted.get("headers"), dict) else {}
+    headers_final: Dict[str, str] = {}
+    for k, v in headers_tool.items():
+        ks = str(k).strip()
+        if ks:
+            headers_final[ks] = str(v)
+    for k, v in headers_in.items():
+        ks = str(k).strip()
+        if ks:
+            headers_final[ks] = str(v)
+
+    timeout_s = HTTP_EXEC_TIMEOUT_SECONDS
+    try:
+        t = tool_fields.get("Timeout_S")
+        if t is not None and str(t).strip() != "":
+            timeout_s = float(t)
+    except Exception:
+        timeout_s = HTTP_EXEC_TIMEOUT_SECONDS
+
+    return url_final, method_final, headers_final, timeout_s
+
+
 def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     inp = req.input or {}
 
@@ -886,11 +1157,53 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
                 "body",
                 "data",
                 "secret_header_keys",
+                "Tool_Key",
+                "tool_key",
+                "Tool_Mode",
+                "tool_mode",
+                "Tool_Intent",
+                "tool_intent",
+                "Approved",
+                "approved",
             )
         ):
             inp = nested
 
     extracted = _extract_http_exec_input(inp)
+
+    # ------------------------------------------------------------
+    # ToolCatalog enforcement (SAFE, only if Tool_Key is present)
+    # ------------------------------------------------------------
+    tool_meta = _extract_tool_meta(inp)
+    tool_key = tool_meta["tool_key"]
+    tool_mode = tool_meta["tool_mode"]
+    tool_intent = tool_meta["tool_intent"]
+    approved = bool(tool_meta["approved"])
+
+    tool_fields: Optional[Dict[str, Any]] = None
+    if TOOLCATALOG_ENFORCE_HTTP_EXEC and tool_key:
+        tool_fields = _toolcatalog_enforce_or_raise(req, tool_key, tool_mode, tool_intent, approved)
+
+        # Minimal args required enforcement (SAFE): we check args against json_body if present, else {}.
+        args_obj = {}
+        if isinstance(extracted.get("json_body"), dict):
+            args_obj = extracted.get("json_body")  # type: ignore
+        _toolcatalog_minimal_args_check(tool_fields, args_obj)
+
+        # Optional overrides (SAFE)
+        if TOOLCATALOG_OVERRIDE_HTTP:
+            # apply tool overrides BEFORE resolving allowlist
+            url_final, method_final, headers_final, timeout_s = _toolcatalog_apply_overrides(tool_fields, extracted)
+            extracted["raw_target"] = url_final
+            extracted["method"] = method_final
+            extracted["headers"] = headers_final
+            # override runtime timeout
+            local_timeout = timeout_s
+        else:
+            local_timeout = HTTP_EXEC_TIMEOUT_SECONDS
+    else:
+        local_timeout = HTTP_EXEC_TIMEOUT_SECONDS
+
     raw_target = extracted["raw_target"]
 
     url = _resolve_http_target(raw_target)
@@ -905,11 +1218,11 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
 
     meta = _validate_http_exec_url(url)
 
-    method = extracted["method"]
+    method = str(extracted["method"] or "POST").upper()
     if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
         raise HTTPException(status_code=400, detail=f"HTTP_EXEC invalid method: {method}")
 
-    headers_in = extracted["headers"]
+    headers_in = extracted["headers"] if isinstance(extracted["headers"], dict) else {}
     secret_headers = _build_secret_headers(extracted["secret_header_keys"])
     headers = {**headers_in, **secret_headers}
 
@@ -929,6 +1242,9 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
             "url": url,
             "headers": _safe_headers_for_log(headers),
             "allowlist": HTTP_EXEC_ALLOWLIST,
+            "tool_key": tool_key or None,
+            "tool_mode": tool_mode or None,
+            "tool_intent": tool_intent or None,
             "note": "HTTP call skipped (dry_run).",
         }
 
@@ -937,13 +1253,13 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
             raise HTTPException(status_code=400, detail="HTTP_EXEC data must be str or bytes.")
         raw_bytes = raw_data.encode("utf-8") if isinstance(raw_data, str) else raw_data
         raw_bytes = _truncate_bytes(raw_bytes, HTTP_EXEC_MAX_BODY_BYTES)
-        resp = requests.request(method, url, headers=headers, data=raw_bytes, timeout=HTTP_EXEC_TIMEOUT_SECONDS)
+        resp = requests.request(method, url, headers=headers, data=raw_bytes, timeout=float(local_timeout))
     else:
         jb = json_body if json_body is not None else {}
         jb_bytes = json.dumps(jb, ensure_ascii=False).encode("utf-8")
         if len(jb_bytes) > HTTP_EXEC_MAX_BODY_BYTES:
             raise HTTPException(status_code=400, detail="HTTP_EXEC json/body too large.")
-        resp = requests.request(method, url, headers=headers, json=jb, timeout=HTTP_EXEC_TIMEOUT_SECONDS)
+        resp = requests.request(method, url, headers=headers, json=jb, timeout=float(local_timeout))
 
     status = resp.status_code
     resp_headers = dict(resp.headers or {})
@@ -967,6 +1283,9 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
         "method": method,
         "url": url,
         "status_code": status,
+        "tool_key": tool_key or None,
+        "tool_mode": tool_mode or None,
+        "tool_intent": tool_intent or None,
         "request_headers": _safe_headers_for_log(headers),
         "response_headers": {
             k: (v if k.lower() != "set-cookie" else "***redacted***")
@@ -978,7 +1297,7 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
 
 
 # ----------------------------
-# SAFE: command input composition (PATCH v2.3.9)
+# SAFE: command input composition (PATCH v2.3.9 preserved)
 # ----------------------------
 
 def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
@@ -1010,6 +1329,20 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     else:
         if isinstance(payload_raw, str) and payload_raw.strip():
             built["data"] = payload_raw.strip()
+
+    # NEW (SAFE): if you store ToolCatalog fields in Commands columns, forward them (optional)
+    tool_key = str(fields.get("Tool_Key", "") or "").strip()
+    if tool_key:
+        built["Tool_Key"] = tool_key
+    tool_mode = str(fields.get("Tool_Mode", "") or "").strip()
+    if tool_mode:
+        built["Tool_Mode"] = tool_mode
+    tool_intent = str(fields.get("Tool_Intent", "") or "").strip()
+    if tool_intent:
+        built["Tool_Intent"] = tool_intent
+    approved = fields.get("Approved")
+    if approved is not None:
+        built["Approved"] = bool(approved)
 
     return built
 
@@ -1067,7 +1400,7 @@ def capability_lock_release(req: RunRequest, run_record_id: str) -> Dict[str, An
 
 
 # ----------------------------
-# Commands Orchestrator (SAFE + PATCH)
+# Commands Orchestrator (SAFE + PATCH preserved)
 # ----------------------------
 
 def _read_command_status(fields: Dict[str, Any]) -> str:
@@ -1288,6 +1621,8 @@ def health_score() -> Dict[str, Any]:
         issues.append("http_exec_disabled_no_allowlist")
     if not HTTP_EXEC_TARGETS_JSON:
         issues.append("http_exec_no_alias_targets")
+    if TOOLCATALOG_ENFORCE_HTTP_EXEC:
+        issues.append("toolcatalog_http_exec_enforced")
     return {"ok": True, "score": max(0, score), "issues": issues, "ts": utc_now_iso()}
 
 
