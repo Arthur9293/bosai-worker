@@ -22,6 +22,10 @@
 # SAFE from v2.3.7 baseline (same behavior), with HTTP_EXEC hardened + raw_target fix.
 # IMPORTANT: No Is_bad (removed entirely)
 
+# app/worker.py — BOSAI Worker (v2.3.8) — COMPAT (Pydantic v1/v2)
+# SAFE from v2.3.7 baseline (same behavior), with HTTP_EXEC hardened + raw_target fix.
+# IMPORTANT: No Is_bad (removed entirely)
+
 import os
 import json
 import time
@@ -490,6 +494,112 @@ def capability_sla_machine(req: RunRequest, run_record_id: str) -> Dict[str, Any
             errors.append(f"{rid}: {e.detail}")
 
     return {"ok": True, "updated": updated, "skipped": skipped, "errors_count": len(errors), "errors": errors[:10]}
+
+# ----------------------------
+# Commands Tick (SAFE)
+# ----------------------------
+
+def _airtable_update_best_effort(table_name: str, record_id: str, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Try multiple payloads, so we don't break if some Airtable fields do not exist.
+    Only used by commands_tick capability.
+    """
+    last_err: Optional[str] = None
+    for fields in candidates:
+        if not fields:
+            continue
+        try:
+            airtable_update(table_name, record_id, fields)
+            return {"ok": True, "applied_fields": list(fields.keys())}
+        except HTTPException as e:
+            last_err = str(e.detail)
+            continue
+        except Exception as e:
+            last_err = repr(e)
+            continue
+    return {"ok": False, "error": last_err or "update_failed"}
+
+def capability_commands_tick(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    """
+    Lightweight queue tick:
+    - reads Commands view (default COMMANDS_VIEW_NAME)
+    - best-effort marks records as running/locked (without assuming exact schema)
+    - returns processed ids
+    """
+    inp = req.input or {}
+    limit = int(inp.get("limit", 5) or 5)
+    if limit <= 0:
+        limit = 5
+    if limit > 50:
+        limit = 50  # hard safety
+
+    view = (req.view or COMMANDS_VIEW_NAME or "Queue").strip()
+    cmds = airtable_list_view(COMMANDS_TABLE_NAME, view, max_records=limit)
+
+    now = utc_now_iso()
+    processed: List[str] = []
+    updated = 0
+    update_fail = 0
+    update_errors: List[str] = []
+
+    for c in cmds:
+        cid = c.get("id")
+        if not cid:
+            continue
+
+        processed.append(cid)
+
+        candidates = [
+            # mobile schema candidates (if present)
+            {
+                "Is_Locked": True,
+                "Locked_At": now,
+                "Locked_By": req.worker,
+                "Last_Status": "Running",
+                "Last_Error": "",
+                "Linked_Run": [run_record_id],
+            },
+            {
+                "Is_Locked": True,
+                "Locked_At": now,
+                "Locked_By": req.worker,
+                "Last_Status": "Running",
+            },
+            {
+                "Is_Locked": True,
+                "Locked_By": req.worker,
+            },
+            # orchestrator schema candidates
+            {
+                "Status_select": "Running",
+                "Linked_Run": [run_record_id],
+                "Error_Message": "",
+            },
+            {
+                "Status_select": "Running",
+            },
+        ]
+
+        res = _airtable_update_best_effort(COMMANDS_TABLE_NAME, cid, candidates)
+        if res.get("ok"):
+            updated += 1
+        else:
+            update_fail += 1
+            update_errors.append(f"{cid}: {res.get('error')}")
+
+    return {
+        "ok": True,
+        "view": view,
+        "limit": limit,
+        "scanned": len(cmds),
+        "processed": processed,
+        "updated": updated,
+        "update_fail": update_fail,
+        "errors_count": len(update_errors),
+        "errors": update_errors[:10],
+        "run_record_id": run_record_id,
+        "ts": now,
+    }
 
 # ----------------------------
 # HTTP_EXEC helpers (PATCH)
@@ -964,6 +1074,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
 
 CAPABILITIES = {
     "health_tick": capability_health_tick,
+    "commands_tick": capability_commands_tick,
     "sla_machine": capability_sla_machine,
     "http_exec": capability_http_exec,
     "state_get": capability_state_get,
