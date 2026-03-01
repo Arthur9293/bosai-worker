@@ -43,7 +43,7 @@ import requests
 from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from app.capabilities.http_exec import run_http_exec  # noqa: F401
+#from app.capabilities.http_exec import run_http_exec  # noqa: F401
 
 
 # ============================================================
