@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlparse
@@ -41,7 +40,7 @@ def _is_host_allowed(host: str, allowed_hosts: list[str]) -> bool:
     """
     Strict host allowlist:
     - allow exact match
-    - allow subdomain match only if allowlist contains a wildcard root with leading dot
+    - allow subdomain match only if allowlist contains a wildcard-like root with leading dot
       Example: ".make.com" will allow "hook.eu2.make.com"
     """
     host = (host or "").strip().lower()
@@ -100,9 +99,9 @@ def _coerce_body(body: Any) -> Tuple[Optional[bytes], Optional[str], Optional[Di
     """
     Returns: (data_bytes, content_type, json_body)
     Priority:
-    - dict/list -> JSON
-    - str/int/float/bool -> text
-    - None -> no body
+    - if body is dict/list -> JSON
+    - if body is str/int/float/bool -> raw text
+    - if body is None -> no body
     """
     if body is None:
         return None, None, None
@@ -139,19 +138,16 @@ def run_http_exec(input_data: Dict[str, Any]) -> Dict[str, Any]:
 
     input_data schema:
     {
-      "url": "...",
+      "url": "https://hooks.make.com/xxxxx",
       "method": "POST",
-      "headers": {...},
-      "query": {...},
-      "body": {...} | "text",
-      "timeout_seconds": 10
+      "headers": {"Content-Type": "application/json"},
+      "query": {"a":"b"},                 # optional
+      "body": {...} | "raw text",         # optional
+      "timeout_seconds": 10               # optional (override <= env timeout)
     }
     """
-
     allowed_hosts = _env_list("HTTP_EXEC_ALLOWLIST", "")
-    allowed_methods = set(
-        [_normalize_method(x) for x in _env_list("HTTP_EXEC_ALLOW_METHODS", "GET,POST")]
-    )
+    allowed_methods = set([_normalize_method(x) for x in _env_list("HTTP_EXEC_ALLOW_METHODS", "GET,POST")])
     timeout_env = float(os.getenv("HTTP_EXEC_TIMEOUT_SECONDS", "20").strip() or "20")
     max_bytes = _env_int("HTTP_EXEC_MAX_RESPONSE_BYTES", 200000)
 
@@ -179,15 +175,13 @@ def run_http_exec(input_data: Dict[str, Any]) -> Dict[str, Any]:
         timeout_req = float(input_data.get("timeout_seconds", timeout_env))
     except Exception:
         timeout_req = timeout_env
-
     if timeout_req <= 0:
         timeout_req = timeout_env
     if timeout_req > timeout_env:
         timeout_req = timeout_env
 
     data_bytes, inferred_ct, json_body = _coerce_body(body)
-
-    if inferred_ct and "content-type" not in {k.lower() for k in headers.keys()}:
+    if inferred_ct and "Content-Type" not in headers and "content-type" not in {k.lower() for k in headers.keys()}:
         headers["Content-Type"] = inferred_ct
 
     try:
@@ -203,23 +197,17 @@ def run_http_exec(input_data: Dict[str, Any]) -> Dict[str, Any]:
     except requests.exceptions.Timeout:
         return {"ok": False, "error": "timeout"}
     except Exception as e:
-        return {
-            "ok": False,
-            "error": f"request_failed:{type(e).__name__}:{str(e)[:200]}"
-        }
+        return {"ok": False, "error": f"request_failed:{type(e).__name__}:{str(e)[:200]}"}
 
-    elapsed_ms = int(resp.elapsed.total_seconds() * 1000) if resp.elapsed else 0
-
+    elapsed_ms = int(getattr(resp, "elapsed", None).total_seconds() * 1000) if getattr(resp, "elapsed", None) else 0
     content = resp.content or b""
     truncated = False
-
     if len(content) > max_bytes:
         content = content[:max_bytes]
         truncated = True
 
     resp_headers: Dict[str, str] = {}
-
-    for k, v in resp.headers.items():
+    for k, v in (resp.headers or {}).items():
         if isinstance(k, str) and isinstance(v, str):
             resp_headers[k] = v[:500]
 
@@ -227,8 +215,7 @@ def run_http_exec(input_data: Dict[str, Any]) -> Dict[str, Any]:
     js: Optional[Any] = None
 
     ctype = (resp.headers.get("Content-Type", "") or "").lower()
-
-    if "json" in ctype:
+    if "application/json" in ctype or "json" in ctype:
         try:
             js = resp.json()
         except Exception:
