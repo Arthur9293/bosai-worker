@@ -13,9 +13,10 @@
 #    - Authorization_Mode ("token"|"bearer"|"raw")  # optional
 #    If present, merges with request secret_header_keys.
 #
-# NOTE for Make API:
-# - Make v2 API typically expects: Authorization: Token <MAKE_API_TOKEN>
-# - If you stored only the token, we will auto-format to "Token <token>" (configurable by Authorization_Mode).
+# ADD (SAFE):
+# 4) Supabase REST auto-auth (server-side only):
+#    - If host endswith .supabase.co and SUPABASE_API_KEY is set:
+#      add apikey + Authorization Bearer if missing.
 
 import os
 import json
@@ -946,7 +947,7 @@ def _safe_headers_for_log(headers: Dict[str, str]) -> Dict[str, str]:
     out: Dict[str, str] = {}
     for k, v in (headers or {}).items():
         lk = k.lower()
-        if lk in ("authorization", "cookie", "x-api-key", "set-cookie"):
+        if lk in ("authorization", "cookie", "x-api-key", "set-cookie", "apikey"):
             out[k] = "***redacted***"
         else:
             out[k] = v
@@ -1054,7 +1055,7 @@ def _build_secret_headers(header_keys: List[str], auth_mode: str = "token") -> D
         if not k:
             continue
 
-        # 1) env var prefix (your current pattern)
+        # 1) env var prefix
         v = os.getenv(f"{HTTP_EXEC_SECRET_HEADER_PREFIX}{k}", "").strip()
 
         # 2) legacy env var
@@ -1071,7 +1072,6 @@ def _build_secret_headers(header_keys: List[str], auth_mode: str = "token") -> D
 
         if v:
             out["Authorization"] = _format_authorization(v, auth_mode)
-            # only one Authorization expected
             break
 
     return out
@@ -1282,6 +1282,19 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
 
     secret_headers = _build_secret_headers(merged_secret_keys, auth_mode=auth_mode)
     headers = {**headers_in, **secret_headers}
+
+    # SAFE: auto-auth for Supabase REST (server-side only)
+    supa_key = os.getenv("SUPABASE_API_KEY", "").strip()
+    if supa_key:
+        try:
+            host_l = (meta.get("host") or "").lower()
+        except Exception:
+            host_l = ""
+        if host_l.endswith(".supabase.co"):
+            if not any(k.lower() == "apikey" for k in headers.keys()):
+                headers["apikey"] = supa_key
+            if not any(k.lower() == "authorization" for k in headers.keys()):
+                headers["Authorization"] = f"Bearer {supa_key}"
 
     json_body = extracted["json_body"]
     raw_data = extracted["raw_data"]
