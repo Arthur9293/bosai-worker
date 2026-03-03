@@ -1,14 +1,12 @@
 # app/worker.py — BOSAI Worker (v2.4.3)
-# Base: your v2.4.2 (as pasted)
-#
 # SAFE UPDATE (MAKE_RUN_SCENARIO first, without breaking anything):
-# A) http_exec: add ToolCatalog-driven retry (safe defaults = 0 retries)
+# A) http_exec: ToolCatalog-driven retry (safe defaults = 0 retries)
 #    - ToolCatalog optional fields:
 #      Retry_Max (number)
 #      Retry_Backoff_S (number)
 #      Retry_On_Status (text "429,500,502,503,504")
 #      Retry_On_Errors (text "timeout,request_failed")
-# B) http_exec return enriched diagnostics:
+# B) http_exec returns enriched diagnostics:
 #    - attempts, retry_max, last_error
 # C) dry_run keeps full details + shows retry config
 #
@@ -1201,6 +1199,7 @@ def _merge_secret_keys(request_keys: List[str], tool_fields: Optional[Dict[str, 
 def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     inp = req.input or {}
 
+    # compat: allow nesting under input.input
     if isinstance(inp.get("input"), dict) and inp.get("input"):
         nested = inp.get("input")
         if any(
@@ -1285,17 +1284,13 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
             auth_mode = am
 
     merged_secret_keys = _merge_secret_keys(extracted["secret_header_keys"], tool_fields)
-
     secret_headers = _build_secret_headers(merged_secret_keys, auth_mode=auth_mode)
     headers = {**headers_in, **secret_headers}
 
     # SAFE: auto-auth for Supabase REST (server-side only)
     supa_key = os.getenv("SUPABASE_API_KEY", "").strip()
     if supa_key:
-        try:
-            host_l = (meta.get("host") or "").lower()
-        except Exception:
-            host_l = ""
+        host_l = (meta.get("host") or "").lower()
         if host_l.endswith(".supabase.co"):
             if not any(k.lower() == "apikey" for k in headers.keys()):
                 headers["apikey"] = supa_key
@@ -1345,7 +1340,6 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     attempts = 0
     last_err: Optional[str] = None
     resp = None
-
     max_attempts = retry_max + 1
 
     while True:
@@ -1379,7 +1373,6 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
 
         except HTTPException:
             raise
-
         except requests.exceptions.Timeout:
             last_err = "timeout"
         except Exception as e:
@@ -1802,10 +1795,13 @@ async def run(request: Request) -> RunResponse:
             finish_system_run(run_record_id, "Unsupported", {"ok": False, "error": "unsupported_capability"})
             raise HTTPException(status_code=400, detail=f"Unsupported capability: {req.capability}")
 
-        # IMPORTANT FIX kept:
-        # We always call the capability even in dry_run,
-        # so http_exec returns full "dry_run" details.
+        # IMPORTANT: we always call the capability even in dry_run,
+        # so http_exec returns full dry_run details.
         result_obj = fn(req, run_record_id)
+
+        # Helpful: include Airtable record id in result (no schema break)
+        if isinstance(result_obj, dict) and "run_record_id" not in result_obj:
+            result_obj["run_record_id"] = run_record_id
 
         finish_system_run(run_record_id, "Done", result_obj)
 
@@ -1814,8 +1810,8 @@ async def run(request: Request) -> RunResponse:
             worker=req.worker,
             capability=req.capability,
             idempotency_key=req.idempotency_key,
-            run_id=run_record_id,
-            airtable_record_id=run_record_id,
+            run_id=run_record_id,                # keep current behavior (compat)
+            airtable_record_id=run_record_id,    # record id
             result=result_obj,
         )
 
