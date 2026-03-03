@@ -75,6 +75,7 @@ TOOLCATALOG_CACHE_SECONDS = int((os.getenv("TOOLCATALOG_CACHE_SECONDS", "30") or
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY", "").strip()
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID", "").strip()
 TOOLCATALOG_TABLE_NAME = os.getenv("TOOLCATALOG_TABLE_NAME", "ToolCatalog").strip()
+
 HTTP_TIMEOUT_SECONDS = float((os.getenv("HTTP_TIMEOUT_SECONDS", "20") or "20").strip())
 
 
@@ -236,12 +237,15 @@ def _is_blocked_ip(ip: str) -> bool:
     except Exception:
         return True
 
+    # loopback
     if addr.is_loopback:
         return True
 
+    # private / link-local / reserved / multicast
     if HTTP_EXEC_BLOCK_PRIVATE_NETS and (addr.is_private or addr.is_link_local or addr.is_reserved or addr.is_multicast):
         return True
 
+    # metadata
     if HTTP_EXEC_BLOCK_METADATA and str(addr) == "169.254.169.254":
         return True
 
@@ -259,12 +263,15 @@ def _validate_http_exec_url(url: str) -> Dict[str, str]:
     if not host:
         raise HTTPException(status_code=400, detail="HTTP_EXEC missing host")
 
+    # Deny-by-default: require allowlist
     if not _host_matches_allowlist(host, HTTP_EXEC_ALLOWLIST):
         raise HTTPException(status_code=403, detail=f"HTTP_EXEC host not in allowlist: {host}")
 
+    # Extra: obvious private hostnames
     if HTTP_EXEC_BLOCK_PRIVATE_NETS and _is_private_host(host):
         raise HTTPException(status_code=403, detail=f"HTTP_EXEC blocked private host: {host}")
 
+    # Real SSRF: DNS -> IP checks
     ips = _resolve_ips(host)
     for ip in ips:
         if _is_blocked_ip(ip):
@@ -884,7 +891,6 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
     attempts = 0
     last_err: Optional[str] = None
     resp: Optional[requests.Response] = None
-
     max_attempts = retry_max + 1
 
     while True:
@@ -940,7 +946,6 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
 
         except HTTPException:
             raise
-
         except requests.exceptions.Timeout:
             last_err = "timeout"
         except Exception as e:
