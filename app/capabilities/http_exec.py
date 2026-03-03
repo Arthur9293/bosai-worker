@@ -1,17 +1,28 @@
 # app/capabilities/http_exec.py
 # BOSAI Worker — capability http_exec (single source of truth)
-# Extracted from worker.py v2.4.3 (SAFE)
 #
-# - ToolCatalog enforcement (optional)
-# - ToolCatalog-driven retry (safe defaults = 0)
-# - allowlist + private net blocking
+# HARDENED PATCH:
+# - SSRF real protection: DNS resolve -> IP block (private/link-local/reserved/multicast/metadata)
+# - Redirects OFF by default (HTTP_EXEC_FOLLOW_REDIRECTS=0 recommended)
+# - Timeout caps (HTTP_EXEC_MAX_TIMEOUT_SECONDS)
+# - Shared requests.Session support (keep-alive, stable)
+# - ToolCatalog enforcement preserved (optional)
 # - dry_run returns full diagnostics
-# - optional Supabase auto-auth if SUPABASE_API_KEY is set and host endswith .supabase.co
+# - Supabase auto-auth disabled by default (HTTP_EXEC_SUPABASE_AUTO_AUTH=0 recommended)
+#
+# Additional SAFE improvement (for Supabase without leaking secrets in Airtable):
+# - If Secret_Header_Keys includes "SUPABASE", we inject BOTH:
+#     apikey: <secret>
+#     Authorization: Bearer <secret>
+#   sourced from env/secret files (same precedence as Authorization).
+# - This does NOT change behavior for other keys.
 
 import os
 import json
 import time
 import re
+import ipaddress
+import socket
 from typing import Any, Dict, Optional, List, Tuple
 from urllib.parse import urlparse
 
@@ -24,15 +35,36 @@ from fastapi import HTTPException
 # ============================================================
 
 HTTP_EXEC_TIMEOUT_SECONDS = float((os.getenv("HTTP_EXEC_TIMEOUT_SECONDS", "20") or "20").strip())
+HTTP_EXEC_MAX_TIMEOUT_SECONDS = float((os.getenv("HTTP_EXEC_MAX_TIMEOUT_SECONDS", "30") or "30").strip())
+
 HTTP_EXEC_MAX_BODY_BYTES = int((os.getenv("HTTP_EXEC_MAX_BODY_BYTES", "250000") or "250000").strip())
 HTTP_EXEC_MAX_RESPONSE_BYTES = int((os.getenv("HTTP_EXEC_MAX_RESPONSE_BYTES", "250000") or "250000").strip())
 
 HTTP_EXEC_ALLOWLIST_RAW = os.getenv("HTTP_EXEC_ALLOWLIST", "").strip()
 HTTP_EXEC_TARGETS_JSON = os.getenv("HTTP_EXEC_TARGETS_JSON", "").strip()
+
 HTTP_EXEC_BLOCK_PRIVATE_NETS = (os.getenv("HTTP_EXEC_BLOCK_PRIVATE_NETS", "1").strip() != "0")
+HTTP_EXEC_BLOCK_METADATA = (os.getenv("HTTP_EXEC_BLOCK_METADATA", "1").strip() != "0")
+
+HTTP_EXEC_FOLLOW_REDIRECTS = (os.getenv("HTTP_EXEC_FOLLOW_REDIRECTS", "0").strip() != "0")  # recommended 0
+
+HTTP_EXEC_ALLOWED_SCHEMES = set(
+    s.strip().lower()
+    for s in (os.getenv("HTTP_EXEC_ALLOWED_SCHEMES", "https,http") or "https,http").split(",")
+    if s.strip()
+)
+
+HTTP_EXEC_ALLOWED_METHODS = set(
+    m.strip().upper()
+    for m in (os.getenv("HTTP_EXEC_ALLOWED_METHODS", "GET,POST,PUT,PATCH,DELETE") or "").split(",")
+    if m.strip()
+)
 
 HTTP_EXEC_SECRET_HEADER_PREFIX = os.getenv("HTTP_EXEC_SECRET_HEADER_PREFIX", "HTTP_EXEC_HEADER_AUTH_").strip()
 SECRET_FILE_PREFIX = os.getenv("SECRET_FILE_PREFIX", "SECRET_HEADER_").strip()
+
+# Supabase auto-auth (disabled by default; prefer ToolCatalog Secret_Header_Keys or SUPABASE key injection below)
+HTTP_EXEC_SUPABASE_AUTO_AUTH = (os.getenv("HTTP_EXEC_SUPABASE_AUTO_AUTH", "0").strip() != "0")
 
 # ToolCatalog behavior toggles (SAFE defaults)
 TOOLCATALOG_ENFORCE_HTTP_EXEC = (os.getenv("TOOLCATALOG_ENFORCE_HTTP_EXEC", "1").strip() != "0")
@@ -49,11 +81,6 @@ HTTP_TIMEOUT_SECONDS = float((os.getenv("HTTP_TIMEOUT_SECONDS", "20") or "20").s
 # ============================================================
 # Airtable minimal client (ToolCatalog read only)
 # ============================================================
-
-def _require_airtable() -> None:
-    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
-        raise HTTPException(status_code=500, detail="Airtable env not configured (AIRTABLE_API_KEY / AIRTABLE_BASE_ID).")
-
 
 def _airtable_url(table_name: str) -> str:
     return f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_name}"
@@ -191,19 +218,59 @@ def _host_matches_allowlist(host: str, allowlist: List[str]) -> bool:
     return False
 
 
+def _resolve_ips(host: str) -> List[str]:
+    ips: List[str] = []
+    try:
+        for res in socket.getaddrinfo(host, None):
+            ip = res[4][0]
+            if ip and ip not in ips:
+                ips.append(ip)
+    except Exception:
+        pass
+    return ips
+
+
+def _is_blocked_ip(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except Exception:
+        return True
+
+    if addr.is_loopback:
+        return True
+
+    if HTTP_EXEC_BLOCK_PRIVATE_NETS and (addr.is_private or addr.is_link_local or addr.is_reserved or addr.is_multicast):
+        return True
+
+    if HTTP_EXEC_BLOCK_METADATA and str(addr) == "169.254.169.254":
+        return True
+
+    return False
+
+
 def _validate_http_exec_url(url: str) -> Dict[str, str]:
     parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        raise HTTPException(status_code=400, detail="HTTP_EXEC invalid url scheme (must be http/https).")
+
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in HTTP_EXEC_ALLOWED_SCHEMES:
+        raise HTTPException(status_code=403, detail=f"HTTP_EXEC invalid url scheme: {scheme}")
 
     host = (parsed.hostname or "").strip().lower()
-    if HTTP_EXEC_BLOCK_PRIVATE_NETS and _is_private_host(host):
-        raise HTTPException(status_code=400, detail=f"HTTP_EXEC blocked private host: {host}")
+    if not host:
+        raise HTTPException(status_code=400, detail="HTTP_EXEC missing host")
 
     if not _host_matches_allowlist(host, HTTP_EXEC_ALLOWLIST):
-        raise HTTPException(status_code=400, detail=f"HTTP_EXEC host not in allowlist: {host}")
+        raise HTTPException(status_code=403, detail=f"HTTP_EXEC host not in allowlist: {host}")
 
-    return {"host": host, "scheme": parsed.scheme}
+    if HTTP_EXEC_BLOCK_PRIVATE_NETS and _is_private_host(host):
+        raise HTTPException(status_code=403, detail=f"HTTP_EXEC blocked private host: {host}")
+
+    ips = _resolve_ips(host)
+    for ip in ips:
+        if _is_blocked_ip(ip):
+            raise HTTPException(status_code=403, detail=f"HTTP_EXEC blocked destination ip: {ip}")
+
+    return {"host": host, "scheme": scheme}
 
 
 # ============================================================
@@ -236,7 +303,7 @@ def _truncate_bytes(b: bytes, max_bytes: int) -> bytes:
 _TOOLCATALOG_CACHE: Dict[str, Any] = {"ts": 0.0, "by_key": {}}
 
 
-def _toolcatalog_fetch_map(force: bool = False) -> Dict[str, Dict[str, Any]]:
+def _toolcatalog_fetch_map(session: requests.Session, force: bool = False) -> Dict[str, Dict[str, Any]]:
     now = time.time()
     ts = float(_TOOLCATALOG_CACHE.get("ts") or 0.0)
     if not force and (now - ts) < float(TOOLCATALOG_CACHE_SECONDS):
@@ -250,7 +317,7 @@ def _toolcatalog_fetch_map(force: bool = False) -> Dict[str, Dict[str, Any]]:
         return {}
 
     try:
-        r = requests.get(
+        r = session.get(
             _airtable_url(TOOLCATALOG_TABLE_NAME),
             headers=_airtable_headers(),
             params={"maxRecords": "200"},
@@ -280,15 +347,15 @@ def _toolcatalog_fetch_map(force: bool = False) -> Dict[str, Dict[str, Any]]:
         return {}
 
 
-def _toolcatalog_get(tool_key: str) -> Optional[Dict[str, Any]]:
+def _toolcatalog_get(session: requests.Session, tool_key: str) -> Optional[Dict[str, Any]]:
     tool_key = str(tool_key or "").strip()
     if not tool_key:
         return None
-    m = _toolcatalog_fetch_map(force=False)
+    m = _toolcatalog_fetch_map(session=session, force=False)
     rec = m.get(tool_key)
     if rec:
         return rec
-    m2 = _toolcatalog_fetch_map(force=True)
+    m2 = _toolcatalog_fetch_map(session=session, force=True)
     return m2.get(tool_key)
 
 
@@ -365,8 +432,15 @@ def _extract_tool_meta(inp: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _toolcatalog_enforce_or_raise(req: Any, tool_key: str, tool_mode: str, tool_intent: str, approved: bool) -> Dict[str, Any]:
-    rec = _toolcatalog_get(tool_key)
+def _toolcatalog_enforce_or_raise(
+    session: requests.Session,
+    req: Any,
+    tool_key: str,
+    tool_mode: str,
+    tool_intent: str,
+    approved: bool,
+) -> Dict[str, Any]:
+    rec = _toolcatalog_get(session=session, tool_key=tool_key)
     if not rec:
         raise HTTPException(status_code=400, detail=f"ToolCatalog: unknown Tool_Key: {tool_key}")
 
@@ -498,27 +572,52 @@ def _format_authorization(raw: str, mode: str) -> str:
     return f"Token {s}"
 
 
+def _load_secret_for_key(k: str) -> str:
+    """
+    Precedence:
+      1) env: HTTP_EXEC_HEADER_AUTH_<KEY>
+      2) env: SECRET_HEADER_<KEY> (or configured SECRET_FILE_PREFIX)
+      3) file: /etc/secrets/SECRET_HEADER_<KEY>
+      4) if KEY=="MAKE": MAKE_API_TOKEN
+    """
+    k = (k or "").strip()
+    if not k:
+        return ""
+
+    v = (os.getenv(f"{HTTP_EXEC_SECRET_HEADER_PREFIX}{k}", "") or "").strip()
+    if not v:
+        v = (os.getenv(f"{SECRET_FILE_PREFIX}{k}", "") or "").strip()
+    if not v:
+        v = _read_secret_file(f"{SECRET_FILE_PREFIX}{k}")
+    if not v and k.upper() == "MAKE":
+        v = (os.getenv("MAKE_API_TOKEN", "") or "").strip()
+    return (v or "").strip()
+
+
 def _build_secret_headers(header_keys: List[str], auth_mode: str = "token") -> Dict[str, str]:
+    """
+    SAFE behavior:
+      - Default: inject Authorization only (as before)
+      - If key == "SUPABASE": inject apikey + Authorization: Bearer <secret> (Supabase REST expects both)
+    """
     out: Dict[str, str] = {}
+
     for key in header_keys or []:
         k = str(key).strip()
         if not k:
             continue
 
-        v = os.getenv(f"{HTTP_EXEC_SECRET_HEADER_PREFIX}{k}", "").strip()
+        secret = _load_secret_for_key(k)
+        if not secret:
+            continue
 
-        if not v:
-            v = os.getenv(f"{SECRET_FILE_PREFIX}{k}", "").strip()
+        if k.upper() == "SUPABASE":
+            out["apikey"] = secret
+            out["Authorization"] = f"Bearer {secret}"
+            return out
 
-        if not v:
-            v = _read_secret_file(f"{SECRET_FILE_PREFIX}{k}")
-
-        if not v and k.upper() == "MAKE":
-            v = os.getenv("MAKE_API_TOKEN", "").strip()
-
-        if v:
-            out["Authorization"] = _format_authorization(v, auth_mode)
-            break
+        out["Authorization"] = _format_authorization(secret, auth_mode)
+        return out
 
     return out
 
@@ -594,10 +693,12 @@ def _toolcatalog_apply_overrides(tool_fields: Dict[str, Any], extracted: Dict[st
     headers_tool = headers_tool if isinstance(headers_tool, dict) else {}
     headers_in = extracted.get("headers") if isinstance(extracted.get("headers"), dict) else {}
     headers_final: Dict[str, str] = {}
+
     for k, v in headers_tool.items():
         ks = str(k).strip()
         if ks:
             headers_final[ks] = str(v)
+
     for k, v in headers_in.items():
         ks = str(k).strip()
         if ks:
@@ -611,7 +712,7 @@ def _toolcatalog_apply_overrides(tool_fields: Dict[str, Any], extracted: Dict[st
     except Exception:
         timeout_s = HTTP_EXEC_TIMEOUT_SECONDS
 
-    return url_final, method_final, headers_final, timeout_s
+    return url_final, method_final, headers_final, float(timeout_s)
 
 
 def _merge_secret_keys(request_keys: List[str], tool_fields: Optional[Dict[str, Any]]) -> List[str]:
@@ -641,7 +742,9 @@ def _merge_secret_keys(request_keys: List[str], tool_fields: Optional[Dict[str, 
 # PUBLIC capability
 # ============================================================
 
-def capability_http_exec(req: Any, run_record_id: str) -> Dict[str, Any]:
+def capability_http_exec(req: Any, run_record_id: str, session: Optional[requests.Session] = None) -> Dict[str, Any]:
+    sess = session or requests.Session()
+
     inp = getattr(req, "input", None) or {}
     dry_run = bool(getattr(req, "dry_run", False))
 
@@ -651,24 +754,13 @@ def capability_http_exec(req: Any, run_record_id: str) -> Dict[str, Any]:
         if any(
             k in nested
             for k in (
-                "url",
-                "http_target",
-                "target",
-                "tool",
-                "method",
-                "headers",
-                "json",
-                "body",
-                "data",
+                "url", "http_target", "target", "tool",
+                "method", "headers", "json", "body", "data",
                 "secret_header_keys",
-                "Tool_Key",
-                "tool_key",
-                "Tool_Mode",
-                "tool_mode",
-                "Tool_Intent",
-                "tool_intent",
-                "Approved",
-                "approved",
+                "Tool_Key", "tool_key",
+                "Tool_Mode", "tool_mode",
+                "Tool_Intent", "tool_intent",
+                "Approved", "approved",
             )
         ):
             inp = nested
@@ -682,10 +774,10 @@ def capability_http_exec(req: Any, run_record_id: str) -> Dict[str, Any]:
     approved = bool(tool_meta["approved"])
 
     tool_fields: Optional[Dict[str, Any]] = None
-    local_timeout = HTTP_EXEC_TIMEOUT_SECONDS
+    local_timeout = float(HTTP_EXEC_TIMEOUT_SECONDS)
 
     if TOOLCATALOG_ENFORCE_HTTP_EXEC and tool_key:
-        tool_fields = _toolcatalog_enforce_or_raise(req, tool_key, tool_mode, tool_intent, approved)
+        tool_fields = _toolcatalog_enforce_or_raise(sess, req, tool_key, tool_mode, tool_intent, approved)
 
         args_obj = {}
         if isinstance(extracted.get("json_body"), dict):
@@ -698,6 +790,11 @@ def capability_http_exec(req: Any, run_record_id: str) -> Dict[str, Any]:
             extracted["method"] = method_final
             extracted["headers"] = headers_final
             local_timeout = float(timeout_s)
+
+    # timeout cap (anti-chaos)
+    if local_timeout <= 0:
+        local_timeout = float(HTTP_EXEC_TIMEOUT_SECONDS)
+    local_timeout = max(1.0, min(float(local_timeout), float(HTTP_EXEC_MAX_TIMEOUT_SECONDS)))
 
     raw_target = extracted["raw_target"]
     url = _resolve_http_target(raw_target)
@@ -717,7 +814,7 @@ def capability_http_exec(req: Any, run_record_id: str) -> Dict[str, Any]:
     meta = _validate_http_exec_url(url)
 
     method = str(extracted["method"] or "POST").upper()
-    if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
+    if method not in HTTP_EXEC_ALLOWED_METHODS:
         raise HTTPException(status_code=400, detail=f"HTTP_EXEC invalid method: {method}")
 
     headers_in = extracted["headers"] if isinstance(extracted["headers"], dict) else {}
@@ -730,19 +827,17 @@ def capability_http_exec(req: Any, run_record_id: str) -> Dict[str, Any]:
             auth_mode = am
 
     merged_secret_keys = _merge_secret_keys(extracted["secret_header_keys"], tool_fields)
-
     secret_headers = _build_secret_headers(merged_secret_keys, auth_mode=auth_mode)
     headers = {**headers_in, **secret_headers}
 
-    # SAFE: auto-auth for Supabase REST (server-side only)
-    supa_key = os.getenv("SUPABASE_API_KEY", "").strip()
-    if supa_key:
-        host_l = (meta.get("host") or "").lower()
-        if host_l.endswith(".supabase.co"):
-            if not any(k.lower() == "apikey" for k in headers.keys()):
-                headers["apikey"] = supa_key
-            if not any(k.lower() == "authorization" for k in headers.keys()):
-                headers["Authorization"] = f"Bearer {supa_key}"
+    # Optional: auto-auth for Supabase REST (disabled by default)
+    if HTTP_EXEC_SUPABASE_AUTO_AUTH:
+        supa_key = os.getenv("SUPABASE_API_KEY", "").strip()
+        if supa_key:
+            host_l = (meta.get("host") or "").lower()
+            if host_l.endswith(".supabase.co"):
+                headers.setdefault("apikey", supa_key)
+                headers.setdefault("Authorization", f"Bearer {supa_key}")
 
     # ToolCatalog-driven retry (SAFE defaults = no retry)
     retry_max = 0
@@ -775,6 +870,8 @@ def capability_http_exec(req: Any, run_record_id: str) -> Dict[str, Any]:
             "tool_mode": tool_mode or None,
             "tool_intent": tool_intent or None,
             "auth_mode": auth_mode,
+            "timeout_s": local_timeout,
+            "follow_redirects": HTTP_EXEC_FOLLOW_REDIRECTS,
             "retry": {
                 "retry_max": retry_max,
                 "retry_backoff_s": retry_backoff_s,
@@ -786,7 +883,7 @@ def capability_http_exec(req: Any, run_record_id: str) -> Dict[str, Any]:
 
     attempts = 0
     last_err: Optional[str] = None
-    resp = None
+    resp: Optional[requests.Response] = None
 
     max_attempts = retry_max + 1
 
@@ -800,15 +897,38 @@ def capability_http_exec(req: Any, run_record_id: str) -> Dict[str, Any]:
                     raise HTTPException(status_code=400, detail="HTTP_EXEC data must be str or bytes.")
                 raw_bytes = raw_data.encode("utf-8") if isinstance(raw_data, str) else raw_data
                 raw_bytes = _truncate_bytes(raw_bytes, HTTP_EXEC_MAX_BODY_BYTES)
-                resp = requests.request(method, url, headers=headers, data=raw_bytes, timeout=float(local_timeout))
+
+                resp = sess.request(
+                    method,
+                    url,
+                    headers=headers,
+                    data=raw_bytes,
+                    timeout=float(local_timeout),
+                    allow_redirects=bool(HTTP_EXEC_FOLLOW_REDIRECTS),
+                )
             else:
                 jb = json_body if json_body is not None else {}
                 jb_bytes = json.dumps(jb, ensure_ascii=False).encode("utf-8")
                 if len(jb_bytes) > HTTP_EXEC_MAX_BODY_BYTES:
                     raise HTTPException(status_code=400, detail="HTTP_EXEC json/body too large.")
-                resp = requests.request(method, url, headers=headers, json=jb, timeout=float(local_timeout))
+
+                resp = sess.request(
+                    method,
+                    url,
+                    headers=headers,
+                    json=jb,
+                    timeout=float(local_timeout),
+                    allow_redirects=bool(HTTP_EXEC_FOLLOW_REDIRECTS),
+                )
 
             status = int(resp.status_code)
+
+            # If redirects allowed, re-validate final URL (SSRF safe)
+            if HTTP_EXEC_FOLLOW_REDIRECTS:
+                final_url = str(getattr(resp, "url", "") or "")
+                if final_url and final_url != url:
+                    _ = _validate_http_exec_url(final_url)
+                    url = final_url  # for diagnostics
 
             if attempts < max_attempts and _should_retry(status, None, retry_on_status, retry_on_errors):
                 last_err = f"retry_status:{status}"
@@ -854,7 +974,7 @@ def capability_http_exec(req: Any, run_record_id: str) -> Dict[str, Any]:
             "response_text": None,
         }
 
-    status = resp.status_code
+    status = int(resp.status_code)
     resp_headers = dict(resp.headers or {})
     content_bytes = _truncate_bytes(resp.content or b"", HTTP_EXEC_MAX_RESPONSE_BYTES)
 
@@ -883,6 +1003,8 @@ def capability_http_exec(req: Any, run_record_id: str) -> Dict[str, Any]:
         "attempts": attempts,
         "retry_max": retry_max,
         "last_error": last_err,
+        "timeout_s": local_timeout,
+        "follow_redirects": bool(HTTP_EXEC_FOLLOW_REDIRECTS),
         "request_headers": _safe_headers_for_log(headers),
         "response_headers": {
             k: (v if k.lower() != "set-cookie" else "***redacted***")
