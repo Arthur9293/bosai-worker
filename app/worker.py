@@ -1,11 +1,8 @@
-# app/worker.py — BOSAI Worker (v2.4.4)
-# SAFE PATCH over v2.4.3:
-# 1) Add health diagnostics (capabilities list)
-# 2) Add X-Run-Record-Id response header on /run
-# 3) Use requests.Session for http_exec stability (keep-alive)
-# 4) Ensure max_commands exists in RunRequest (used by command_orchestrator)
-#
-# NOTE: No change to payload schema, ToolCatalog enforcement, idempotency, SLA, or endpoints.
+# app/worker.py — BOSAI Worker (v2.4.5)
+# OPTION A (SAFE): http_exec extracted to app/capabilities/http_exec.py (single source of truth)
+# - Worker keeps a thin wrapper calling module with shared requests.Session (keep-alive)
+# - Everything else unchanged: payload schema, ToolCatalog enforcement behavior, idempotency, SLA, endpoints.
+# - No breaking change.
 
 import os
 import json
@@ -14,13 +11,18 @@ import uuid
 import hmac
 import hashlib
 import re
+import traceback
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List, Tuple
 from urllib.parse import urlparse
 
 import requests
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+
+# IMPORTANT: single source of truth for http_exec
+from app.capabilities.http_exec import capability_http_exec as capability_http_exec_impl
 
 
 # ============================================================
@@ -41,7 +43,7 @@ COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.4.4").strip()
+APP_VERSION = os.getenv("APP_VERSION", "2.4.5").strip()
 
 RUN_MAX_SECONDS = float((os.getenv("RUN_MAX_SECONDS", "30") or "30").strip())
 HTTP_TIMEOUT_SECONDS = float((os.getenv("HTTP_TIMEOUT_SECONDS", "20") or "20").strip())
@@ -72,25 +74,14 @@ STATE_LOCK_ACTIVE = os.getenv("STATE_LOCK_ACTIVE", "Active").strip()
 STATE_LOCK_RELEASED = os.getenv("STATE_LOCK_RELEASED", "Released").strip()
 STATE_LOCK_EXPIRED = os.getenv("STATE_LOCK_EXPIRED", "Expired").strip()
 
-
 # ============================================================
-# HTTP_EXEC (SAFE)
+# HTTP_EXEC env (kept for /health/score diagnostics; logic is in module)
 # ============================================================
-
-HTTP_EXEC_TIMEOUT_SECONDS = float((os.getenv("HTTP_EXEC_TIMEOUT_SECONDS", "20") or "20").strip())
-HTTP_EXEC_MAX_BODY_BYTES = int((os.getenv("HTTP_EXEC_MAX_BODY_BYTES", "250000") or "250000").strip())
-HTTP_EXEC_MAX_RESPONSE_BYTES = int((os.getenv("HTTP_EXEC_MAX_RESPONSE_BYTES", "250000") or "250000").strip())
 
 HTTP_EXEC_ALLOWLIST_RAW = os.getenv("HTTP_EXEC_ALLOWLIST", "").strip()
 HTTP_EXEC_TARGETS_JSON = os.getenv("HTTP_EXEC_TARGETS_JSON", "").strip()
-HTTP_EXEC_BLOCK_PRIVATE_NETS = (os.getenv("HTTP_EXEC_BLOCK_PRIVATE_NETS", "1").strip() != "0")
-
-HTTP_EXEC_SECRET_HEADER_PREFIX = os.getenv("HTTP_EXEC_SECRET_HEADER_PREFIX", "HTTP_EXEC_HEADER_AUTH_").strip()
-SECRET_FILE_PREFIX = os.getenv("SECRET_FILE_PREFIX", "SECRET_HEADER_").strip()
 
 TOOLCATALOG_ENFORCE_HTTP_EXEC = (os.getenv("TOOLCATALOG_ENFORCE_HTTP_EXEC", "1").strip() != "0")
-TOOLCATALOG_OVERRIDE_HTTP = (os.getenv("TOOLCATALOG_OVERRIDE_HTTP", "1").strip() != "0")
-TOOLCATALOG_CACHE_SECONDS = int((os.getenv("TOOLCATALOG_CACHE_SECONDS", "30") or "30").strip())
 
 
 # ============================================================
@@ -101,6 +92,14 @@ app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
 # Stable HTTP session (SAFE)
 _HTTP_SESSION = requests.Session()
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    tb = traceback.format_exc()
+    print("UNHANDLED_EXCEPTION:", repr(exc))
+    print(tb)
+    return JSONResponse(status_code=500, content={"detail": "Internal error", "error": repr(exc)})
 
 
 # ============================================================
@@ -115,9 +114,7 @@ class RunRequest(BaseModel):
     input: Dict[str, Any] = Field(default_factory=dict)
     dry_run: bool = False
     view: Optional[str] = None
-
-    # IMPORTANT: used by command_orchestrator
-    max_commands: int = 0
+    max_commands: int = 0  # used by command_orchestrator
 
     class Config:
         extra = "forbid"
@@ -129,6 +126,7 @@ class RunRequest(BaseModel):
 
         p = dict(payload)
 
+        # compat keys (SAFE): map + remove aliases to satisfy extra="forbid"
         if "capability" not in p and "capacity" in p:
             p["capability"] = p.get("capacity")
         p.pop("capacity", None)
@@ -152,6 +150,7 @@ class RunRequest(BaseModel):
         except Exception:
             pass
 
+        # Pydantic v1 support
         return cls.parse_obj(p)
 
 
@@ -497,243 +496,457 @@ def lock_release(lock_key: str, holder: str) -> Dict[str, Any]:
 
 
 # ============================================================
-# ToolCatalog cache + enforcement (SAFE, optional)
+# Capabilities
 # ============================================================
 
-_TOOLCATALOG_CACHE: Dict[str, Any] = {"ts": 0.0, "by_key": {}}
+def capability_health_tick(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    return {"ok": True, "probe": "airtable_ok", "ts": utc_now_iso(), "run_record_id": run_record_id}
 
 
-def _toolcatalog_fetch_map(force: bool = False) -> Dict[str, Dict[str, Any]]:
-    now = time.time()
-    ts = float(_TOOLCATALOG_CACHE.get("ts") or 0.0)
-    if not force and (now - ts) < float(TOOLCATALOG_CACHE_SECONDS):
-        by_key = _TOOLCATALOG_CACHE.get("by_key")
-        if isinstance(by_key, dict):
-            return by_key
-
-    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
-        _TOOLCATALOG_CACHE["ts"] = now
-        _TOOLCATALOG_CACHE["by_key"] = {}
-        return {}
-
-    try:
-        r = _HTTP_SESSION.get(
-            _airtable_url(TOOLCATALOG_TABLE_NAME),
-            headers=_airtable_headers(),
-            params={"maxRecords": "200"},
-            timeout=HTTP_TIMEOUT_SECONDS,
-        )
-        if r.status_code >= 300:
-            _TOOLCATALOG_CACHE["ts"] = now
-            _TOOLCATALOG_CACHE["by_key"] = {}
-            return {}
-
-        records = r.json().get("records", []) or []
-        out: Dict[str, Dict[str, Any]] = {}
-        for rec in records:
-            fields = rec.get("fields", {}) or {}
-            key = str(fields.get("Tool_Key", "") or "").strip()
-            if not key:
-                continue
-            out[key] = rec
-
-        _TOOLCATALOG_CACHE["ts"] = now
-        _TOOLCATALOG_CACHE["by_key"] = out
-        return out
-
-    except Exception:
-        _TOOLCATALOG_CACHE["ts"] = now
-        _TOOLCATALOG_CACHE["by_key"] = {}
-        return {}
-
-
-def _toolcatalog_get(tool_key: str) -> Optional[Dict[str, Any]]:
-    tool_key = str(tool_key or "").strip()
-    if not tool_key:
+def _parse_float(val: Any) -> Optional[float]:
+    if val is None:
         return None
-    m = _toolcatalog_fetch_map(force=False)
-    rec = m.get(tool_key)
-    if rec:
-        return rec
-    m2 = _toolcatalog_fetch_map(force=True)
-    return m2.get(tool_key)
+    try:
+        if isinstance(val, (int, float)):
+            return float(val)
+        s = str(val).strip().replace(",", ".")
+        return float(s)
+    except Exception:
+        return None
 
 
-def _toolcatalog_list_field(fields: Dict[str, Any], name: str) -> List[str]:
-    v = fields.get(name)
-    if isinstance(v, list):
-        return [str(x).strip() for x in v if str(x).strip()]
-    if isinstance(v, str):
-        s = v.strip()
-        if not s:
-            return []
-        return [p.strip() for p in s.split(",") if p.strip()]
-    return []
+def _sla_status_for_remaining(remaining_min: float) -> str:
+    if remaining_min <= 0:
+        return SLA_STATUS_BREACHED
+    if remaining_min <= SLA_WARNING_THRESHOLD_MIN:
+        return SLA_STATUS_WARNING
+    return SLA_STATUS_OK
 
 
-def _to_dict(x: Any) -> Dict[str, Any]:
-    return x if isinstance(x, dict) else {}
+def capability_sla_machine(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    records = airtable_list_view(LOGS_ERRORS_TABLE_NAME, LOGS_ERRORS_VIEW_NAME, max_records=200)
 
+    updated = 0
+    skipped = 0
+    errors: List[str] = []
 
-def _pick_first(*vals):
-    for v in vals:
-        if v is None:
+    for rec in records:
+        rid = rec.get("id")
+        fields = rec.get("fields", {}) or {}
+
+        remaining = _parse_float(fields.get("SLA_Remaining_Minutes"))
+        if remaining is None:
+            skipped += 1
             continue
-        if isinstance(v, str) and v.strip() == "":
+
+        current_status = str(fields.get("SLA_Status", "")).strip()
+        if current_status == SLA_STATUS_ESCALATED:
+            skipped += 1
             continue
-        return v
-    return None
+
+        new_status = _sla_status_for_remaining(remaining)
+        update_fields: Dict[str, Any] = {}
+
+        if "SLA_Status" in LOGS_ERRORS_FIELDS_ALLOWED:
+            update_fields["SLA_Status"] = new_status
+        if "Last_SLA_Check" in LOGS_ERRORS_FIELDS_ALLOWED:
+            update_fields["Last_SLA_Check"] = utc_now_iso()
+        if "Linked_Run" in LOGS_ERRORS_FIELDS_ALLOWED:
+            update_fields["Linked_Run"] = [run_record_id]
+
+        if not update_fields:
+            skipped += 1
+            continue
+
+        try:
+            airtable_update(LOGS_ERRORS_TABLE_NAME, rid, update_fields)
+            updated += 1
+        except HTTPException as e:
+            errors.append(f"{rid}: {e.detail}")
+
+    return {"ok": True, "updated": updated, "skipped": skipped, "errors_count": len(errors), "errors": errors[:10]}
 
 
-def _as_bool(v: Any) -> bool:
-    if isinstance(v, bool):
-        return v
-    if v is None:
-        return False
-    s = str(v).strip().lower()
-    return s in ("1", "true", "yes", "y", "ok")
+def _airtable_update_best_effort(table_name: str, record_id: str, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    last_err: Optional[str] = None
+    for fields in candidates:
+        if not fields:
+            continue
+        try:
+            airtable_update(table_name, record_id, fields)
+            return {"ok": True, "applied_fields": list(fields.keys())}
+        except HTTPException as e:
+            last_err = str(e.detail)
+            continue
+        except Exception as e:
+            last_err = repr(e)
+            continue
+    return {"ok": False, "error": last_err or "update_failed"}
 
 
-def _extract_tool_meta(inp: Dict[str, Any]) -> Dict[str, Any]:
-    inp0 = _to_dict(inp)
-    nested_input = _to_dict(inp0.get("input"))
-    nested_args = _to_dict(inp0.get("args"))
+def capability_commands_tick(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    inp = req.input or {}
+    limit = int(inp.get("limit", 5) or 5)
+    if limit <= 0:
+        limit = 5
+    if limit > 50:
+        limit = 50
 
-    tool_key = _pick_first(
-        inp0.get("Tool_Key"),
-        inp0.get("tool_key"),
-        inp0.get("toolKey"),
-        nested_input.get("Tool_Key"),
-        nested_input.get("tool_key"),
-        nested_input.get("toolKey"),
-        nested_args.get("Tool_Key"),
-        nested_args.get("tool_key"),
-        nested_args.get("toolKey"),
-    )
+    view = (req.view or COMMANDS_VIEW_NAME or "Queue").strip()
+    cmds = airtable_list_view(COMMANDS_TABLE_NAME, view, max_records=limit)
 
-    tool_mode = _pick_first(
-        inp0.get("Tool_Mode"),
-        inp0.get("tool_mode"),
-        inp0.get("toolMode"),
-        nested_input.get("Tool_Mode"),
-        nested_input.get("tool_mode"),
-        nested_input.get("toolMode"),
-        nested_args.get("Tool_Mode"),
-        nested_args.get("tool_mode"),
-        nested_args.get("toolMode"),
-    )
+    now = utc_now_iso()
+    processed: List[str] = []
+    updated = 0
+    update_fail = 0
+    update_errors: List[str] = []
 
-    tool_intent = _pick_first(
-        inp0.get("Tool_Intent"),
-        inp0.get("tool_intent"),
-        inp0.get("toolIntent"),
-        nested_input.get("Tool_Intent"),
-        nested_input.get("tool_intent"),
-        nested_input.get("toolIntent"),
-        nested_args.get("Tool_Intent"),
-        nested_args.get("tool_intent"),
-        nested_args.get("toolIntent"),
-    )
+    for c in cmds:
+        cid = c.get("id")
+        if not cid:
+            continue
 
-    approved = _pick_first(
-        inp0.get("Approved"),
-        inp0.get("approved"),
-        inp0.get("is_approved"),
-        nested_input.get("Approved"),
-        nested_input.get("approved"),
-        nested_input.get("is_approved"),
-        nested_args.get("Approved"),
-        nested_args.get("approved"),
-        nested_args.get("is_approved"),
-    )
+        processed.append(cid)
+
+        candidates = [
+            {
+                "Is_Locked": True,
+                "Locked_At": now,
+                "Locked_By": req.worker,
+                "Last_Status": "Running",
+                "Last_Error": "",
+                "Linked_Run": [run_record_id],
+            },
+            {
+                "Is_Locked": True,
+                "Locked_At": now,
+                "Locked_By": req.worker,
+                "Last_Status": "Running",
+            },
+            {
+                "Is_Locked": True,
+                "Locked_By": req.worker,
+            },
+            {
+                "Status_select": "Running",
+                "Linked_Run": [run_record_id],
+                "Error_Message": "",
+            },
+            {
+                "Status_select": "Running",
+            },
+        ]
+
+        res = _airtable_update_best_effort(COMMANDS_TABLE_NAME, cid, candidates)
+        if res.get("ok"):
+            updated += 1
+        else:
+            update_fail += 1
+            update_errors.append(f"{cid}: {res.get('error')}")
 
     return {
-        "tool_key": str(tool_key or "").strip(),
-        "tool_mode": str(tool_mode or "").strip(),
-        "tool_intent": str(tool_intent or "").strip(),
-        "approved": _as_bool(approved),
+        "ok": True,
+        "view": view,
+        "limit": limit,
+        "scanned": len(cmds),
+        "processed": processed,
+        "updated": updated,
+        "update_fail": update_fail,
+        "errors_count": len(update_errors),
+        "errors": update_errors[:10],
+        "run_record_id": run_record_id,
+        "ts": now,
     }
 
 
-def _json_load_maybe(val: Any) -> Dict[str, Any]:
-    if val is None:
-        return {}
-    if isinstance(val, dict):
-        return val
-    try:
-        s = str(val).strip()
-        if not s:
-            return {}
-        return json.loads(s)
-    except Exception:
-        return {}
+# ----------------------------
+# HTTP_EXEC (Option A wrapper) — single source of truth is module
+# ----------------------------
+
+def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    # Keep behavior: shared _HTTP_SESSION + module enforcement/allowlist/ssrf/timeout caps
+    return capability_http_exec_impl(req, run_record_id, session=_HTTP_SESSION)
 
 
-def _toolcatalog_enforce_or_raise(req: RunRequest, tool_key: str, tool_mode: str, tool_intent: str, approved: bool) -> Dict[str, Any]:
-    rec = _toolcatalog_get(tool_key)
+def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
+    for key in ("Command_JSON", "Payload_JSON", "Input_JSON"):
+        obj = _json_load_maybe(fields.get(key))
+        if isinstance(obj, dict) and obj:
+            return obj
+
+    built: Dict[str, Any] = {}
+
+    http_target = str(fields.get("http_target", "") or "").strip()
+    if http_target:
+        built["http_target"] = http_target
+
+    method = str(fields.get("HTTP_Method", "") or "").strip()
+    if method:
+        built["method"] = method
+
+    payload_raw = fields.get("HTTP_Payload_JSON")
+    payload_obj = _json_load_maybe(payload_raw)
+    if payload_obj:
+        built["json"] = payload_obj
+    else:
+        if isinstance(payload_raw, str) and payload_raw.strip():
+            built["data"] = payload_raw.strip()
+
+    tool_key = str(fields.get("Tool_Key", "") or "").strip()
+    if tool_key:
+        built["Tool_Key"] = tool_key
+    tool_mode = str(fields.get("Tool_Mode", "") or "").strip()
+    if tool_mode:
+        built["Tool_Mode"] = tool_mode
+    tool_intent = str(fields.get("Tool_Intent", "") or "").strip()
+    if tool_intent:
+        built["Tool_Intent"] = tool_intent
+    approved = fields.get("Approved")
+    if approved is not None:
+        built["Approved"] = bool(approved)
+
+    return built
+
+
+def capability_state_get(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    key = str(req.input.get("key", "")).strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="state_get requires input.key")
+    rec = state_get_record(key)
     if not rec:
-        raise HTTPException(status_code=400, detail=f"ToolCatalog: unknown Tool_Key: {tool_key}")
-
+        return {"ok": True, "found": False, "key": key}
     fields = rec.get("fields", {}) or {}
-
-    enabled = fields.get("Enabled")
-    if enabled is not None and not _as_bool(enabled):
-        raise HTTPException(status_code=400, detail=f"ToolCatalog: tool disabled: {tool_key}")
-
-    allowed_modes = _toolcatalog_list_field(fields, "Allowed_Modes")
-    allowed_intents = _toolcatalog_list_field(fields, "Allowed_Intents")
-
-    if tool_mode and allowed_modes and tool_mode not in allowed_modes:
-        raise HTTPException(status_code=400, detail=f"ToolCatalog: mode not allowed: {tool_mode} for {tool_key}")
-
-    if tool_intent and allowed_intents and tool_intent not in allowed_intents:
-        raise HTTPException(status_code=400, detail=f"ToolCatalog: intent not allowed: {tool_intent} for {tool_key}")
-
-    requires_approval = fields.get("Requires_Approval")
-    if _as_bool(requires_approval) and (not req.dry_run) and (not approved):
-        raise HTTPException(status_code=400, detail=f"ToolCatalog: requires approval: {tool_key}")
-
-    return fields
+    return {
+        "ok": True,
+        "found": True,
+        "key": key,
+        "record_id": rec.get("id"),
+        "value": _json_load_maybe(fields.get("Value_JSON")),
+        "updated_at": fields.get("Updated_At"),
+        "app_version": fields.get("App_Version"),
+        "lock_status": fields.get("Lock_Status"),
+    }
 
 
-def _toolcatalog_minimal_args_check(fields: Dict[str, Any], args_obj: Dict[str, Any]) -> None:
-    schema = _json_load_maybe(fields.get("Args_Schema_JSON"))
-    if not schema:
-        return
-    required = schema.get("required")
-    if not isinstance(required, list):
-        return
-    missing = []
-    for k in required:
-        ks = str(k).strip()
-        if not ks:
+def capability_state_put(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    key = str(req.input.get("key", "")).strip()
+    value = req.input.get("value")
+    if not key:
+        raise HTTPException(status_code=400, detail="state_put requires input.key")
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=400, detail="state_put requires input.value to be an object (dict)")
+    return state_put(key, value)
+
+
+def capability_lock_acquire(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    key = str(req.input.get("key", "")).strip()
+    holder = str(req.input.get("holder", req.worker)).strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="lock_acquire requires input.key")
+    return lock_acquire(key, holder)
+
+
+def capability_lock_release(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    key = str(req.input.get("key", "")).strip()
+    holder = str(req.input.get("holder", req.worker)).strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="lock_release requires input.key")
+    return lock_release(key, holder)
+
+
+def _read_command_status(fields: Dict[str, Any]) -> str:
+    return str(
+        fields.get(
+            "Status_select",
+            fields.get(
+                "Status",
+                fields.get("Status_raw", ""),
+            ),
+        ) or ""
+    ).strip()
+
+
+def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    max_cmds = int(req.max_commands or 0) or 5
+    view = (req.view or COMMANDS_VIEW_NAME or "Queue").strip()
+
+    cmds = airtable_list_view(COMMANDS_TABLE_NAME, view, max_records=max_cmds)
+
+    executed = 0
+    succeeded = 0
+    failed = 0
+    blocked = 0
+    unsupported = 0
+
+    processed_ids: List[str] = []
+    errors: List[str] = []
+
+    for c in cmds:
+        cid = c.get("id")
+        fields = c.get("fields", {}) or {}
+        if not cid:
             continue
-        if ks not in args_obj:
-            missing.append(ks)
-    if missing:
-        raise HTTPException(status_code=400, detail=f"ToolCatalog: missing required args: {', '.join(missing)}")
+
+        processed_ids.append(cid)
+
+        status = _read_command_status(fields)
+        if status and status not in ("Queued", "QUEUE", "Queue"):
+            blocked += 1
+            continue
+
+        capability = str(fields.get("Capability", "")).strip()
+        if not capability:
+            failed += 1
+            try:
+                airtable_update(
+                    COMMANDS_TABLE_NAME,
+                    cid,
+                    {
+                        "Status_select": "Error",
+                        "Error_Message": "Missing Capability",
+                        "Linked_Run": [run_record_id],
+                    },
+                )
+            except Exception:
+                pass
+            continue
+
+        fn = CAPABILITIES.get(capability)
+        if not fn:
+            unsupported += 1
+            try:
+                airtable_update(
+                    COMMANDS_TABLE_NAME,
+                    cid,
+                    {
+                        "Status_select": "Unsupported",
+                        "Error_Message": f"Unsupported capability: {capability}",
+                        "Linked_Run": [run_record_id],
+                    },
+                )
+            except Exception:
+                pass
+            continue
+
+        idem = str(fields.get("Idempotency_Key", "")).strip() or f"cmd:{cid}:{capability}"
+        cmd_input = _compose_command_input(fields)
+
+        try:
+            airtable_update(
+                COMMANDS_TABLE_NAME,
+                cid,
+                {
+                    "Status_select": "Running",
+                    "Idempotency_Key": idem,
+                    "Linked_Run": [run_record_id],
+                    "Error_Message": "",
+                },
+            )
+        except Exception:
+            blocked += 1
+            continue
+
+        executed += 1
+
+        try:
+            cmd_req = RunRequest.from_payload(
+                {
+                    "worker": req.worker,
+                    "capability": capability,
+                    "idempotency_key": idem,
+                    "input": cmd_input,
+                    "priority": req.priority,
+                    "dry_run": bool(req.dry_run),
+                }
+            )
+
+            result_obj = fn(cmd_req, run_record_id)
+
+            airtable_update(
+                COMMANDS_TABLE_NAME,
+                cid,
+                {
+                    "Status_select": "Done",
+                    "Result_JSON": json.dumps(result_obj, ensure_ascii=False),
+                    "Linked_Run": [run_record_id],
+                },
+            )
+            succeeded += 1
+
+        except HTTPException as e:
+            msg = str(e.detail)
+            failed += 1
+            try:
+                airtable_update(
+                    COMMANDS_TABLE_NAME,
+                    cid,
+                    {
+                        "Status_select": "Error",
+                        "Error_Message": msg,
+                        "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
+                        "Linked_Run": [run_record_id],
+                    },
+                )
+            except Exception:
+                pass
+            errors.append(f"{cid}: {msg}")
+
+        except Exception as e:
+            msg = repr(e)
+            failed += 1
+            try:
+                airtable_update(
+                    COMMANDS_TABLE_NAME,
+                    cid,
+                    {
+                        "Status_select": "Error",
+                        "Error_Message": msg,
+                        "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
+                        "Linked_Run": [run_record_id],
+                    },
+                )
+            except Exception:
+                pass
+            errors.append(f"{cid}: {msg}")
+
+    return {
+        "ok": True,
+        "view": view,
+        "scanned": len(cmds),
+        "executed": executed,
+        "succeeded": succeeded,
+        "failed": failed,
+        "blocked": blocked,
+        "unsupported": unsupported,
+        "commands_record_ids": processed_ids,
+        "errors_count": len(errors),
+        "errors": errors[:10],
+    }
 
 
-# ----------------------------
-# The remaining capabilities and http_exec are unchanged logically,
-# but use _HTTP_SESSION for network requests.
-# (To keep this reply bounded, keep your existing blocks below and only
-# replace requests.request(...) with _HTTP_SESSION.request(...),
-# and requests.get/post/patch with _HTTP_SESSION.get/post/patch.)
-# ----------------------------
+CAPABILITIES = {
+    "health_tick": capability_health_tick,
+    "commands_tick": capability_commands_tick,
+    "sla_machine": capability_sla_machine,
+    "http_exec": capability_http_exec,  # wrapper -> module
+    "state_get": capability_state_get,
+    "state_put": capability_state_put,
+    "lock_acquire": capability_lock_acquire,
+    "lock_release": capability_lock_release,
+    "command_orchestrator": capability_command_orchestrator,
+}
 
-# ========= KEEP YOUR EXISTING CODE FROM HERE =========
-# Paste your existing:
-# - capability_health_tick / sla_machine / commands_tick
-# - all http_exec helpers + capability_http_exec
-# - _compose_command_input / state_* / lock_* / command_orchestrator
-# - CAPABILITIES dict
-# - endpoints (/, /health, /health/score, /run)
-#
-# BUT:
-# - inside http_exec: replace `requests.request(...)` with `_HTTP_SESSION.request(...)`
-# - inside Airtable helpers: already replaced above
-# ========= END =========
+
+@app.get("/")
+def root() -> Dict[str, Any]:
+    return {"ok": True, "service": APP_NAME, "version": APP_VERSION}
+
+
+@app.head("/")
+def root_head() -> Response:
+    return Response(status_code=200)
 
 
 @app.get("/health")
@@ -748,8 +961,26 @@ def health() -> Dict[str, Any]:
     }
 
 
+@app.get("/health/score")
+def health_score() -> Dict[str, Any]:
+    score = 100
+    issues: List[str] = []
+    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+        score -= 50
+        issues.append("airtable_env_missing")
+    if RUN_SHARED_SECRET:
+        issues.append("signature_enforced")
+    if not (HTTP_EXEC_ALLOWLIST_RAW or "").strip():
+        issues.append("http_exec_disabled_no_allowlist")
+    if not (HTTP_EXEC_TARGETS_JSON or "").strip():
+        issues.append("http_exec_no_alias_targets")
+    if TOOLCATALOG_ENFORCE_HTTP_EXEC:
+        issues.append("toolcatalog_http_exec_enforced")
+    return {"ok": True, "score": max(0, score), "issues": issues, "ts": utc_now_iso()}
+
+
 @app.post("/run", response_model=RunResponse)
-async def run(request: Request) -> RunResponse:
+async def run(request: Request, response: Response) -> RunResponse:
     started = time.time()
     raw = await request.body()
     verify_signature_or_401(raw, request.headers.get("x-run-signature"))
@@ -786,6 +1017,7 @@ async def run(request: Request) -> RunResponse:
         )
 
     run_record_id = create_system_run(req)
+    response.headers["X-Run-Record-Id"] = run_record_id  # DEBUG header
 
     try:
         fn = CAPABILITIES.get(req.capability)
@@ -800,8 +1032,7 @@ async def run(request: Request) -> RunResponse:
 
         finish_system_run(run_record_id, "Done", result_obj)
 
-        # Add debug header
-        resp = RunResponse(
+        return RunResponse(
             ok=True,
             worker=req.worker,
             capability=req.capability,
@@ -810,9 +1041,6 @@ async def run(request: Request) -> RunResponse:
             airtable_record_id=run_record_id,
             result=result_obj,
         )
-        # FastAPI doesn't let us directly set headers on response_model,
-        # so the caller can read run_record_id inside result.
-        return resp
 
     except HTTPException as e:
         fail_system_run(run_record_id, str(e.detail))
