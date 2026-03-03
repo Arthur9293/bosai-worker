@@ -1,22 +1,18 @@
-# app/worker.py — BOSAI Worker (v2.4.2)
-# Base: your v2.4.1 (as pasted)
+# app/worker.py — BOSAI Worker (v2.4.3)
+# Base: your v2.4.2 (as pasted)
 #
-# FIXES (SAFE):
-# 1) /run dry_run: DO NOT short-circuit. We call the capability so http_exec returns full dry_run details.
-# 2) http_exec secrets: support BOTH env-var style and Render "Secret Files" style.
-#    - env var:    HTTP_EXEC_HEADER_AUTH_<KEY>
-#    - secret file: /etc/secrets/SECRET_HEADER_<KEY>
-#    - legacy env: SECRET_HEADER_<KEY> (optional)
-#    - convenience: MAKE_API_TOKEN (when KEY=="MAKE")
-# 3) http_exec ToolCatalog: can read optional fields:
-#    - Secret_Header_Keys (list or "A,B,C")
-#    - Authorization_Mode ("token"|"bearer"|"raw")  # optional
-#    If present, merges with request secret_header_keys.
+# SAFE UPDATE (MAKE_RUN_SCENARIO first, without breaking anything):
+# A) http_exec: add ToolCatalog-driven retry (safe defaults = 0 retries)
+#    - ToolCatalog optional fields:
+#      Retry_Max (number)
+#      Retry_Backoff_S (number)
+#      Retry_On_Status (text "429,500,502,503,504")
+#      Retry_On_Errors (text "timeout,request_failed")
+# B) http_exec return enriched diagnostics:
+#    - attempts, retry_max, last_error
+# C) dry_run keeps full details + shows retry config
 #
-# ADD (SAFE):
-# 4) Supabase REST auto-auth (server-side only):
-#    - If host endswith .supabase.co and SUPABASE_API_KEY is set:
-#      add apikey + Authorization Bearer if missing.
+# NOTE: No change to payload schema, ToolCatalog enforcement, idempotency, SLA, or endpoints.
 
 import os
 import json
@@ -52,7 +48,7 @@ COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.4.2").strip()
+APP_VERSION = os.getenv("APP_VERSION", "2.4.3").strip()
 
 RUN_MAX_SECONDS = float((os.getenv("RUN_MAX_SECONDS", "30") or "30").strip())
 HTTP_TIMEOUT_SECONDS = float((os.getenv("HTTP_TIMEOUT_SECONDS", "20") or "20").strip())
@@ -96,7 +92,7 @@ HTTP_EXEC_ALLOWLIST_RAW = os.getenv("HTTP_EXEC_ALLOWLIST", "").strip()
 HTTP_EXEC_TARGETS_JSON = os.getenv("HTTP_EXEC_TARGETS_JSON", "").strip()
 HTTP_EXEC_BLOCK_PRIVATE_NETS = (os.getenv("HTTP_EXEC_BLOCK_PRIVATE_NETS", "1").strip() != "0")
 
-# Prefix used for env-var secret headers (you already use this)
+# Prefix used for env-var secret headers
 HTTP_EXEC_SECRET_HEADER_PREFIX = os.getenv("HTTP_EXEC_SECRET_HEADER_PREFIX", "HTTP_EXEC_HEADER_AUTH_").strip()
 
 # Additional secret file prefix (Render Secret Files)
@@ -962,6 +958,40 @@ def _truncate_bytes(b: bytes, max_bytes: int) -> bytes:
     return b[:max_bytes]
 
 
+# --------
+# ToolCatalog-driven retry helpers (SAFE defaults)
+# --------
+
+def _tc_int(fields: Dict[str, Any], name: str, default: int) -> int:
+    try:
+        v = fields.get(name)
+        if v is None or str(v).strip() == "":
+            return default
+        return int(float(str(v).strip()))
+    except Exception:
+        return default
+
+
+def _tc_list_csv(fields: Dict[str, Any], name: str) -> List[str]:
+    v = fields.get(name)
+    if isinstance(v, list):
+        return [str(x).strip() for x in v if str(x).strip()]
+    if isinstance(v, str):
+        return [p.strip() for p in v.split(",") if p.strip()]
+    return []
+
+
+def _should_retry(status_code: Optional[int], err: Optional[str], retry_status: List[str], retry_errors: List[str]) -> bool:
+    if err:
+        e = err.lower()
+        for token in retry_errors:
+            if token and token.lower() in e:
+                return True
+    if status_code is not None:
+        return str(status_code) in retry_status
+    return False
+
+
 def _http_exec_targets() -> Dict[str, str]:
     if not HTTP_EXEC_TARGETS_JSON:
         return {}
@@ -1005,9 +1035,6 @@ def _validate_http_exec_url(url: str) -> Dict[str, str]:
 
 
 def _read_secret_file(name: str) -> str:
-    # Render Secret Files are available at:
-    # - /etc/secrets/<filename>
-    # - or app root sometimes (but /etc/secrets is canonical)
     for base in ("/etc/secrets", "."):
         path = f"{base}/{name}"
         try:
@@ -1020,53 +1047,33 @@ def _read_secret_file(name: str) -> str:
 
 
 def _format_authorization(raw: str, mode: str) -> str:
-    """
-    mode:
-      - raw:    use as-is
-      - token:  "Token <raw>" if raw has no space
-      - bearer: "Bearer <raw>" if raw has no space
-    """
     s = (raw or "").strip()
     if not s:
         return ""
     if mode == "raw":
         return s
-    # already formatted
     if " " in s:
         return s
     if mode == "bearer":
         return f"Bearer {s}"
-    # default: token
     return f"Token {s}"
 
 
 def _build_secret_headers(header_keys: List[str], auth_mode: str = "token") -> Dict[str, str]:
-    """
-    For each KEY in secret_header_keys:
-      1) env var: HTTP_EXEC_HEADER_AUTH_<KEY>
-      2) env var: SECRET_HEADER_<KEY> (legacy)
-      3) secret file: /etc/secrets/SECRET_HEADER_<KEY>
-      4) if KEY=="MAKE": MAKE_API_TOKEN
-    Sets Authorization header from the first found.
-    """
     out: Dict[str, str] = {}
     for key in header_keys or []:
         k = str(key).strip()
         if not k:
             continue
 
-        # 1) env var prefix
         v = os.getenv(f"{HTTP_EXEC_SECRET_HEADER_PREFIX}{k}", "").strip()
 
-        # 2) legacy env var
         if not v:
             v = os.getenv(f"{SECRET_FILE_PREFIX}{k}", "").strip()
 
-        # 3) secret file
         if not v:
             v = _read_secret_file(f"{SECRET_FILE_PREFIX}{k}")
 
-        # 4) convenience for Make
         if not v and k.upper() == "MAKE":
             v = os.getenv("MAKE_API_TOKEN", "").strip()
 
@@ -1250,7 +1257,6 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     raw_target = extracted["raw_target"]
     url = _resolve_http_target(raw_target)
 
-    # SAFE fallback: if Tool_Key provided and still no url, use ToolCatalog.URL
     if not url and tool_fields:
         url = str(tool_fields.get("URL", "") or "").strip()
 
@@ -1296,6 +1302,17 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
             if not any(k.lower() == "authorization" for k in headers.keys()):
                 headers["Authorization"] = f"Bearer {supa_key}"
 
+    # ToolCatalog-driven retry (SAFE defaults = no retry)
+    retry_max = 0
+    retry_backoff_s = 0
+    retry_on_status: List[str] = []
+    retry_on_errors: List[str] = []
+    if tool_fields:
+        retry_max = max(0, _tc_int(tool_fields, "Retry_Max", 0))
+        retry_backoff_s = max(0, _tc_int(tool_fields, "Retry_Backoff_S", 0))
+        retry_on_status = _tc_list_csv(tool_fields, "Retry_On_Status")
+        retry_on_errors = _tc_list_csv(tool_fields, "Retry_On_Errors")
+
     json_body = extracted["json_body"]
     raw_data = extracted["raw_data"]
 
@@ -1316,21 +1333,86 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
             "tool_mode": tool_mode or None,
             "tool_intent": tool_intent or None,
             "auth_mode": auth_mode,
+            "retry": {
+                "retry_max": retry_max,
+                "retry_backoff_s": retry_backoff_s,
+                "retry_on_status": retry_on_status,
+                "retry_on_errors": retry_on_errors,
+            },
             "note": "HTTP call skipped (dry_run).",
         }
 
-    if raw_data is not None:
-        if not isinstance(raw_data, (str, bytes)):
-            raise HTTPException(status_code=400, detail="HTTP_EXEC data must be str or bytes.")
-        raw_bytes = raw_data.encode("utf-8") if isinstance(raw_data, str) else raw_data
-        raw_bytes = _truncate_bytes(raw_bytes, HTTP_EXEC_MAX_BODY_BYTES)
-        resp = requests.request(method, url, headers=headers, data=raw_bytes, timeout=float(local_timeout))
-    else:
-        jb = json_body if json_body is not None else {}
-        jb_bytes = json.dumps(jb, ensure_ascii=False).encode("utf-8")
-        if len(jb_bytes) > HTTP_EXEC_MAX_BODY_BYTES:
-            raise HTTPException(status_code=400, detail="HTTP_EXEC json/body too large.")
-        resp = requests.request(method, url, headers=headers, json=jb, timeout=float(local_timeout))
+    attempts = 0
+    last_err: Optional[str] = None
+    resp = None
+
+    max_attempts = retry_max + 1
+
+    while True:
+        attempts += 1
+        last_err = None
+
+        try:
+            if raw_data is not None:
+                if not isinstance(raw_data, (str, bytes)):
+                    raise HTTPException(status_code=400, detail="HTTP_EXEC data must be str or bytes.")
+                raw_bytes = raw_data.encode("utf-8") if isinstance(raw_data, str) else raw_data
+                raw_bytes = _truncate_bytes(raw_bytes, HTTP_EXEC_MAX_BODY_BYTES)
+                resp = requests.request(method, url, headers=headers, data=raw_bytes, timeout=float(local_timeout))
+            else:
+                jb = json_body if json_body is not None else {}
+                jb_bytes = json.dumps(jb, ensure_ascii=False).encode("utf-8")
+                if len(jb_bytes) > HTTP_EXEC_MAX_BODY_BYTES:
+                    raise HTTPException(status_code=400, detail="HTTP_EXEC json/body too large.")
+                resp = requests.request(method, url, headers=headers, json=jb, timeout=float(local_timeout))
+
+            status = int(resp.status_code)
+
+            # Retry by HTTP status (ToolCatalog policy)
+            if attempts < max_attempts and _should_retry(status, None, retry_on_status, retry_on_errors):
+                last_err = f"retry_status:{status}"
+                if retry_backoff_s > 0:
+                    time.sleep(float(retry_backoff_s) * float(attempts))
+                continue
+
+            break
+
+        except HTTPException:
+            raise
+
+        except requests.exceptions.Timeout:
+            last_err = "timeout"
+        except Exception as e:
+            last_err = f"request_failed:{type(e).__name__}:{str(e)[:200]}"
+
+        # Retry by error token
+        if attempts < max_attempts and _should_retry(None, last_err, retry_on_status, retry_on_errors):
+            if retry_backoff_s > 0:
+                time.sleep(float(retry_backoff_s) * float(attempts))
+            continue
+
+        break
+
+    if resp is None:
+        return {
+            "ok": False,
+            "run_record_id": run_record_id,
+            "host": meta["host"],
+            "method": method,
+            "url": url,
+            "status_code": None,
+            "tool_key": tool_key or None,
+            "tool_mode": tool_mode or None,
+            "tool_intent": tool_intent or None,
+            "auth_mode": auth_mode,
+            "attempts": attempts,
+            "retry_max": retry_max,
+            "last_error": last_err or "request_failed",
+            "request_headers": _safe_headers_for_log(headers),
+            "response_headers": {},
+            "response_json": None,
+            "response_text": None,
+        }
 
     status = resp.status_code
     resp_headers = dict(resp.headers or {})
@@ -1358,6 +1440,9 @@ def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
         "tool_mode": tool_mode or None,
         "tool_intent": tool_intent or None,
         "auth_mode": auth_mode,
+        "attempts": attempts,
+        "retry_max": retry_max,
+        "last_error": last_err,
         "request_headers": _safe_headers_for_log(headers),
         "response_headers": {
             k: (v if k.lower() != "set-cookie" else "***redacted***")
@@ -1717,9 +1802,9 @@ async def run(request: Request) -> RunResponse:
             finish_system_run(run_record_id, "Unsupported", {"ok": False, "error": "unsupported_capability"})
             raise HTTPException(status_code=400, detail=f"Unsupported capability: {req.capability}")
 
-        # IMPORTANT FIX:
+        # IMPORTANT FIX kept:
         # We always call the capability even in dry_run,
-        # so http_exec returns full "dry_run" details (url/method/headers/allowlist/etc).
+        # so http_exec returns full "dry_run" details.
         result_obj = fn(req, run_record_id)
 
         finish_system_run(run_record_id, "Done", result_obj)
