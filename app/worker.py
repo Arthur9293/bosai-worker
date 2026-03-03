@@ -351,9 +351,11 @@ def cleanup_stale_runs() -> Dict[str, Any]:
 # System_Runs helpers
 # ============================================================
 
-def create_system_run(req: RunRequest) -> str:
+def create_system_run(req: RunRequest) -> Tuple[str, str]:
+    # SAFE: same Airtable fields; just return both ids for correct API semantics
+    run_uuid = str(uuid.uuid4())
     fields = {
-        "Run_ID": str(uuid.uuid4()),
+        "Run_ID": run_uuid,
         "Worker": req.worker,
         "Capability": req.capability,
         "Idempotency_Key": req.idempotency_key,
@@ -365,7 +367,8 @@ def create_system_run(req: RunRequest) -> str:
         "App_Name": APP_NAME,
         "App_Version": APP_VERSION,
     }
-    return airtable_create(SYSTEM_RUNS_TABLE_NAME, fields)
+    record_id = airtable_create(SYSTEM_RUNS_TABLE_NAME, fields)
+    return record_id, run_uuid
 
 
 def finish_system_run(record_id: str, status: str, result_obj: Dict[str, Any]) -> None:
@@ -1011,13 +1014,14 @@ async def run(request: Request, response: Response) -> RunResponse:
             worker=req.worker,
             capability=req.capability,
             idempotency_key=req.idempotency_key,
-            run_id=str(fields.get("Run_ID", "")) or "unknown",
-            airtable_record_id=existing.get("id"),
+            run_id=str(fields.get("Run_ID", "")) or "unknown",  # UUID from Airtable field
+            airtable_record_id=existing.get("id"),             # Airtable record id recXXXX
             result={"idempotent_replay": True, "previous": previous_result},
         )
 
-    run_record_id = create_system_run(req)
+    run_record_id, run_uuid = create_system_run(req)
     response.headers["X-Run-Record-Id"] = run_record_id  # DEBUG header
+    response.headers["X-Run-Id"] = run_uuid              # DEBUG header (stable UUID)
 
     try:
         fn = CAPABILITIES.get(req.capability)
@@ -1037,8 +1041,8 @@ async def run(request: Request, response: Response) -> RunResponse:
             worker=req.worker,
             capability=req.capability,
             idempotency_key=req.idempotency_key,
-            run_id=run_record_id,
-            airtable_record_id=run_record_id,
+            run_id=run_uuid,                 # ✅ stable: matches replay path (fields["Run_ID"])
+            airtable_record_id=run_record_id, # ✅ Airtable record id stays available
             result=result_obj,
         )
 
