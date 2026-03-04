@@ -1,8 +1,11 @@
-# app/worker.py — BOSAI Worker (v2.4.5)
-# OPTION A (SAFE): http_exec extracted to app/capabilities/http_exec.py (single source of truth)
-# - Worker keeps a thin wrapper calling module with shared requests.Session (keep-alive)
-# - Everything else unchanged: payload schema, ToolCatalog enforcement behavior, idempotency, SLA, endpoints.
-# - No breaking change.
+# app/worker.py — BOSAI Worker (v2.4.6)
+# SAFE PATCH over v2.4.5:
+# - Keep Option A: http_exec is single source of truth in app/capabilities/http_exec.py
+# - Worker stays a thin wrapper with shared requests.Session
+# - Fix/align run_id semantics:
+#   * run_id returned by API = stable UUID stored in Airtable field Run_ID
+#   * airtable_record_id returned by API = Airtable record id (recXXXX)
+# - No breaking change: payload schema, endpoints, idempotency, SLA, ToolCatalog behavior unchanged.
 
 import os
 import json
@@ -10,11 +13,9 @@ import time
 import uuid
 import hmac
 import hashlib
-import re
 import traceback
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List, Tuple
-from urllib.parse import urlparse
 
 import requests
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -43,11 +44,10 @@ COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.4.5").strip()
+APP_VERSION = os.getenv("APP_VERSION", "2.4.6").strip()
 
 RUN_MAX_SECONDS = float((os.getenv("RUN_MAX_SECONDS", "30") or "30").strip())
 HTTP_TIMEOUT_SECONDS = float((os.getenv("HTTP_TIMEOUT_SECONDS", "20") or "20").strip())
-
 RUN_LOCK_TTL_SECONDS = int((os.getenv("RUN_LOCK_TTL_SECONDS", "600") or "600").strip())
 
 RUN_SHARED_SECRET = os.getenv("RUN_SHARED_SECRET", "").strip()
@@ -159,8 +159,8 @@ class RunResponse(BaseModel):
     worker: str
     capability: str
     idempotency_key: str
-    run_id: str
-    airtable_record_id: Optional[str] = None
+    run_id: str  # stable UUID (Airtable field Run_ID)
+    airtable_record_id: Optional[str] = None  # recXXXX
     result: Dict[str, Any] = Field(default_factory=dict)
 
     class Config:
@@ -268,20 +268,6 @@ def verify_signature_or_401(raw_body: bytes, signature_header: Optional[str]) ->
         raise HTTPException(status_code=401, detail="Invalid x-run-signature")
 
 
-def _to_dict(x: Any) -> Dict[str, Any]:
-    return x if isinstance(x, dict) else {}
-
-
-def _pick_first(*vals):
-    for v in vals:
-        if v is None:
-            continue
-        if isinstance(v, str) and v.strip() == "":
-            continue
-        return v
-    return None
-
-
 def _as_bool(v: Any) -> bool:
     if isinstance(v, bool):
         return v
@@ -352,7 +338,7 @@ def cleanup_stale_runs() -> Dict[str, Any]:
 # ============================================================
 
 def create_system_run(req: RunRequest) -> Tuple[str, str]:
-    # SAFE: same Airtable fields; just return both ids for correct API semantics
+    # SAFE: same Airtable fields; return (record_id, stable_run_uuid)
     run_uuid = str(uuid.uuid4())
     fields = {
         "Run_ID": run_uuid,
@@ -667,7 +653,6 @@ def capability_commands_tick(req: RunRequest, run_record_id: str) -> Dict[str, A
 # ----------------------------
 
 def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    # Keep behavior: shared _HTTP_SESSION + module enforcement/allowlist/ssrf/timeout caps
     return capability_http_exec_impl(req, run_record_id, session=_HTTP_SESSION)
 
 
@@ -1014,8 +999,8 @@ async def run(request: Request, response: Response) -> RunResponse:
             worker=req.worker,
             capability=req.capability,
             idempotency_key=req.idempotency_key,
-            run_id=str(fields.get("Run_ID", "")) or "unknown",  # UUID from Airtable field
-            airtable_record_id=existing.get("id"),             # Airtable record id recXXXX
+            run_id=str(fields.get("Run_ID", "")) or "unknown",  # stable UUID field
+            airtable_record_id=existing.get("id"),             # recXXXX
             result={"idempotent_replay": True, "previous": previous_result},
         )
 
@@ -1041,8 +1026,8 @@ async def run(request: Request, response: Response) -> RunResponse:
             worker=req.worker,
             capability=req.capability,
             idempotency_key=req.idempotency_key,
-            run_id=run_uuid,                 # ✅ stable: matches replay path (fields["Run_ID"])
-            airtable_record_id=run_record_id, # ✅ Airtable record id stays available
+            run_id=run_uuid,                  # ✅ stable
+            airtable_record_id=run_record_id,  # ✅ recXXXX
             result=result_obj,
         )
 
