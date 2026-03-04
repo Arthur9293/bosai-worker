@@ -16,6 +16,10 @@
 #     Authorization: Bearer <secret>
 #   sourced from env/secret files (same precedence as Authorization).
 # - This does NOT change behavior for other keys.
+#
+# SAFE diagnostics patch:
+# - dry_run now reports whether secrets were found and whether apikey/Authorization were injected,
+#   WITHOUT ever returning secret values.
 
 import os
 import json
@@ -264,6 +268,8 @@ def _validate_http_exec_url(url: str) -> Dict[str, str]:
         raise HTTPException(status_code=400, detail="HTTP_EXEC missing host")
 
     # Deny-by-default: require allowlist
+    if not HTTP_EXEC_ALLOWLIST:
+        raise HTTPException(status_code=403, detail="HTTP_EXEC allowlist is empty (set HTTP_EXEC_ALLOWLIST).")
     if not _host_matches_allowlist(host, HTTP_EXEC_ALLOWLIST):
         raise HTTPException(status_code=403, detail=f"HTTP_EXEC host not in allowlist: {host}")
 
@@ -629,6 +635,29 @@ def _build_secret_headers(header_keys: List[str], auth_mode: str = "token") -> D
     return out
 
 
+def _diagnose_secret_keys(header_keys: List[str]) -> Dict[str, Any]:
+    """
+    SAFE: diagnostics only — returns booleans and key names; never returns secret values.
+    """
+    found_keys: List[str] = []
+    for key in header_keys or []:
+        k = str(key).strip()
+        if not k:
+            continue
+        try:
+            v = _load_secret_for_key(k)
+            if v:
+                found_keys.append(k)
+        except Exception:
+            continue
+
+    return {
+        "requested": [str(k).strip() for k in (header_keys or []) if str(k).strip()],
+        "found_any": bool(found_keys),
+        "found_keys": found_keys[:5],
+    }
+
+
 def _extract_http_exec_input(inp: Dict[str, Any]) -> Dict[str, Any]:
     inp0 = _to_dict(inp)
     nested_input = _to_dict(inp0.get("input"))
@@ -864,6 +893,14 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
         raise HTTPException(status_code=400, detail="HTTP_EXEC use json/body OR data, not both.")
 
     if dry_run:
+        # SAFE: show whether secrets were found without leaking them
+        sec_diag = _diagnose_secret_keys(merged_secret_keys)
+        sec_diag["headers_injected"] = {
+            "authorization_present": ("Authorization" in secret_headers),
+            "apikey_present": ("apikey" in secret_headers),
+        }
+        sec_diag["supabase_mode_detected"] = ("apikey" in secret_headers and "Authorization" in secret_headers)
+
         return {
             "ok": True,
             "dry_run": True,
@@ -884,6 +921,9 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
                 "retry_backoff_s": retry_backoff_s,
                 "retry_on_status": retry_on_status,
                 "retry_on_errors": retry_on_errors,
+            },
+            "diagnostics": {
+                "secrets": sec_diag,
             },
             "note": "HTTP call skipped (dry_run).",
         }
