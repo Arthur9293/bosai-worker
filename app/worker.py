@@ -1,7 +1,12 @@
-# app/worker.py — BOSAI Worker (v2.4.8)
-# SAFE PATCH over v2.4.7:
-# - Auth becomes OR (scheduler secret OR HMAC signature) when both are configured
-# - No changes to payload schema, endpoints, capabilities, idempotency, SLA, ToolCatalog
+# app/worker.py — BOSAI Worker (v2.4.9)
+# SAFE PATCH over v2.4.8:
+# - Adds scheduler selection logic for Commands:
+#   Status_select='Queued' AND (Scheduled_At empty OR Scheduled_At <= NOW())
+#   Sort by Priority desc, then Scheduled_At asc
+# - Adds filtered Airtable list helper (non-breaking)
+# - Adds best-effort lock fields when moving command to Running (non-breaking)
+# - Keeps auth OR (scheduler secret OR HMAC) unchanged
+# - No change to payload schema, endpoints, SLA, ToolCatalog behavior
 
 import os
 import json
@@ -38,7 +43,7 @@ COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.4.8").strip()
+APP_VERSION = os.getenv("APP_VERSION", "2.4.9").strip()
 
 RUN_MAX_SECONDS = float((os.getenv("RUN_MAX_SECONDS", "30") or "30").strip())
 HTTP_TIMEOUT_SECONDS = float((os.getenv("HTTP_TIMEOUT_SECONDS", "20") or "20").strip())
@@ -174,7 +179,12 @@ def _airtable_headers() -> Dict[str, str]:
 
 def airtable_create(table_name: str, fields: Dict[str, Any]) -> str:
     _require_airtable()
-    r = _HTTP_SESSION.post(_airtable_url(table_name), headers=_airtable_headers(), json={"fields": fields}, timeout=HTTP_TIMEOUT_SECONDS)
+    r = _HTTP_SESSION.post(
+        _airtable_url(table_name),
+        headers=_airtable_headers(),
+        json={"fields": fields},
+        timeout=HTTP_TIMEOUT_SECONDS,
+    )
     if r.status_code >= 300:
         raise HTTPException(status_code=500, detail=f"Airtable create failed: {r.status_code} {r.text}")
     return r.json()["id"]
@@ -182,14 +192,24 @@ def airtable_create(table_name: str, fields: Dict[str, Any]) -> str:
 
 def airtable_update(table_name: str, record_id: str, fields: Dict[str, Any]) -> None:
     _require_airtable()
-    r = _HTTP_SESSION.patch(f"{_airtable_url(table_name)}/{record_id}", headers=_airtable_headers(), json={"fields": fields}, timeout=HTTP_TIMEOUT_SECONDS)
+    r = _HTTP_SESSION.patch(
+        f"{_airtable_url(table_name)}/{record_id}",
+        headers=_airtable_headers(),
+        json={"fields": fields},
+        timeout=HTTP_TIMEOUT_SECONDS,
+    )
     if r.status_code >= 300:
         raise HTTPException(status_code=500, detail=f"Airtable update failed: {r.status_code} {r.text}")
 
 
 def airtable_find_first(table_name: str, formula: str, max_records: int = 1) -> Optional[Dict[str, Any]]:
     _require_airtable()
-    r = _HTTP_SESSION.get(_airtable_url(table_name), headers=_airtable_headers(), params={"filterByFormula": formula, "maxRecords": str(max_records)}, timeout=HTTP_TIMEOUT_SECONDS)
+    r = _HTTP_SESSION.get(
+        _airtable_url(table_name),
+        headers=_airtable_headers(),
+        params={"filterByFormula": formula, "maxRecords": str(max_records)},
+        timeout=HTTP_TIMEOUT_SECONDS,
+    )
     if r.status_code >= 300:
         raise HTTPException(status_code=500, detail=f"Airtable search failed: {r.status_code} {r.text}")
     records = r.json().get("records", [])
@@ -198,9 +218,40 @@ def airtable_find_first(table_name: str, formula: str, max_records: int = 1) -> 
 
 def airtable_list_view(table_name: str, view_name: str, max_records: int = 100) -> List[Dict[str, Any]]:
     _require_airtable()
-    r = _HTTP_SESSION.get(_airtable_url(table_name), headers=_airtable_headers(), params={"view": view_name, "maxRecords": str(max_records)}, timeout=HTTP_TIMEOUT_SECONDS)
+    r = _HTTP_SESSION.get(
+        _airtable_url(table_name),
+        headers=_airtable_headers(),
+        params={"view": view_name, "maxRecords": str(max_records)},
+        timeout=HTTP_TIMEOUT_SECONDS,
+    )
     if r.status_code >= 300:
         raise HTTPException(status_code=500, detail=f"Airtable view list failed: {r.status_code} {r.text}")
+    return r.json().get("records", [])
+
+
+# NEW (SAFE): filtered list + sort for scheduler selection
+def airtable_list_filtered(
+    table_name: str,
+    formula: str,
+    sort: Optional[List[Dict[str, str]]] = None,
+    max_records: int = 100,
+) -> List[Dict[str, Any]]:
+    _require_airtable()
+    params: Dict[str, Any] = {"filterByFormula": formula, "maxRecords": str(max_records)}
+
+    if sort:
+        for i, s in enumerate(sort):
+            params[f"sort[{i}][field]"] = s["field"]
+            params[f"sort[{i}][direction]"] = s.get("direction", "asc")
+
+    r = _HTTP_SESSION.get(
+        _airtable_url(table_name),
+        headers=_airtable_headers(),
+        params=params,
+        timeout=HTTP_TIMEOUT_SECONDS,
+    )
+    if r.status_code >= 300:
+        raise HTTPException(status_code=500, detail=f"Airtable filtered list failed: {r.status_code} {r.text}")
     return r.json().get("records", [])
 
 
@@ -281,7 +332,12 @@ def cleanup_stale_runs() -> Dict[str, Any]:
     formula = "AND({Status_select}='Running',DATETIME_DIFF(NOW(), {Started_At}, 'seconds') > " + str(ttl) + ")"
 
     try:
-        r = _HTTP_SESSION.get(_airtable_url(SYSTEM_RUNS_TABLE_NAME), headers=_airtable_headers(), params={"filterByFormula": formula, "maxRecords": "10"}, timeout=HTTP_TIMEOUT_SECONDS)
+        r = _HTTP_SESSION.get(
+            _airtable_url(SYSTEM_RUNS_TABLE_NAME),
+            headers=_airtable_headers(),
+            params={"filterByFormula": formula, "maxRecords": "10"},
+            timeout=HTTP_TIMEOUT_SECONDS,
+        )
         if r.status_code >= 300:
             if "INVALID_FILTER_BY_FORMULA" in r.text:
                 return {"ok": True, "noop": True, "reason": "invalid_filter_formula"}
@@ -298,7 +354,11 @@ def cleanup_stale_runs() -> Dict[str, Any]:
                 airtable_update(
                     SYSTEM_RUNS_TABLE_NAME,
                     rid,
-                    {"Status_select": "Error", "Finished_At": utc_now_iso(), "Result_JSON": json.dumps({"error": "lock_ttl_expired"}, ensure_ascii=False)},
+                    {
+                        "Status_select": "Error",
+                        "Finished_At": utc_now_iso(),
+                        "Result_JSON": json.dumps({"error": "lock_ttl_expired"}, ensure_ascii=False),
+                    },
                 )
                 cleaned += 1
             except Exception:
@@ -333,11 +393,27 @@ def create_system_run(req: RunRequest) -> Tuple[str, str]:
 
 
 def finish_system_run(record_id: str, status: str, result_obj: Dict[str, Any]) -> None:
-    airtable_update(SYSTEM_RUNS_TABLE_NAME, record_id, {"Status_select": status, "Finished_At": utc_now_iso(), "Result_JSON": json.dumps(result_obj, ensure_ascii=False)})
+    airtable_update(
+        SYSTEM_RUNS_TABLE_NAME,
+        record_id,
+        {
+            "Status_select": status,
+            "Finished_At": utc_now_iso(),
+            "Result_JSON": json.dumps(result_obj, ensure_ascii=False),
+        },
+    )
 
 
 def fail_system_run(record_id: str, error_message: str) -> None:
-    airtable_update(SYSTEM_RUNS_TABLE_NAME, record_id, {"Status_select": "Error", "Finished_At": utc_now_iso(), "Result_JSON": json.dumps({"error": error_message}, ensure_ascii=False)})
+    airtable_update(
+        SYSTEM_RUNS_TABLE_NAME,
+        record_id,
+        {
+            "Status_select": "Error",
+            "Finished_At": utc_now_iso(),
+            "Result_JSON": json.dumps({"error": error_message}, ensure_ascii=False),
+        },
+    )
 
 
 def idempotency_lookup(req: RunRequest) -> Optional[Dict[str, Any]]:
@@ -360,7 +436,12 @@ def state_get_record(app_key: str) -> Optional[Dict[str, Any]]:
 
 def state_put(app_key: str, value_obj: Dict[str, Any]) -> Dict[str, Any]:
     existing = state_get_record(app_key)
-    fields = {"App_Key": app_key, "Value_JSON": json.dumps(value_obj, ensure_ascii=False), "Updated_At": utc_now_iso(), "App_Version": APP_VERSION}
+    fields = {
+        "App_Key": app_key,
+        "Value_JSON": json.dumps(value_obj, ensure_ascii=False),
+        "Updated_At": utc_now_iso(),
+        "App_Version": APP_VERSION,
+    }
     if existing:
         airtable_update(STATE_TABLE_NAME, existing["id"], fields)
         return {"ok": True, "mode": "update", "record_id": existing["id"]}
@@ -382,13 +463,25 @@ def lock_acquire(lock_key: str, holder: str) -> Dict[str, Any]:
         airtable_update(
             STATE_TABLE_NAME,
             rec["id"],
-            {"App_Key": app_key, "Lock_Status": STATE_LOCK_ACTIVE, "Value_JSON": json.dumps({"holder": holder, "acquired_at": now}, ensure_ascii=False), "Updated_At": now, "App_Version": APP_VERSION},
+            {
+                "App_Key": app_key,
+                "Lock_Status": STATE_LOCK_ACTIVE,
+                "Value_JSON": json.dumps({"holder": holder, "acquired_at": now}, ensure_ascii=False),
+                "Updated_At": now,
+                "App_Version": APP_VERSION,
+            },
         )
         return {"ok": True, "locked": True, "record_id": rec["id"], "lock_status": STATE_LOCK_ACTIVE}
 
     rid = airtable_create(
         STATE_TABLE_NAME,
-        {"App_Key": app_key, "Lock_Status": STATE_LOCK_ACTIVE, "Value_JSON": json.dumps({"holder": holder, "acquired_at": now}, ensure_ascii=False), "Updated_At": now, "App_Version": APP_VERSION},
+        {
+            "App_Key": app_key,
+            "Lock_Status": STATE_LOCK_ACTIVE,
+            "Value_JSON": json.dumps({"holder": holder, "acquired_at": now}, ensure_ascii=False),
+            "Updated_At": now,
+            "App_Version": APP_VERSION,
+        },
     )
     return {"ok": True, "locked": True, "record_id": rid, "lock_status": STATE_LOCK_ACTIVE}
 
@@ -410,7 +503,12 @@ def lock_release(lock_key: str, holder: str) -> Dict[str, Any]:
     airtable_update(
         STATE_TABLE_NAME,
         rec["id"],
-        {"Lock_Status": STATE_LOCK_RELEASED, "Updated_At": now, "Value_JSON": json.dumps({"holder": holder, "released_at": now}, ensure_ascii=False), "App_Version": APP_VERSION},
+        {
+            "Lock_Status": STATE_LOCK_RELEASED,
+            "Updated_At": now,
+            "Value_JSON": json.dumps({"holder": holder, "released_at": now}, ensure_ascii=False),
+            "App_Version": APP_VERSION,
+        },
     )
     return {"ok": True, "released": True, "record_id": rec["id"]}
 
@@ -531,7 +629,19 @@ def capability_commands_tick(req: RunRequest, run_record_id: str) -> Dict[str, A
             update_fail += 1
             update_errors.append(f"{cid}: {res.get('error')}")
 
-    return {"ok": True, "view": view, "limit": limit, "scanned": len(cmds), "processed": processed, "updated": updated, "update_fail": update_fail, "errors_count": len(update_errors), "errors": update_errors[:10], "run_record_id": run_record_id, "ts": now}
+    return {
+        "ok": True,
+        "view": view,
+        "limit": limit,
+        "scanned": len(cmds),
+        "processed": processed,
+        "updated": updated,
+        "update_fail": update_fail,
+        "errors_count": len(update_errors),
+        "errors": update_errors[:10],
+        "run_record_id": run_record_id,
+        "ts": now,
+    }
 
 
 def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
@@ -586,7 +696,16 @@ def capability_state_get(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     if not rec:
         return {"ok": True, "found": False, "key": key}
     fields = rec.get("fields", {}) or {}
-    return {"ok": True, "found": True, "key": key, "record_id": rec.get("id"), "value": _json_load_maybe(fields.get("Value_JSON")), "updated_at": fields.get("Updated_At"), "app_version": fields.get("App_Version"), "lock_status": fields.get("Lock_Status")}
+    return {
+        "ok": True,
+        "found": True,
+        "key": key,
+        "record_id": rec.get("id"),
+        "value": _json_load_maybe(fields.get("Value_JSON")),
+        "updated_at": fields.get("Updated_At"),
+        "app_version": fields.get("App_Version"),
+        "lock_status": fields.get("Lock_Status"),
+    }
 
 
 def capability_state_put(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
@@ -623,9 +742,39 @@ def _read_command_status(fields: Dict[str, Any]) -> str:
 
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     max_cmds = int(req.max_commands or 0) or 5
-    view = (req.view or COMMANDS_VIEW_NAME or "Queue").strip()
 
-    cmds = airtable_list_view(COMMANDS_TABLE_NAME, view, max_records=max_cmds)
+    # Scheduler selection (SAFE):
+    # - Only queued commands
+    # - Due now: Scheduled_At empty OR <= NOW()
+    # - Sort Priority desc then Scheduled_At asc
+    formula = (
+        "AND("
+        "{Status_select}='Queued',"
+        "OR("
+        "{Scheduled_At}='',"
+        "IS_BEFORE({Scheduled_At}, NOW()),"
+        "{Scheduled_At}=NOW()"
+        ")"
+        ")"
+    )
+
+    try:
+        cmds = airtable_list_filtered(
+            COMMANDS_TABLE_NAME,
+            formula=formula,
+            sort=[
+                {"field": "Priority", "direction": "desc"},
+                {"field": "Scheduled_At", "direction": "asc"},
+            ],
+            max_records=max_cmds,
+        )
+        selection_mode = "scheduler"
+        view = "scheduler_formula"
+    except Exception as e:
+        # Fallback (SAFE): if Scheduled_At/fields not present yet, revert to old behavior
+        selection_mode = "view_fallback"
+        view = (req.view or COMMANDS_VIEW_NAME or "Queue").strip()
+        cmds = airtable_list_view(COMMANDS_TABLE_NAME, view, max_records=max_cmds)
 
     executed = 0
     succeeded = 0
@@ -653,7 +802,11 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         if not capability:
             failed += 1
             try:
-                airtable_update(COMMANDS_TABLE_NAME, cid, {"Status_select": "Error", "Error_Message": "Missing Capability", "Linked_Run": [run_record_id]})
+                airtable_update(
+                    COMMANDS_TABLE_NAME,
+                    cid,
+                    {"Status_select": "Error", "Error_Message": "Missing Capability", "Linked_Run": [run_record_id]},
+                )
             except Exception:
                 pass
             continue
@@ -662,7 +815,15 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         if not fn:
             unsupported += 1
             try:
-                airtable_update(COMMANDS_TABLE_NAME, cid, {"Status_select": "Unsupported", "Error_Message": f"Unsupported capability: {capability}", "Linked_Run": [run_record_id]})
+                airtable_update(
+                    COMMANDS_TABLE_NAME,
+                    cid,
+                    {
+                        "Status_select": "Unsupported",
+                        "Error_Message": f"Unsupported capability: {capability}",
+                        "Linked_Run": [run_record_id],
+                    },
+                )
             except Exception:
                 pass
             continue
@@ -670,26 +831,70 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         idem = str(fields.get("Idempotency_Key", "")).strip() or f"cmd:{cid}:{capability}"
         cmd_input = _compose_command_input(fields)
 
-        try:
-            airtable_update(COMMANDS_TABLE_NAME, cid, {"Status_select": "Running", "Idempotency_Key": idem, "Linked_Run": [run_record_id], "Error_Message": ""})
-        except Exception:
+        # Best-effort lock + Running (SAFE): uses optional lock fields if they exist
+        now = utc_now_iso()
+        lock_candidates = [
+            {
+                "Status_select": "Running",
+                "Idempotency_Key": idem,
+                "Linked_Run": [run_record_id],
+                "Error_Message": "",
+                "Locked_At": now,
+                "Locked_By": req.worker,
+                "Is_Locked": True,
+            },
+            {
+                "Status_select": "Running",
+                "Idempotency_Key": idem,
+                "Linked_Run": [run_record_id],
+                "Error_Message": "",
+            },
+        ]
+        lock_res = _airtable_update_best_effort(COMMANDS_TABLE_NAME, cid, lock_candidates)
+        if not lock_res.get("ok"):
             blocked += 1
             continue
 
         executed += 1
 
         try:
-            cmd_req = RunRequest.from_payload({"worker": req.worker, "capability": capability, "idempotency_key": idem, "input": cmd_input, "priority": req.priority, "dry_run": bool(req.dry_run)})
+            cmd_req = RunRequest.from_payload(
+                {
+                    "worker": req.worker,
+                    "capability": capability,
+                    "idempotency_key": idem,
+                    "input": cmd_input,
+                    "priority": req.priority,
+                    "dry_run": bool(req.dry_run),
+                }
+            )
             result_obj = fn(cmd_req, run_record_id)
 
-            airtable_update(COMMANDS_TABLE_NAME, cid, {"Status_select": "Done", "Result_JSON": json.dumps(result_obj, ensure_ascii=False), "Linked_Run": [run_record_id]})
+            airtable_update(
+                COMMANDS_TABLE_NAME,
+                cid,
+                {
+                    "Status_select": "Done",
+                    "Result_JSON": json.dumps(result_obj, ensure_ascii=False),
+                    "Linked_Run": [run_record_id],
+                },
+            )
             succeeded += 1
 
         except HTTPException as e:
             msg = str(e.detail)
             failed += 1
             try:
-                airtable_update(COMMANDS_TABLE_NAME, cid, {"Status_select": "Error", "Error_Message": msg, "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False), "Linked_Run": [run_record_id]})
+                airtable_update(
+                    COMMANDS_TABLE_NAME,
+                    cid,
+                    {
+                        "Status_select": "Error",
+                        "Error_Message": msg,
+                        "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
+                        "Linked_Run": [run_record_id],
+                    },
+                )
             except Exception:
                 pass
             errors.append(f"{cid}: {msg}")
@@ -698,12 +903,34 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             msg = repr(e)
             failed += 1
             try:
-                airtable_update(COMMANDS_TABLE_NAME, cid, {"Status_select": "Error", "Error_Message": msg, "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False), "Linked_Run": [run_record_id]})
+                airtable_update(
+                    COMMANDS_TABLE_NAME,
+                    cid,
+                    {
+                        "Status_select": "Error",
+                        "Error_Message": msg,
+                        "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
+                        "Linked_Run": [run_record_id],
+                    },
+                )
             except Exception:
                 pass
             errors.append(f"{cid}: {msg}")
 
-    return {"ok": True, "view": view, "scanned": len(cmds), "executed": executed, "succeeded": succeeded, "failed": failed, "blocked": blocked, "unsupported": unsupported, "commands_record_ids": processed_ids, "errors_count": len(errors), "errors": errors[:10]}
+    return {
+        "ok": True,
+        "selection_mode": selection_mode,
+        "view": view,
+        "scanned": len(cmds),
+        "executed": executed,
+        "succeeded": succeeded,
+        "failed": failed,
+        "blocked": blocked,
+        "unsupported": unsupported,
+        "commands_record_ids": processed_ids,
+        "errors_count": len(errors),
+        "errors": errors[:10],
+    }
 
 
 CAPABILITIES = {
