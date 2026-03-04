@@ -1,11 +1,8 @@
-# app/worker.py — BOSAI Worker (v2.4.6)
-# SAFE PATCH over v2.4.5:
-# - Keep Option A: http_exec is single source of truth in app/capabilities/http_exec.py
-# - Worker stays a thin wrapper with shared requests.Session
-# - Fix/align run_id semantics:
-#   * run_id returned by API = stable UUID stored in Airtable field Run_ID
-#   * airtable_record_id returned by API = Airtable record id (recXXXX)
-# - No breaking change: payload schema, endpoints, idempotency, SLA, ToolCatalog behavior unchanged.
+# app/worker.py — BOSAI Worker (v2.4.7)
+# SAFE PATCH over v2.4.6:
+# - Adds optional scheduler auth: x-scheduler-secret (SCHEDULER_SECRET env)
+# - Does NOT break existing signature auth (x-run-signature) nor existing payload schema
+# - No change to capabilities, idempotency, SLA, ToolCatalog behavior
 
 import os
 import json
@@ -44,13 +41,17 @@ COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.4.6").strip()
+APP_VERSION = os.getenv("APP_VERSION", "2.4.7").strip()
 
 RUN_MAX_SECONDS = float((os.getenv("RUN_MAX_SECONDS", "30") or "30").strip())
 HTTP_TIMEOUT_SECONDS = float((os.getenv("HTTP_TIMEOUT_SECONDS", "20") or "20").strip())
 RUN_LOCK_TTL_SECONDS = int((os.getenv("RUN_LOCK_TTL_SECONDS", "600") or "600").strip())
 
+# Existing signature secret (HMAC)
 RUN_SHARED_SECRET = os.getenv("RUN_SHARED_SECRET", "").strip()
+
+# NEW: simple scheduler secret (for Render Cron headers)
+SCHEDULER_SECRET = os.getenv("SCHEDULER_SECRET", "").strip()
 
 SLA_WARNING_THRESHOLD_MIN = float((os.getenv("SLA_WARNING_THRESHOLD_MIN", "60") or "60").strip())
 
@@ -257,7 +258,7 @@ def _json_load_maybe(val: Any) -> Dict[str, Any]:
         return {}
 
 
-def verify_signature_or_401(raw_body: bytes, signature_header: Optional[str]) -> None:
+def _verify_hmac_signature_or_401(raw_body: bytes, signature_header: Optional[str]) -> None:
     if not RUN_SHARED_SECRET:
         return
     if not signature_header or not signature_header.startswith("sha256="):
@@ -268,13 +269,40 @@ def verify_signature_or_401(raw_body: bytes, signature_header: Optional[str]) ->
         raise HTTPException(status_code=401, detail="Invalid x-run-signature")
 
 
-def _as_bool(v: Any) -> bool:
-    if isinstance(v, bool):
-        return v
-    if v is None:
-        return False
-    s = str(v).strip().lower()
-    return s in ("1", "true", "yes", "y", "ok")
+def _verify_scheduler_secret_or_401(headers: Dict[str, str]) -> None:
+    if not SCHEDULER_SECRET:
+        return
+    got = (headers.get("x-scheduler-secret") or "").strip()
+    if not got:
+        raise HTTPException(status_code=401, detail="Missing x-scheduler-secret")
+    if not hmac.compare_digest(got, SCHEDULER_SECRET):
+        raise HTTPException(status_code=401, detail="Invalid x-scheduler-secret")
+
+
+def verify_request_auth_or_401(raw_body: bytes, headers: Dict[str, str]) -> None:
+    """
+    Auth policy (SAFE, additive):
+    - If SCHEDULER_SECRET is set: accept x-scheduler-secret
+      (Render Cron can easily send static header).
+    - Else if RUN_SHARED_SECRET is set: require x-run-signature (sha256=...).
+    - Else: no auth required (dev mode).
+    """
+    if SCHEDULER_SECRET:
+        _verify_scheduler_secret_or_401(headers)
+        return
+    _verify_hmac_signature_or_401(raw_body, headers.get("x-run-signature"))
+
+
+def _parse_float(val: Any) -> Optional[float]:
+    if val is None:
+        return None
+    try:
+        if isinstance(val, (int, float)):
+            return float(val)
+        s = str(val).strip().replace(",", ".")
+        return float(s)
+    except Exception:
+        return None
 
 
 # ============================================================
@@ -338,7 +366,6 @@ def cleanup_stale_runs() -> Dict[str, Any]:
 # ============================================================
 
 def create_system_run(req: RunRequest) -> Tuple[str, str]:
-    # SAFE: same Airtable fields; return (record_id, stable_run_uuid)
     run_uuid = str(uuid.uuid4())
     fields = {
         "Run_ID": run_uuid,
@@ -492,18 +519,6 @@ def capability_health_tick(req: RunRequest, run_record_id: str) -> Dict[str, Any
     return {"ok": True, "probe": "airtable_ok", "ts": utc_now_iso(), "run_record_id": run_record_id}
 
 
-def _parse_float(val: Any) -> Optional[float]:
-    if val is None:
-        return None
-    try:
-        if isinstance(val, (int, float)):
-            return float(val)
-        s = str(val).strip().replace(",", ".")
-        return float(s)
-    except Exception:
-        return None
-
-
 def _sla_status_for_remaining(remaining_min: float) -> str:
     if remaining_min <= 0:
         return SLA_STATUS_BREACHED
@@ -647,10 +662,6 @@ def capability_commands_tick(req: RunRequest, run_record_id: str) -> Dict[str, A
         "ts": now,
     }
 
-
-# ----------------------------
-# HTTP_EXEC (Option A wrapper) — single source of truth is module
-# ----------------------------
 
 def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     return capability_http_exec_impl(req, run_record_id, session=_HTTP_SESSION)
@@ -958,6 +969,8 @@ def health_score() -> Dict[str, Any]:
         issues.append("airtable_env_missing")
     if RUN_SHARED_SECRET:
         issues.append("signature_enforced")
+    if SCHEDULER_SECRET:
+        issues.append("scheduler_secret_enforced")
     if not (HTTP_EXEC_ALLOWLIST_RAW or "").strip():
         issues.append("http_exec_disabled_no_allowlist")
     if not (HTTP_EXEC_TARGETS_JSON or "").strip():
@@ -971,7 +984,9 @@ def health_score() -> Dict[str, Any]:
 async def run(request: Request, response: Response) -> RunResponse:
     started = time.time()
     raw = await request.body()
-    verify_signature_or_401(raw, request.headers.get("x-run-signature"))
+
+    # ✅ NEW (SAFE): allow scheduler secret auth OR existing HMAC auth
+    verify_request_auth_or_401(raw, {k.lower(): v for k, v in request.headers.items()})
 
     try:
         payload = await request.json()
@@ -999,14 +1014,14 @@ async def run(request: Request, response: Response) -> RunResponse:
             worker=req.worker,
             capability=req.capability,
             idempotency_key=req.idempotency_key,
-            run_id=str(fields.get("Run_ID", "")) or "unknown",  # stable UUID field
-            airtable_record_id=existing.get("id"),             # recXXXX
+            run_id=str(fields.get("Run_ID", "")) or "unknown",
+            airtable_record_id=existing.get("id"),
             result={"idempotent_replay": True, "previous": previous_result},
         )
 
     run_record_id, run_uuid = create_system_run(req)
-    response.headers["X-Run-Record-Id"] = run_record_id  # DEBUG header
-    response.headers["X-Run-Id"] = run_uuid              # DEBUG header (stable UUID)
+    response.headers["X-Run-Record-Id"] = run_record_id
+    response.headers["X-Run-Id"] = run_uuid
 
     try:
         fn = CAPABILITIES.get(req.capability)
@@ -1026,8 +1041,8 @@ async def run(request: Request, response: Response) -> RunResponse:
             worker=req.worker,
             capability=req.capability,
             idempotency_key=req.idempotency_key,
-            run_id=run_uuid,                  # ✅ stable
-            airtable_record_id=run_record_id,  # ✅ recXXXX
+            run_id=run_uuid,
+            airtable_record_id=run_record_id,
             result=result_obj,
         )
 
