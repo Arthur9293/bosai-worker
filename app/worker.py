@@ -4,6 +4,8 @@
 # - Adds Retry/Dead (DLQ) state machine (best-effort)
 # - Scheduler selection supports Queued due + Retry due + stale locks (formula best-effort; fallback to view)
 # - Releases locks on Done/Error/Retry/Dead (best-effort)
+# - Adds Commands idempotency protection: if another Command with same Idempotency_Key is already Done,
+#   current one is set to Blocked (best-effort) and unlocked (SAFE).
 # - Keeps auth OR (scheduler secret OR HMAC) unchanged
 # - No change to payload schema, endpoints, SLA, ToolCatalog behavior
 
@@ -326,6 +328,37 @@ def _parse_float(val: Any) -> Optional[float]:
             return float(val)
         s = str(val).strip().replace(",", ".")
         return float(s)
+    except Exception:
+        return None
+
+
+# ============================================================
+# Commands idempotency protection (SAFE)
+# ============================================================
+
+def _at_escape(s: str) -> str:
+    return str(s).replace("\\", "\\\\").replace("'", "\\'").strip()
+
+
+def find_done_command_by_idem(idem_key: str, exclude_record_id: str) -> Optional[Dict[str, Any]]:
+    """
+    If another command exists with same Idempotency_Key and Status_select='Done', return it.
+    SAFE: returns None on any Airtable error; does not break execution.
+    """
+    try:
+        idem = _at_escape(idem_key)
+        excl = _at_escape(exclude_record_id)
+        if not idem:
+            return None
+
+        formula = (
+            "AND("
+            f"{{Idempotency_Key}}='{idem}',"
+            "{{Status_select}}='Done',"
+            f"RECORD_ID()!='{excl}'"
+            ")"
+        )
+        return airtable_find_first(COMMANDS_TABLE_NAME, formula=formula, max_records=1)
     except Exception:
         return None
 
@@ -945,6 +978,44 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         if not lock_res.get("ok"):
             blocked += 1
             continue
+
+        # --- Commands idempotency protection (SAFE, best-effort) ---
+        dup_done = find_done_command_by_idem(idem, exclude_record_id=cid)
+        if dup_done:
+            note = {
+                "ok": True,
+                "skipped": True,
+                "reason": "idempotent_duplicate_done_exists",
+                "idempotency_key": idem,
+                "matched_done_record_id": dup_done.get("id"),
+            }
+
+            _airtable_update_best_effort(
+                COMMANDS_TABLE_NAME,
+                cid,
+                [
+                    {
+                        "Status_select": "Blocked",
+                        "Result_JSON": json.dumps(note, ensure_ascii=False),
+                        "Last_Error": json.dumps(note, ensure_ascii=False),
+                        "Error_Message": "",
+                        "Is_Locked": False,
+                        "Lock_Expires_At": None,
+                        "Lock_Token": "",
+                        "Last_Heartbeat_At": utc_now_iso(),
+                        "Linked_Run": [run_record_id],
+                    },
+                    {
+                        "Status_select": "Blocked",
+                        "Linked_Run": [run_record_id],
+                    },
+                ],
+            )
+
+            _release_command_lock_best_effort(cid)
+            blocked += 1
+            continue
+        # --- end idempotency protection ---
 
         executed += 1
 
