@@ -1,9 +1,9 @@
-# app/worker.py — BOSAI Worker (v2.4.10)
-# SAFE PATCH over v2.4.9:
-# - Scheduler selection formula uses IS_BLANK({Scheduled_At}) (Airtable-safe)
-# - airtable_list_filtered supports optional view_name (SAFE, non-breaking)
-# - command_orchestrator uses both filter + view (SAFE)
-# - Fixes any future risk of sort param missing keys
+# app/worker.py — BOSAI Worker (v2.5.0)
+# SAFE PATCH over v2.4.10 baseline:
+# - Adds Command Lock_Token + Lock_Expires_At (best-effort, non-breaking if fields absent)
+# - Adds Retry/Dead (DLQ) state machine (best-effort)
+# - Scheduler selection supports Queued due + Retry due + stale locks (formula best-effort; fallback to view)
+# - Releases locks on Done/Error/Retry/Dead (best-effort)
 # - Keeps auth OR (scheduler secret OR HMAC) unchanged
 # - No change to payload schema, endpoints, SLA, ToolCatalog behavior
 
@@ -14,7 +14,7 @@ import uuid
 import hmac
 import hashlib
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, List, Tuple
 
 import requests
@@ -42,11 +42,14 @@ COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.4.10").strip()
+APP_VERSION = os.getenv("APP_VERSION", "2.5.0").strip()
 
 RUN_MAX_SECONDS = float((os.getenv("RUN_MAX_SECONDS", "30") or "30").strip())
 HTTP_TIMEOUT_SECONDS = float((os.getenv("HTTP_TIMEOUT_SECONDS", "20") or "20").strip())
 RUN_LOCK_TTL_SECONDS = int((os.getenv("RUN_LOCK_TTL_SECONDS", "600") or "600").strip())
+
+# Commands lock TTL (minutes) — SAFE default 10
+COMMAND_LOCK_TTL_MIN = int((os.getenv("COMMAND_LOCK_TTL_MIN", "10") or "10").strip())
 
 RUN_SHARED_SECRET = os.getenv("RUN_SHARED_SECRET", "").strip()
 SCHEDULER_SECRET = os.getenv("SCHEDULER_SECRET", "").strip()
@@ -228,7 +231,7 @@ def airtable_list_view(table_name: str, view_name: str, max_records: int = 100) 
     return r.json().get("records", [])
 
 
-# NEW (SAFE): filtered list + sort for scheduler selection (+ optional view)
+# NEW (SAFE): filtered list + sort (+ optional view)
 def airtable_list_filtered(
     table_name: str,
     formula: str,
@@ -328,7 +331,85 @@ def _parse_float(val: Any) -> Optional[float]:
 
 
 # ============================================================
-# No-Chaos: stale Running TTL cleanup
+# Commands Lock / Retry helpers (SAFE, best-effort)
+# ============================================================
+
+def _new_lock_token() -> str:
+    return uuid.uuid4().hex
+
+
+def _command_lock_ttl_min() -> int:
+    try:
+        v = int(COMMAND_LOCK_TTL_MIN or 10)
+        return v if v > 0 else 10
+    except Exception:
+        return 10
+
+
+def _utc_plus_minutes_iso(minutes: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
+
+
+def _compute_next_retry_at(fields: Dict[str, Any]) -> str:
+    """
+    Exponential backoff capped (SAFE):
+    - base from Retry_Backoff_Sec (default 60)
+    - count from Retry_Count (default 0)
+    - delay = min(3600, base * 2^count)
+    """
+    try:
+        base = int(fields.get("Retry_Backoff_Sec", 60) or 60)
+    except Exception:
+        base = 60
+    try:
+        count = int(fields.get("Retry_Count", 0) or 0)
+    except Exception:
+        count = 0
+
+    if base <= 0:
+        base = 60
+    if count < 0:
+        count = 0
+
+    delay = min(3600, base * (2 ** count))
+    return (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
+
+
+def _airtable_update_best_effort(table_name: str, record_id: str, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    last_err: Optional[str] = None
+    for fields in candidates:
+        if not fields:
+            continue
+        try:
+            airtable_update(table_name, record_id, fields)
+            return {"ok": True, "applied_fields": list(fields.keys())}
+        except HTTPException as e:
+            last_err = str(e.detail)
+            continue
+        except Exception as e:
+            last_err = repr(e)
+            continue
+    return {"ok": False, "error": last_err or "update_failed"}
+
+
+def _release_command_lock_best_effort(command_id: str) -> None:
+    """
+    SAFE: attempts to clear lock fields if they exist; otherwise no-op.
+    """
+    now = utc_now_iso()
+    _airtable_update_best_effort(
+        COMMANDS_TABLE_NAME,
+        command_id,
+        [
+            {"Is_Locked": False, "Lock_Expires_At": None, "Lock_Token": "", "Last_Heartbeat_At": now},
+            {"Is_Locked": False, "Lock_Expires_At": None, "Lock_Token": ""},
+            {"Is_Locked": False},
+        ],
+    )
+
+
+# ============================================================
+# No-Chaos: stale Running TTL cleanup (System_Runs)
 # ============================================================
 
 def cleanup_stale_runs() -> Dict[str, Any]:
@@ -580,23 +661,6 @@ def capability_sla_machine(req: RunRequest, run_record_id: str) -> Dict[str, Any
     return {"ok": True, "updated": updated, "skipped": skipped, "errors_count": len(errors), "errors": errors[:10]}
 
 
-def _airtable_update_best_effort(table_name: str, record_id: str, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
-    last_err: Optional[str] = None
-    for fields in candidates:
-        if not fields:
-            continue
-        try:
-            airtable_update(table_name, record_id, fields)
-            return {"ok": True, "applied_fields": list(fields.keys())}
-        except HTTPException as e:
-            last_err = str(e.detail)
-            continue
-        except Exception as e:
-            last_err = repr(e)
-            continue
-    return {"ok": False, "error": last_err or "update_failed"}
-
-
 def capability_commands_tick(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     inp = req.input or {}
     limit = int(inp.get("limit", 5) or 5)
@@ -753,18 +817,15 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
     # Determine view (used for both scheduler and fallback)
     view_name = (req.view or COMMANDS_VIEW_NAME or "Queue").strip()
 
-    # Scheduler selection (SAFE):
-    # - Only queued commands
-    # - Due now: Scheduled_At blank OR <= NOW()
-    # - Sort Priority desc then Scheduled_At asc
+    # Scheduler selection (SAFE, best-effort):
+    # - Queued due: Scheduled_At blank OR <= NOW
+    # - Retry due: Next_Retry_At <= NOW
+    # - Stale lock: Is_Lock_Stale = 1 (if exists)
     formula = (
-        "AND("
-        "{Status_select}='Queued',"
         "OR("
-        "IS_BLANK({Scheduled_At}),"
-        "IS_BEFORE({Scheduled_At}, NOW()),"
-        "{Scheduled_At}=NOW()"
-        ")"
+        "AND({Status_select}='Queued',OR(IS_BLANK({Scheduled_At}),IS_BEFORE({Scheduled_At},NOW()),{Scheduled_At}=NOW())),"
+        "AND({Status_select}='Retry',{Next_Retry_At}!=BLANK(),OR(IS_BEFORE({Next_Retry_At},NOW()),{Next_Retry_At}=NOW())),"
+        "{Is_Lock_Stale}=1"
         ")"
     )
 
@@ -772,17 +833,18 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         cmds = airtable_list_filtered(
             COMMANDS_TABLE_NAME,
             formula=formula,
-            view_name=view_name,  # ✅ SAFE (will be ignored by Airtable if view exists; it's valid)
+            view_name=view_name,
             sort=[
                 {"field": "Priority", "direction": "desc"},
                 {"field": "Scheduled_At", "direction": "asc"},
+                {"field": "Next_Retry_At", "direction": "asc"},
             ],
             max_records=max_cmds,
         )
         selection_mode = "scheduler"
         view = f"scheduler_formula+view:{view_name}"
     except Exception:
-        # Fallback (SAFE): revert to old behavior if Scheduled_At/fields not present yet
+        # Fallback (SAFE)
         selection_mode = "view_fallback"
         view = view_name
         cmds = airtable_list_view(COMMANDS_TABLE_NAME, view, max_records=max_cmds)
@@ -805,54 +867,71 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         processed_ids.append(cid)
 
         status = _read_command_status(fields)
-        if status and status not in ("Queued", "QUEUE", "Queue"):
+
+        # Allow only runnable statuses
+        if status and status not in ("Queued", "QUEUE", "Queue", "Retry"):
             blocked += 1
             continue
 
         capability = str(fields.get("Capability", "")).strip()
         if not capability:
             failed += 1
-            try:
-                airtable_update(
-                    COMMANDS_TABLE_NAME,
-                    cid,
+            _airtable_update_best_effort(
+                COMMANDS_TABLE_NAME,
+                cid,
+                [
                     {"Status_select": "Error", "Error_Message": "Missing Capability", "Linked_Run": [run_record_id]},
-                )
-            except Exception:
-                pass
+                    {"Status_select": "Error"},
+                ],
+            )
+            _release_command_lock_best_effort(cid)
             continue
 
         fn = CAPABILITIES.get(capability)
         if not fn:
             unsupported += 1
-            try:
-                airtable_update(
-                    COMMANDS_TABLE_NAME,
-                    cid,
-                    {
-                        "Status_select": "Unsupported",
-                        "Error_Message": f"Unsupported capability: {capability}",
-                        "Linked_Run": [run_record_id],
-                    },
-                )
-            except Exception:
-                pass
+            _airtable_update_best_effort(
+                COMMANDS_TABLE_NAME,
+                cid,
+                [
+                    {"Status_select": "Unsupported", "Error_Message": f"Unsupported capability: {capability}", "Linked_Run": [run_record_id]},
+                    {"Status_select": "Unsupported"},
+                ],
+            )
+            _release_command_lock_best_effort(cid)
             continue
 
         idem = str(fields.get("Idempotency_Key", "")).strip() or f"cmd:{cid}:{capability}"
         cmd_input = _compose_command_input(fields)
 
-        # Best-effort lock + Running (SAFE): uses optional lock fields if they exist
+        # Lock + Running (SAFE best-effort)
         now = utc_now_iso()
+        ttl_min = _command_lock_ttl_min()
+        lock_token = _new_lock_token()
+        expires_at = _utc_plus_minutes_iso(ttl_min)
+
         lock_candidates = [
             {
                 "Status_select": "Running",
                 "Idempotency_Key": idem,
                 "Linked_Run": [run_record_id],
                 "Error_Message": "",
+                "Is_Locked": True,
                 "Locked_At": now,
                 "Locked_By": req.worker,
+                "Lock_Token": lock_token,
+                "Lock_TTL_Min": ttl_min,
+                "Lock_Expires_At": expires_at,
+                "Last_Heartbeat_At": now,
+            },
+            {
+                "Status_select": "Running",
+                "Idempotency_Key": idem,
+                "Linked_Run": [run_record_id],
+                "Error_Message": "",
                 "Is_Locked": True,
+                "Locked_At": now,
+                "Locked_By": req.worker,
             },
             {
                 "Status_select": "Running",
@@ -861,6 +940,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                 "Error_Message": "",
             },
         ]
+
         lock_res = _airtable_update_best_effort(COMMANDS_TABLE_NAME, cid, lock_candidates)
         if not lock_res.get("ok"):
             blocked += 1
@@ -879,53 +959,177 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                     "dry_run": bool(req.dry_run),
                 }
             )
+
             result_obj = fn(cmd_req, run_record_id)
 
-            airtable_update(
+            # Done + unlock (SAFE)
+            _airtable_update_best_effort(
                 COMMANDS_TABLE_NAME,
                 cid,
-                {
-                    "Status_select": "Done",
-                    "Result_JSON": json.dumps(result_obj, ensure_ascii=False),
-                    "Linked_Run": [run_record_id],
-                },
+                [
+                    {
+                        "Status_select": "Done",
+                        "Result_JSON": json.dumps(result_obj, ensure_ascii=False),
+                        "Linked_Run": [run_record_id],
+                        "Is_Locked": False,
+                        "Lock_Expires_At": None,
+                        "Lock_Token": "",
+                        "Last_Heartbeat_At": utc_now_iso(),
+                    },
+                    {
+                        "Status_select": "Done",
+                        "Result_JSON": json.dumps(result_obj, ensure_ascii=False),
+                        "Linked_Run": [run_record_id],
+                    },
+                ],
             )
+
             succeeded += 1
 
         except HTTPException as e:
             msg = str(e.detail)
             failed += 1
+
+            # Retry/Dead policy (SAFE, best-effort)
             try:
-                airtable_update(
+                retry_count = int(fields.get("Retry_Count", 0) or 0)
+            except Exception:
+                retry_count = 0
+            try:
+                retry_max = int(fields.get("Retry_Max", 0) or 0)
+            except Exception:
+                retry_max = 0
+            if retry_max <= 0:
+                retry_max = 3
+
+            if retry_count < retry_max:
+                next_at = _compute_next_retry_at(fields)
+                _airtable_update_best_effort(
                     COMMANDS_TABLE_NAME,
                     cid,
-                    {
-                        "Status_select": "Error",
-                        "Error_Message": msg,
-                        "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
-                        "Linked_Run": [run_record_id],
-                    },
+                    [
+                        {
+                            "Status_select": "Retry",
+                            "Retry_Count": retry_count + 1,
+                            "Next_Retry_At": next_at,
+                            "Last_Error": msg,
+                            "Error_Message": msg,
+                            "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
+                            "Linked_Run": [run_record_id],
+                            "Is_Locked": False,
+                            "Lock_Expires_At": None,
+                            "Lock_Token": "",
+                        },
+                        {
+                            "Status_select": "Retry",
+                            "Retry_Count": retry_count + 1,
+                            "Next_Retry_At": next_at,
+                            "Last_Error": msg,
+                            "Error_Message": msg,
+                            "Linked_Run": [run_record_id],
+                        },
+                        {
+                            "Status_select": "Error",
+                            "Error_Message": msg,
+                            "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
+                            "Linked_Run": [run_record_id],
+                        },
+                    ],
                 )
-            except Exception:
-                pass
+            else:
+                _airtable_update_best_effort(
+                    COMMANDS_TABLE_NAME,
+                    cid,
+                    [
+                        {
+                            "Status_select": "Dead",
+                            "Last_Error": msg,
+                            "Error_Message": msg,
+                            "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
+                            "Linked_Run": [run_record_id],
+                            "Is_Locked": False,
+                            "Lock_Expires_At": None,
+                            "Lock_Token": "",
+                        },
+                        {"Status_select": "Dead", "Last_Error": msg, "Linked_Run": [run_record_id]},
+                        {"Status_select": "Error", "Error_Message": msg, "Linked_Run": [run_record_id]},
+                    ],
+                )
+
+            _release_command_lock_best_effort(cid)
             errors.append(f"{cid}: {msg}")
 
         except Exception as e:
             msg = repr(e)
             failed += 1
+
+            # Same Retry/Dead policy (SAFE)
             try:
-                airtable_update(
+                retry_count = int(fields.get("Retry_Count", 0) or 0)
+            except Exception:
+                retry_count = 0
+            try:
+                retry_max = int(fields.get("Retry_Max", 0) or 0)
+            except Exception:
+                retry_max = 0
+            if retry_max <= 0:
+                retry_max = 3
+
+            if retry_count < retry_max:
+                next_at = _compute_next_retry_at(fields)
+                _airtable_update_best_effort(
                     COMMANDS_TABLE_NAME,
                     cid,
-                    {
-                        "Status_select": "Error",
-                        "Error_Message": msg,
-                        "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
-                        "Linked_Run": [run_record_id],
-                    },
+                    [
+                        {
+                            "Status_select": "Retry",
+                            "Retry_Count": retry_count + 1,
+                            "Next_Retry_At": next_at,
+                            "Last_Error": msg,
+                            "Error_Message": msg,
+                            "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
+                            "Linked_Run": [run_record_id],
+                            "Is_Locked": False,
+                            "Lock_Expires_At": None,
+                            "Lock_Token": "",
+                        },
+                        {
+                            "Status_select": "Retry",
+                            "Retry_Count": retry_count + 1,
+                            "Next_Retry_At": next_at,
+                            "Last_Error": msg,
+                            "Error_Message": msg,
+                            "Linked_Run": [run_record_id],
+                        },
+                        {
+                            "Status_select": "Error",
+                            "Error_Message": msg,
+                            "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
+                            "Linked_Run": [run_record_id],
+                        },
+                    ],
                 )
-            except Exception:
-                pass
+            else:
+                _airtable_update_best_effort(
+                    COMMANDS_TABLE_NAME,
+                    cid,
+                    [
+                        {
+                            "Status_select": "Dead",
+                            "Last_Error": msg,
+                            "Error_Message": msg,
+                            "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
+                            "Linked_Run": [run_record_id],
+                            "Is_Locked": False,
+                            "Lock_Expires_At": None,
+                            "Lock_Token": "",
+                        },
+                        {"Status_select": "Dead", "Last_Error": msg, "Linked_Run": [run_record_id]},
+                        {"Status_select": "Error", "Error_Message": msg, "Linked_Run": [run_record_id]},
+                    ],
+                )
+
+            _release_command_lock_best_effort(cid)
             errors.append(f"{cid}: {msg}")
 
     return {
