@@ -1,7 +1,8 @@
-# cron.py — BOSAI Cron (robuste, SAFE)
+# cron.py — BOSAI Cron (robuste, SAFE) — PATCHED
 # - Sends x-scheduler-secret if present
 # - Retries with backoff
 # - Idempotency stable per minute (prevents spam replays)
+# - Explicit scheduler flags in input (SAFE, backward compatible)
 
 import os
 import json
@@ -41,7 +42,12 @@ def main() -> None:
         "capability": "command_orchestrator",
         "idempotency_key": idem,
         "max_commands": LIMIT,
-        "input": {"limit": LIMIT},
+        "input": {
+            "limit": LIMIT,
+            # SAFE flags (worker can ignore them if not used)
+            "scheduler": True,
+            "include_unscheduled": True,
+        },
     }
 
     last_err = None
