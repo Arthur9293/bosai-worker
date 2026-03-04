@@ -1,3 +1,8 @@
+# cron.py — BOSAI Cron (robuste, SAFE)
+# - Sends x-scheduler-secret if present
+# - Retries with backoff
+# - Idempotency stable per minute (prevents spam replays)
+
 import os
 import json
 import time
@@ -15,6 +20,7 @@ TIMEOUT_SECONDS = int(os.getenv("CRON_TIMEOUT_SECONDS", "30") or "30")
 RETRIES = int(os.getenv("CRON_RETRIES", "2") or "2")
 SLEEP = float(os.getenv("CRON_RETRY_SLEEP_SECONDS", "1.5") or "1.5")
 
+
 def _post(payload: dict) -> str:
     data = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"}
@@ -24,6 +30,7 @@ def _post(payload: dict) -> str:
     req = urllib.request.Request(RUN_URL, data=data, headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
         return resp.read().decode("utf-8")
+
 
 def main() -> None:
     tick = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M")  # idempotency stable par minute
@@ -56,6 +63,7 @@ def main() -> None:
             time.sleep(SLEEP)
 
     raise SystemExit(f"CRON_FAILED: {last_err}")
+
 
 if __name__ == "__main__":
     main()
