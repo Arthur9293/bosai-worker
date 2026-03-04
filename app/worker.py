@@ -1,10 +1,9 @@
-# app/worker.py — BOSAI Worker (v2.4.9)
-# SAFE PATCH over v2.4.8:
-# - Adds scheduler selection logic for Commands:
-#   Status_select='Queued' AND (Scheduled_At empty OR Scheduled_At <= NOW())
-#   Sort by Priority desc, then Scheduled_At asc
-# - Adds filtered Airtable list helper (non-breaking)
-# - Adds best-effort lock fields when moving command to Running (non-breaking)
+# app/worker.py — BOSAI Worker (v2.4.10)
+# SAFE PATCH over v2.4.9:
+# - Scheduler selection formula uses IS_BLANK({Scheduled_At}) (Airtable-safe)
+# - airtable_list_filtered supports optional view_name (SAFE, non-breaking)
+# - command_orchestrator uses both filter + view (SAFE)
+# - Fixes any future risk of sort param missing keys
 # - Keeps auth OR (scheduler secret OR HMAC) unchanged
 # - No change to payload schema, endpoints, SLA, ToolCatalog behavior
 
@@ -43,7 +42,7 @@ COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.4.9").strip()
+APP_VERSION = os.getenv("APP_VERSION", "2.4.10").strip()
 
 RUN_MAX_SECONDS = float((os.getenv("RUN_MAX_SECONDS", "30") or "30").strip())
 HTTP_TIMEOUT_SECONDS = float((os.getenv("HTTP_TIMEOUT_SECONDS", "20") or "20").strip())
@@ -229,20 +228,28 @@ def airtable_list_view(table_name: str, view_name: str, max_records: int = 100) 
     return r.json().get("records", [])
 
 
-# NEW (SAFE): filtered list + sort for scheduler selection
+# NEW (SAFE): filtered list + sort for scheduler selection (+ optional view)
 def airtable_list_filtered(
     table_name: str,
     formula: str,
+    view_name: Optional[str] = None,
     sort: Optional[List[Dict[str, str]]] = None,
     max_records: int = 100,
 ) -> List[Dict[str, Any]]:
     _require_airtable()
     params: Dict[str, Any] = {"filterByFormula": formula, "maxRecords": str(max_records)}
 
+    if view_name:
+        params["view"] = view_name
+
     if sort:
         for i, s in enumerate(sort):
-            params[f"sort[{i}][field]"] = s["field"]
-            params[f"sort[{i}][direction]"] = s.get("direction", "asc")
+            field = (s.get("field") or "").strip()
+            direction = (s.get("direction") or "asc").strip()
+            if not field:
+                continue
+            params[f"sort[{i}][field]"] = field
+            params[f"sort[{i}][direction]"] = direction
 
     r = _HTTP_SESSION.get(
         _airtable_url(table_name),
@@ -743,15 +750,18 @@ def _read_command_status(fields: Dict[str, Any]) -> str:
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     max_cmds = int(req.max_commands or 0) or 5
 
+    # Determine view (used for both scheduler and fallback)
+    view_name = (req.view or COMMANDS_VIEW_NAME or "Queue").strip()
+
     # Scheduler selection (SAFE):
     # - Only queued commands
-    # - Due now: Scheduled_At empty OR <= NOW()
+    # - Due now: Scheduled_At blank OR <= NOW()
     # - Sort Priority desc then Scheduled_At asc
     formula = (
         "AND("
         "{Status_select}='Queued',"
         "OR("
-        "{Scheduled_At}='',"
+        "IS_BLANK({Scheduled_At}),"
         "IS_BEFORE({Scheduled_At}, NOW()),"
         "{Scheduled_At}=NOW()"
         ")"
@@ -762,6 +772,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         cmds = airtable_list_filtered(
             COMMANDS_TABLE_NAME,
             formula=formula,
+            view_name=view_name,  # ✅ SAFE (will be ignored by Airtable if view exists; it's valid)
             sort=[
                 {"field": "Priority", "direction": "desc"},
                 {"field": "Scheduled_At", "direction": "asc"},
@@ -769,11 +780,11 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             max_records=max_cmds,
         )
         selection_mode = "scheduler"
-        view = "scheduler_formula"
-    except Exception as e:
-        # Fallback (SAFE): if Scheduled_At/fields not present yet, revert to old behavior
+        view = f"scheduler_formula+view:{view_name}"
+    except Exception:
+        # Fallback (SAFE): revert to old behavior if Scheduled_At/fields not present yet
         selection_mode = "view_fallback"
-        view = (req.view or COMMANDS_VIEW_NAME or "Queue").strip()
+        view = view_name
         cmds = airtable_list_view(COMMANDS_TABLE_NAME, view, max_records=max_cmds)
 
     executed = 0
@@ -958,7 +969,14 @@ def root_head() -> Response:
 
 @app.get("/health")
 def health() -> Dict[str, Any]:
-    return {"ok": True, "app": APP_NAME, "version": APP_VERSION, "worker": WORKER_NAME, "capabilities": sorted(list(CAPABILITIES.keys())), "ts": utc_now_iso()}
+    return {
+        "ok": True,
+        "app": APP_NAME,
+        "version": APP_VERSION,
+        "worker": WORKER_NAME,
+        "capabilities": sorted(list(CAPABILITIES.keys())),
+        "ts": utc_now_iso(),
+    }
 
 
 @app.get("/health/score")
