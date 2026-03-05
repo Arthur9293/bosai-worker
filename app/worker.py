@@ -729,6 +729,7 @@ def capability_escalation_engine(req: RunRequest, run_record_id: str) -> Dict[st
     if limit > 500:
         limit = 500
 
+    # default: only breached
     only_breached = bool(inp.get("only_breached", True))
 
     records = airtable_list_view(LOGS_ERRORS_TABLE_NAME, LOGS_ERRORS_VIEW_NAME, max_records=limit)
