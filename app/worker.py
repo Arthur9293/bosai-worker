@@ -1,10 +1,17 @@
-# app/worker.py — BOSAI Worker (v2.5.1)
-# SAFE PATCH over your v2.5.0:
-# - Adds 2 new capabilities: retry_queue + lock_recovery (best-effort, non-breaking)
-# - command_orchestrator can optionally run them as post-ops via input flags:
-#     input.run_retry_queue = true
-#     input.run_lock_recovery = true
-# - Keeps everything else unchanged
+# app/worker.py — BOSAI Worker (v2.5.2)
+# SAFE PATCH over your v2.5.1:
+# - Adds 1 new capability: escalation_engine (best-effort, non-breaking)
+# - Does NOT change existing behaviors (auth/idempotency/locks/retry remain identical)
+# - Uses the same guardrails:
+#   * no crash if Airtable fields missing
+#   * best-effort updates
+#   * skips if nothing allowed to update
+#
+# escalation_engine behavior (SAFE):
+# - Scan Logs_Erreurs view Active
+# - If record is breached (SLA_Status == Breached OR SLA_Remaining_Minutes <= 0)
+#   and not already Escalated / not already Escalation_Queued
+#   -> set Escalation_Queued=true (if allowed) + Linked_Run=[run_record_id] (if allowed)
 
 import os
 import json
@@ -41,7 +48,7 @@ COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.5.1").strip()
+APP_VERSION = os.getenv("APP_VERSION", "2.5.2").strip()
 
 RUN_MAX_SECONDS = float((os.getenv("RUN_MAX_SECONDS", "30") or "30").strip())
 HTTP_TIMEOUT_SECONDS = float((os.getenv("HTTP_TIMEOUT_SECONDS", "20") or "20").strip())
@@ -60,7 +67,8 @@ LOGS_ERRORS_FIELDS_ALLOWED = set(
         s.strip()
         for s in os.getenv(
             "LOGS_ERRORS_FIELDS_ALLOWED",
-            "SLA_Status,Last_SLA_Check,Linked_Run",
+            # PATCH: add Escalation_Queued (SAFE; if missing in Airtable, update will fail and be counted, no crash)
+            "SLA_Status,Last_SLA_Check,Linked_Run,Escalation_Queued",
         ).split(",")
         if s.strip()
     ]
@@ -329,6 +337,15 @@ def _parse_float(val: Any) -> Optional[float]:
         return float(s)
     except Exception:
         return None
+
+
+def _is_truthy(v: Any) -> bool:
+    if v is True:
+        return True
+    if v is None:
+        return False
+    s = str(v).strip().lower()
+    return s in ("1", "true", "yes", "y", "on")
 
 
 # ============================================================
@@ -693,6 +710,99 @@ def capability_sla_machine(req: RunRequest, run_record_id: str) -> Dict[str, Any
     return {"ok": True, "updated": updated, "skipped": skipped, "errors_count": len(errors), "errors": errors[:10]}
 
 
+# ============================================================
+# NEW: Escalation Engine (SAFE, best-effort)
+# ============================================================
+
+def capability_escalation_engine(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    """
+    SAFE escalation engine:
+    - Scan Logs_Erreurs view Active
+    - If breached (SLA_Status == Breached OR SLA_Remaining_Minutes <= 0)
+      and not Escalated and not Escalation_Queued
+      -> set Escalation_Queued=true (if allowed) + Linked_Run=[run_record_id] (if allowed)
+    """
+    inp = req.input or {}
+    limit = int(inp.get("limit", 200) or 200)
+    if limit <= 0:
+        limit = 200
+    if limit > 500:
+        limit = 500
+
+    # default: only breached
+    only_breached = bool(inp.get("only_breached", True))
+
+    records = airtable_list_view(LOGS_ERRORS_TABLE_NAME, LOGS_ERRORS_VIEW_NAME, max_records=limit)
+
+    queued = 0
+    skipped = 0
+    failed = 0
+    errors: List[str] = []
+
+    now = utc_now_iso()
+
+    for rec in records:
+        rid = rec.get("id")
+        if not rid:
+            continue
+        fields = rec.get("fields", {}) or {}
+
+        sla_status = str(fields.get("SLA_Status", "") or "").strip()
+        remaining = _parse_float(fields.get("SLA_Remaining_Minutes"))
+
+        breached = False
+        if sla_status == SLA_STATUS_BREACHED:
+            breached = True
+        elif remaining is not None and remaining <= 0:
+            breached = True
+
+        if only_breached and not breached:
+            skipped += 1
+            continue
+
+        if sla_status == SLA_STATUS_ESCALATED:
+            skipped += 1
+            continue
+
+        if _is_truthy(fields.get("Escalation_Queued")):
+            skipped += 1
+            continue
+
+        update_fields: Dict[str, Any] = {}
+
+        if "Escalation_Queued" in LOGS_ERRORS_FIELDS_ALLOWED:
+            update_fields["Escalation_Queued"] = True
+        if "Linked_Run" in LOGS_ERRORS_FIELDS_ALLOWED:
+            update_fields["Linked_Run"] = [run_record_id]
+
+        if not update_fields:
+            skipped += 1
+            continue
+
+        try:
+            airtable_update(LOGS_ERRORS_TABLE_NAME, rid, update_fields)
+            queued += 1
+        except HTTPException as e:
+            failed += 1
+            errors.append(f"{rid}: {e.detail}")
+        except Exception as e:
+            failed += 1
+            errors.append(f"{rid}: {repr(e)}")
+
+    return {
+        "ok": True,
+        "view": LOGS_ERRORS_VIEW_NAME,
+        "scanned": len(records),
+        "queued": queued,
+        "skipped": skipped,
+        "failed": failed,
+        "errors_count": len(errors),
+        "errors": errors[:10],
+        "run_record_id": run_record_id,
+        "ts": now,
+    }
+
+
 def capability_commands_tick(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     inp = req.input or {}
     limit = int(inp.get("limit", 5) or 5)
@@ -844,7 +954,7 @@ def _read_command_status(fields: Dict[str, Any]) -> str:
 
 
 # ============================================================
-# NEW: Retry Queue (SAFE, best-effort)
+# Retry Queue (SAFE, best-effort)
 # ============================================================
 
 def capability_retry_queue(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
@@ -879,7 +989,11 @@ def capability_retry_queue(req: RunRequest, run_record_id: str) -> Dict[str, Any
         )
         mode = "formula"
     except Exception:
-        recs = airtable_list_view(COMMANDS_TABLE_NAME, (req.view or COMMANDS_VIEW_NAME or "Queue").strip(), max_records=limit)
+        recs = airtable_list_view(
+            COMMANDS_TABLE_NAME,
+            (req.view or COMMANDS_VIEW_NAME or "Queue").strip(),
+            max_records=limit,
+        )
         mode = "view_fallback"
 
     promoted = 0
@@ -913,7 +1027,7 @@ def capability_retry_queue(req: RunRequest, run_record_id: str) -> Dict[str, Any
 
 
 # ============================================================
-# NEW: Lock Recovery (SAFE, best-effort)
+# Lock Recovery (SAFE, best-effort)
 # ============================================================
 
 def capability_lock_recovery(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
@@ -1377,6 +1491,12 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             post_ops["lock_recovery"] = capability_lock_recovery(req, run_record_id)
         except Exception as e:
             post_ops["lock_recovery"] = {"ok": False, "error": repr(e)}
+    # NEW (optional): run escalation_engine as a post-op if requested
+    if bool(inp.get("run_escalation_engine")):
+        try:
+            post_ops["escalation_engine"] = capability_escalation_engine(req, run_record_id)
+        except Exception as e:
+            post_ops["escalation_engine"] = {"ok": False, "error": repr(e)}
 
     if post_ops:
         result["post_ops"] = post_ops
@@ -1388,13 +1508,14 @@ CAPABILITIES = {
     "health_tick": capability_health_tick,
     "commands_tick": capability_commands_tick,
     "sla_machine": capability_sla_machine,
+    "escalation_engine": capability_escalation_engine,  # NEW
     "http_exec": capability_http_exec,
     "state_get": capability_state_get,
     "state_put": capability_state_put,
     "lock_acquire": capability_lock_acquire,
     "lock_release": capability_lock_release,
-    "retry_queue": capability_retry_queue,          # NEW
-    "lock_recovery": capability_lock_recovery,      # NEW
+    "retry_queue": capability_retry_queue,
+    "lock_recovery": capability_lock_recovery,
     "command_orchestrator": capability_command_orchestrator,
 }
 
