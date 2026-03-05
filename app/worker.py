@@ -729,7 +729,6 @@ def capability_escalation_engine(req: RunRequest, run_record_id: str) -> Dict[st
     if limit > 500:
         limit = 500
 
-    # default: only breached
     only_breached = bool(inp.get("only_breached", True))
 
     records = airtable_list_view(LOGS_ERRORS_TABLE_NAME, LOGS_ERRORS_VIEW_NAME, max_records=limit)
@@ -738,7 +737,6 @@ def capability_escalation_engine(req: RunRequest, run_record_id: str) -> Dict[st
     skipped = 0
     failed = 0
     errors: List[str] = []
-
     now = utc_now_iso()
 
     for rec in records:
@@ -970,7 +968,6 @@ def capability_retry_queue(req: RunRequest, run_record_id: str) -> Dict[str, Any
     if limit > 200:
         limit = 200
 
-    # Prefer formula; fallback to view if formula invalid
     formula = (
         "AND("
         "{Status_select}='Retry',"
@@ -1045,7 +1042,12 @@ def capability_lock_recovery(req: RunRequest, run_record_id: str) -> Dict[str, A
     view_name = (req.view or COMMANDS_VIEW_NAME or "Queue").strip()
 
     # Prefer formula via Is_Lock_Stale if you have it; fallback if not.
-    formula = "OR({Is_Lock_Stale}=1,AND({Status_select}='Running',{Is_Locked}=1,{Lock_Expires_At}!=BLANK(),IS_BEFORE({Lock_Expires_At},NOW())))"
+    formula = (
+        "OR("
+        "{Is_Lock_Stale}=1,"
+        "AND({Status_select}='Running',{Is_Locked}=1,{Lock_Expires_At}!=BLANK(),IS_BEFORE({Lock_Expires_At},NOW()))"
+        ")"
+    )
 
     try:
         recs = airtable_list_filtered(
@@ -1136,7 +1138,6 @@ def capability_lock_recovery(req: RunRequest, run_record_id: str) -> Dict[str, A
 
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     max_cmds = int(req.max_commands or 0) or 5
-
     view_name = (req.view or COMMANDS_VIEW_NAME or "Queue").strip()
 
     formula = (
@@ -1184,7 +1185,6 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         processed_ids.append(cid)
 
         status = _read_command_status(fields)
-
         if status and status not in ("Queued", "QUEUE", "Queue", "Retry"):
             blocked += 1
             continue
@@ -1270,7 +1270,6 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                 "idempotency_key": idem,
                 "matched_done_record_id": dup_done.get("id"),
             }
-
             _airtable_update_best_effort(
                 COMMANDS_TABLE_NAME,
                 cid,
@@ -1289,7 +1288,6 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                     {"Status_select": "Blocked", "Linked_Run": [run_record_id]},
                 ],
             )
-
             _release_command_lock_best_effort(cid)
             blocked += 1
             continue
@@ -1478,21 +1476,20 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         "errors": errors[:10],
     }
 
-    # PATCH: optional post-ops, controlled by flags
-    inp = req.input or {}
+    # Optional post-ops controlled by flags in input
+    inp2 = req.input or {}
     post_ops: Dict[str, Any] = {}
-    if bool(inp.get("run_retry_queue")):
+    if bool(inp2.get("run_retry_queue")):
         try:
             post_ops["retry_queue"] = capability_retry_queue(req, run_record_id)
         except Exception as e:
             post_ops["retry_queue"] = {"ok": False, "error": repr(e)}
-    if bool(inp.get("run_lock_recovery")):
+    if bool(inp2.get("run_lock_recovery")):
         try:
             post_ops["lock_recovery"] = capability_lock_recovery(req, run_record_id)
         except Exception as e:
             post_ops["lock_recovery"] = {"ok": False, "error": repr(e)}
-    # NEW (optional): run escalation_engine as a post-op if requested
-    if bool(inp.get("run_escalation_engine")):
+    if bool(inp2.get("run_escalation_engine")):
         try:
             post_ops["escalation_engine"] = capability_escalation_engine(req, run_record_id)
         except Exception as e:
