@@ -122,14 +122,17 @@ class RunRequest(BaseModel):
 
         p = dict(payload)
 
+        # compat: capacity -> capability
         if "capability" not in p and "capacity" in p:
             p["capability"] = p.get("capacity")
         p.pop("capacity", None)
 
+        # compat: idempotencyKey -> idempotency_key
         if "idempotency_key" not in p and "idempotencyKey" in p:
             p["idempotency_key"] = p.get("idempotencyKey")
         p.pop("idempotencyKey", None)
 
+        # compat: inputs -> input
         if "input" not in p and "inputs" in p:
             p["input"] = p.get("inputs")
         p.pop("inputs", None)
@@ -233,7 +236,6 @@ def airtable_list_view(table_name: str, view_name: str, max_records: int = 100) 
     return r.json().get("records", [])
 
 
-# NEW (SAFE): filtered list + sort (+ optional view)
 def airtable_list_filtered(
     table_name: str,
     formula: str,
@@ -847,13 +849,8 @@ def _read_command_status(fields: Dict[str, Any]) -> str:
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     max_cmds = int(req.max_commands or 0) or 5
 
-    # Determine view (used for both scheduler and fallback)
     view_name = (req.view or COMMANDS_VIEW_NAME or "Queue").strip()
 
-    # Scheduler selection (SAFE, best-effort):
-    # - Queued due: Scheduled_At blank OR <= NOW
-    # - Retry due: Next_Retry_At <= NOW
-    # - Stale lock: Is_Lock_Stale = 1 (if exists)
     formula = (
         "OR("
         "AND({Status_select}='Queued',OR(IS_BLANK({Scheduled_At}),IS_BEFORE({Scheduled_At},NOW()),{Scheduled_At}=NOW())),"
@@ -877,7 +874,6 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         selection_mode = "scheduler"
         view = f"scheduler_formula+view:{view_name}"
     except Exception:
-        # Fallback (SAFE)
         selection_mode = "view_fallback"
         view = view_name
         cmds = airtable_list_view(COMMANDS_TABLE_NAME, view, max_records=max_cmds)
@@ -901,7 +897,6 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
 
         status = _read_command_status(fields)
 
-        # Allow only runnable statuses
         if status and status not in ("Queued", "QUEUE", "Queue", "Retry"):
             blocked += 1
             continue
@@ -937,7 +932,6 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         idem = str(fields.get("Idempotency_Key", "")).strip() or f"cmd:{cid}:{capability}"
         cmd_input = _compose_command_input(fields)
 
-        # Lock + Running (SAFE best-effort)
         now = utc_now_iso()
         ttl_min = _command_lock_ttl_min()
         lock_token = _new_lock_token()
@@ -979,7 +973,6 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             blocked += 1
             continue
 
-        # --- Commands idempotency protection (SAFE, best-effort) ---
         dup_done = find_done_command_by_idem(idem, exclude_record_id=cid)
         if dup_done:
             note = {
@@ -1005,17 +998,13 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                         "Last_Heartbeat_At": utc_now_iso(),
                         "Linked_Run": [run_record_id],
                     },
-                    {
-                        "Status_select": "Blocked",
-                        "Linked_Run": [run_record_id],
-                    },
+                    {"Status_select": "Blocked", "Linked_Run": [run_record_id]},
                 ],
             )
 
             _release_command_lock_best_effort(cid)
             blocked += 1
             continue
-        # --- end idempotency protection ---
 
         executed += 1
 
@@ -1033,7 +1022,6 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
 
             result_obj = fn(cmd_req, run_record_id)
 
-            # Done + unlock (SAFE)
             _airtable_update_best_effort(
                 COMMANDS_TABLE_NAME,
                 cid,
@@ -1047,11 +1035,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                         "Lock_Token": "",
                         "Last_Heartbeat_At": utc_now_iso(),
                     },
-                    {
-                        "Status_select": "Done",
-                        "Result_JSON": json.dumps(result_obj, ensure_ascii=False),
-                        "Linked_Run": [run_record_id],
-                    },
+                    {"Status_select": "Done", "Result_JSON": json.dumps(result_obj, ensure_ascii=False), "Linked_Run": [run_record_id]},
                 ],
             )
 
@@ -1061,7 +1045,6 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             msg = str(e.detail)
             failed += 1
 
-            # Retry/Dead policy (SAFE, best-effort)
             try:
                 retry_count = int(fields.get("Retry_Count", 0) or 0)
             except Exception:
@@ -1099,12 +1082,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                             "Error_Message": msg,
                             "Linked_Run": [run_record_id],
                         },
-                        {
-                            "Status_select": "Error",
-                            "Error_Message": msg,
-                            "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
-                            "Linked_Run": [run_record_id],
-                        },
+                        {"Status_select": "Error", "Error_Message": msg, "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False), "Linked_Run": [run_record_id]},
                     ],
                 )
             else:
@@ -1134,7 +1112,6 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             msg = repr(e)
             failed += 1
 
-            # Same Retry/Dead policy (SAFE)
             try:
                 retry_count = int(fields.get("Retry_Count", 0) or 0)
             except Exception:
@@ -1172,12 +1149,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                             "Error_Message": msg,
                             "Linked_Run": [run_record_id],
                         },
-                        {
-                            "Status_select": "Error",
-                            "Error_Message": msg,
-                            "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
-                            "Linked_Run": [run_record_id],
-                        },
+                        {"Status_select": "Error", "Error_Message": msg, "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False), "Linked_Run": [run_record_id]},
                     ],
                 )
             else:
