@@ -1,13 +1,10 @@
-# app/worker.py — BOSAI Worker (v2.5.0)
-# SAFE PATCH over v2.4.10 baseline:
-# - Adds Command Lock_Token + Lock_Expires_At (best-effort, non-breaking if fields absent)
-# - Adds Retry/Dead (DLQ) state machine (best-effort)
-# - Scheduler selection supports Queued due + Retry due + stale locks (formula best-effort; fallback to view)
-# - Releases locks on Done/Error/Retry/Dead (best-effort)
-# - Adds Commands idempotency protection: if another Command with same Idempotency_Key is already Done,
-#   current one is set to Blocked (best-effort) and unlocked (SAFE).
-# - Keeps auth OR (scheduler secret OR HMAC) unchanged
-# - No change to payload schema, endpoints, SLA, ToolCatalog behavior
+# app/worker.py — BOSAI Worker (v2.5.1)
+# SAFE PATCH over your v2.5.0:
+# - Adds 2 new capabilities: retry_queue + lock_recovery (best-effort, non-breaking)
+# - command_orchestrator can optionally run them as post-ops via input flags:
+#     input.run_retry_queue = true
+#     input.run_lock_recovery = true
+# - Keeps everything else unchanged
 
 import os
 import json
@@ -44,7 +41,7 @@ COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.5.0").strip()
+APP_VERSION = os.getenv("APP_VERSION", "2.5.1").strip()
 
 RUN_MAX_SECONDS = float((os.getenv("RUN_MAX_SECONDS", "30") or "30").strip())
 HTTP_TIMEOUT_SECONDS = float((os.getenv("HTTP_TIMEOUT_SECONDS", "20") or "20").strip())
@@ -846,6 +843,183 @@ def _read_command_status(fields: Dict[str, Any]) -> str:
     return str(fields.get("Status_select", fields.get("Status", fields.get("Status_raw", ""))) or "").strip()
 
 
+# ============================================================
+# NEW: Retry Queue (SAFE, best-effort)
+# ============================================================
+
+def capability_retry_queue(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    """
+    Promote due Retry commands back to Queued so the view-based fallback also works.
+    SAFE:
+    - If formulas/fields missing, it no-ops without crashing.
+    """
+    inp = req.input or {}
+    limit = int(inp.get("limit", 50) or 50)
+    if limit <= 0:
+        limit = 50
+    if limit > 200:
+        limit = 200
+
+    # Prefer formula; fallback to view if formula invalid
+    formula = (
+        "AND("
+        "{Status_select}='Retry',"
+        "{Next_Retry_At}!=BLANK(),"
+        "OR(IS_BEFORE({Next_Retry_At},NOW()),{Next_Retry_At}=NOW())"
+        ")"
+    )
+
+    try:
+        recs = airtable_list_filtered(
+            COMMANDS_TABLE_NAME,
+            formula=formula,
+            view_name=(req.view or COMMANDS_VIEW_NAME or "Queue").strip(),
+            sort=[{"field": "Next_Retry_At", "direction": "asc"}],
+            max_records=limit,
+        )
+        mode = "formula"
+    except Exception:
+        recs = airtable_list_view(COMMANDS_TABLE_NAME, (req.view or COMMANDS_VIEW_NAME or "Queue").strip(), max_records=limit)
+        mode = "view_fallback"
+
+    promoted = 0
+    failed = 0
+    errors: List[str] = []
+
+    for r in recs:
+        cid = r.get("id")
+        if not cid:
+            continue
+        fields = r.get("fields", {}) or {}
+        if _read_command_status(fields) != "Retry":
+            continue
+
+        res = _airtable_update_best_effort(
+            COMMANDS_TABLE_NAME,
+            cid,
+            [
+                {"Status_select": "Queued", "Next_Retry_At": None, "Linked_Run": [run_record_id]},
+                {"Status_select": "Queued", "Linked_Run": [run_record_id]},
+                {"Status_select": "Queued"},
+            ],
+        )
+        if res.get("ok"):
+            promoted += 1
+        else:
+            failed += 1
+            errors.append(f"{cid}: {res.get('error')}")
+
+    return {"ok": True, "mode": mode, "scanned": len(recs), "promoted": promoted, "failed": failed, "errors": errors[:10]}
+
+
+# ============================================================
+# NEW: Lock Recovery (SAFE, best-effort)
+# ============================================================
+
+def capability_lock_recovery(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    """
+    Recover stale locks by moving stuck Running commands back to Retry (or Queued),
+    and clearing lock fields best-effort.
+    """
+    inp = req.input or {}
+    limit = int(inp.get("limit", 50) or 50)
+    if limit <= 0:
+        limit = 50
+    if limit > 200:
+        limit = 200
+
+    view_name = (req.view or COMMANDS_VIEW_NAME or "Queue").strip()
+
+    # Prefer formula via Is_Lock_Stale if you have it; fallback if not.
+    formula = "OR({Is_Lock_Stale}=1,AND({Status_select}='Running',{Is_Locked}=1,{Lock_Expires_At}!=BLANK(),IS_BEFORE({Lock_Expires_At},NOW())))"
+
+    try:
+        recs = airtable_list_filtered(
+            COMMANDS_TABLE_NAME,
+            formula=formula,
+            view_name=view_name,
+            sort=[{"field": "Lock_Expires_At", "direction": "asc"}],
+            max_records=limit,
+        )
+        mode = "formula"
+    except Exception:
+        recs = airtable_list_view(COMMANDS_TABLE_NAME, view_name, max_records=limit)
+        mode = "view_fallback"
+
+    recovered = 0
+    skipped = 0
+    failed = 0
+    errors: List[str] = []
+
+    now = utc_now_iso()
+
+    for r in recs:
+        cid = r.get("id")
+        if not cid:
+            continue
+        fields = r.get("fields", {}) or {}
+        status = _read_command_status(fields)
+
+        # Only touch obviously stuck cases
+        if status not in ("Running", "Queued", "Retry"):
+            skipped += 1
+            continue
+
+        # If it’s Running but not locked, ignore
+        is_locked = fields.get("Is_Locked")
+        if status == "Running" and is_locked is not True:
+            skipped += 1
+            continue
+
+        note = {"note": "lock_recovered", "at": now}
+
+        res = _airtable_update_best_effort(
+            COMMANDS_TABLE_NAME,
+            cid,
+            [
+                {
+                    "Status_select": "Retry",
+                    "Next_Retry_At": now,
+                    "Last_Error": json.dumps(note, ensure_ascii=False),
+                    "Error_Message": "",
+                    "Is_Locked": False,
+                    "Lock_Expires_At": None,
+                    "Lock_Token": "",
+                    "Last_Heartbeat_At": now,
+                    "Linked_Run": [run_record_id],
+                },
+                {
+                    "Status_select": "Retry",
+                    "Next_Retry_At": now,
+                    "Is_Locked": False,
+                    "Lock_Expires_At": None,
+                    "Lock_Token": "",
+                    "Linked_Run": [run_record_id],
+                },
+                {"Status_select": "Retry", "Next_Retry_At": now, "Linked_Run": [run_record_id]},
+            ],
+        )
+
+        if res.get("ok"):
+            recovered += 1
+        else:
+            failed += 1
+            errors.append(f"{cid}: {res.get('error')}")
+
+        # Ensure lock fields cleared if partially updated
+        _release_command_lock_best_effort(cid)
+
+    return {
+        "ok": True,
+        "mode": mode,
+        "scanned": len(recs),
+        "recovered": recovered,
+        "skipped": skipped,
+        "failed": failed,
+        "errors": errors[:10],
+    }
+
+
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     max_cmds = int(req.max_commands or 0) or 5
 
@@ -1175,7 +1349,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             _release_command_lock_best_effort(cid)
             errors.append(f"{cid}: {msg}")
 
-    return {
+    result = {
         "ok": True,
         "selection_mode": selection_mode,
         "view": view,
@@ -1190,6 +1364,25 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         "errors": errors[:10],
     }
 
+    # PATCH: optional post-ops, controlled by flags
+    inp = req.input or {}
+    post_ops: Dict[str, Any] = {}
+    if bool(inp.get("run_retry_queue")):
+        try:
+            post_ops["retry_queue"] = capability_retry_queue(req, run_record_id)
+        except Exception as e:
+            post_ops["retry_queue"] = {"ok": False, "error": repr(e)}
+    if bool(inp.get("run_lock_recovery")):
+        try:
+            post_ops["lock_recovery"] = capability_lock_recovery(req, run_record_id)
+        except Exception as e:
+            post_ops["lock_recovery"] = {"ok": False, "error": repr(e)}
+
+    if post_ops:
+        result["post_ops"] = post_ops
+
+    return result
+
 
 CAPABILITIES = {
     "health_tick": capability_health_tick,
@@ -1200,6 +1393,8 @@ CAPABILITIES = {
     "state_put": capability_state_put,
     "lock_acquire": capability_lock_acquire,
     "lock_release": capability_lock_release,
+    "retry_queue": capability_retry_queue,          # NEW
+    "lock_recovery": capability_lock_recovery,      # NEW
     "command_orchestrator": capability_command_orchestrator,
 }
 
