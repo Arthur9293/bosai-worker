@@ -3,6 +3,8 @@
 # - Retries with backoff
 # - Idempotency stable per minute
 # - Explicit scheduler flags in input
+# PATCH (SAFE):
+# - Adds post-ops flags: run_retry_queue + run_lock_recovery (handled by worker.py)
 
 import os
 import json
@@ -25,9 +27,7 @@ SLEEP = float(os.getenv("CRON_RETRY_SLEEP_SECONDS", "1.5") or "1.5")
 def _post(payload: dict) -> str:
     data = json.dumps(payload).encode("utf-8")
 
-    headers = {
-        "Content-Type": "application/json"
-    }
+    headers = {"Content-Type": "application/json"}
 
     if SCHEDULER_SECRET:
         headers["x-scheduler-secret"] = SCHEDULER_SECRET
@@ -36,7 +36,7 @@ def _post(payload: dict) -> str:
         RUN_URL,
         data=data,
         headers=headers,
-        method="POST"
+        method="POST",
     )
 
     with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
@@ -44,7 +44,6 @@ def _post(payload: dict) -> str:
 
 
 def main() -> None:
-
     tick = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M")
     idem = f"cron-command-orchestrator-{tick}"
 
@@ -56,26 +55,26 @@ def main() -> None:
         "input": {
             "limit": LIMIT,
             "scheduler": True,
-            "include_unscheduled": True
-        }
+            "include_unscheduled": True,
+            # PATCH: post-ops (SAFE)
+            "run_retry_queue": True,
+            "run_lock_recovery": True,
+        },
     }
 
     last_err = None
 
     for attempt in range(RETRIES + 1):
-
         try:
             body = _post(payload)
             print(body)
             return
 
         except urllib.error.HTTPError as e:
-
             try:
                 err_body = e.read().decode("utf-8")
             except Exception:
                 err_body = ""
-
             last_err = f"HTTPError {e.code}: {err_body or str(e)}"
 
         except Exception as e:
