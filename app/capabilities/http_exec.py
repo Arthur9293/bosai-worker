@@ -241,15 +241,12 @@ def _is_blocked_ip(ip: str) -> bool:
     except Exception:
         return True
 
-    # loopback
     if addr.is_loopback:
         return True
 
-    # private / link-local / reserved / multicast
     if HTTP_EXEC_BLOCK_PRIVATE_NETS and (addr.is_private or addr.is_link_local or addr.is_reserved or addr.is_multicast):
         return True
 
-    # metadata
     if HTTP_EXEC_BLOCK_METADATA and str(addr) == "169.254.169.254":
         return True
 
@@ -267,17 +264,14 @@ def _validate_http_exec_url(url: str) -> Dict[str, str]:
     if not host:
         raise HTTPException(status_code=400, detail="HTTP_EXEC missing host")
 
-    # Deny-by-default: require allowlist
     if not HTTP_EXEC_ALLOWLIST:
         raise HTTPException(status_code=403, detail="HTTP_EXEC allowlist is empty (set HTTP_EXEC_ALLOWLIST).")
     if not _host_matches_allowlist(host, HTTP_EXEC_ALLOWLIST):
         raise HTTPException(status_code=403, detail=f"HTTP_EXEC host not in allowlist: {host}")
 
-    # Extra: obvious private hostnames
     if HTTP_EXEC_BLOCK_PRIVATE_NETS and _is_private_host(host):
         raise HTTPException(status_code=403, detail=f"HTTP_EXEC blocked private host: {host}")
 
-    # Real SSRF: DNS -> IP checks
     ips = _resolve_ips(host)
     for ip in ips:
         if _is_blocked_ip(ip):
@@ -784,7 +778,6 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
     inp = getattr(req, "input", None) or {}
     dry_run = bool(getattr(req, "dry_run", False))
 
-    # compat: if input contains nested "input" dict, use it when it carries http_exec keys
     if isinstance(inp.get("input"), dict) and inp.get("input"):
         nested = inp.get("input")
         if any(
@@ -827,7 +820,6 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
             extracted["headers"] = headers_final
             local_timeout = float(timeout_s)
 
-    # timeout cap (anti-chaos)
     if local_timeout <= 0:
         local_timeout = float(HTTP_EXEC_TIMEOUT_SECONDS)
     local_timeout = max(1.0, min(float(local_timeout), float(HTTP_EXEC_MAX_TIMEOUT_SECONDS)))
@@ -855,7 +847,6 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
 
     headers_in = extracted["headers"] if isinstance(extracted["headers"], dict) else {}
 
-    # Auth mode from ToolCatalog (optional)
     auth_mode = "token"
     if tool_fields:
         am = str(tool_fields.get("Authorization_Mode", "") or "").strip().lower()
@@ -866,7 +857,6 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
     secret_headers = _build_secret_headers(merged_secret_keys, auth_mode=auth_mode)
     headers = {**headers_in, **secret_headers}
 
-    # Optional: auto-auth for Supabase REST (disabled by default)
     if HTTP_EXEC_SUPABASE_AUTO_AUTH:
         supa_key = os.getenv("SUPABASE_API_KEY", "").strip()
         if supa_key:
@@ -875,7 +865,6 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
                 headers.setdefault("apikey", supa_key)
                 headers.setdefault("Authorization", f"Bearer {supa_key}")
 
-    # ToolCatalog-driven retry (SAFE defaults = no retry)
     retry_max = 0
     retry_backoff_s = 0
     retry_on_status: List[str] = []
@@ -893,7 +882,6 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
         raise HTTPException(status_code=400, detail="HTTP_EXEC use json/body OR data, not both.")
 
     if dry_run:
-        # SAFE: show whether secrets were found without leaking them
         sec_diag = _diagnose_secret_keys(merged_secret_keys)
         sec_diag["headers_injected"] = {
             "authorization_present": ("Authorization" in secret_headers),
@@ -969,12 +957,11 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
 
             status = int(resp.status_code)
 
-            # If redirects allowed, re-validate final URL (SSRF safe)
             if HTTP_EXEC_FOLLOW_REDIRECTS:
                 final_url = str(getattr(resp, "url", "") or "")
                 if final_url and final_url != url:
                     _ = _validate_http_exec_url(final_url)
-                    url = final_url  # for diagnostics
+                    url = final_url
 
             if attempts < max_attempts and _should_retry(status, None, retry_on_status, retry_on_errors):
                 last_err = f"retry_status:{status}"
