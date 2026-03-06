@@ -76,7 +76,6 @@ def parse_iso_datetime(value: Any) -> datetime | None:
         return None
 
     try:
-        # support trailing Z if present
         if text.endswith("Z"):
             text = text[:-1] + "+00:00"
         dt = datetime.fromisoformat(text)
@@ -139,7 +138,6 @@ def patch_event(event_id: str, data: Dict[str, Any]) -> None:
 def is_ready_for_retry(event: Dict[str, Any]) -> bool:
     retry_after = parse_iso_datetime(event.get("retry_after"))
 
-    # If no retry_after set, it's ready now.
     if retry_after is None:
         return True
 
@@ -214,8 +212,9 @@ def main() -> None:
                 "retry_after": next_retry.isoformat(),
                 "event_status": "pending",
                 "last_error_code": None,
-                # on garde l'historique de rejet en place;
-                # l'event_engine filtrera sur event_status / rejected_at selon ta logique actuelle
+                "rejected_at": None,
+                "rejected_by": None,
+                "rejected_reason": None,
             })
 
             retried += 1
