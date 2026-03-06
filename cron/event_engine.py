@@ -101,10 +101,10 @@ def normalize_payload(payload):
 
 def clean_airtable_fields(fields):
     """
-    Garde-fou principal:
+    Garde-fous:
     - supprime Owner quoi qu'il arrive
-    - supprime None / chaînes vides inutiles
-    - garde False / 0 / True
+    - supprime None / chaînes vides
+    - ne garde que des champs simples et sûrs
     """
     if not isinstance(fields, dict):
         return {}
@@ -169,6 +169,10 @@ def infer_command_from_event(event):
         capability = "command_orchestrator"
         input_json = payload
 
+    # IMPORTANT:
+    # On n'envoie PLUS aucun champ HTTP dédié dans Airtable
+    # pour éviter les erreurs 422 sur les champs select mal typés.
+    # Toute la donnée utile reste dans Input_JSON.
     fields = {
         "Capability": capability,
         "Status_select": "Queued",
@@ -178,23 +182,6 @@ def infer_command_from_event(event):
         "worker": WORKER_NAME,
         "Notes": f"Created from Supabase event {event_id}",
     }
-
-    if capability == "http_exec":
-        url = str(input_json.get("url", "") or "").strip()
-        method = str(input_json.get("method", "GET") or "GET").strip().upper()
-        headers = input_json.get("headers", {})
-
-        if not isinstance(headers, dict):
-            headers = {}
-
-        # Garde-fou important:
-        # on n'écrit PAS dans le champ "URL" car il semble mal typé côté Airtable.
-        # On garde l'URL dans Input_JSON et on utilise "http_target" si ce champ existe dans ta base.
-        if url:
-            fields["http_target"] = url
-
-        fields["HTTP_Method"] = method
-        fields["HTTP_Headers_JSON"] = safe_json_dumps(headers)
 
     return clean_airtable_fields(fields)
 
@@ -210,8 +197,17 @@ def create_airtable_command(fields):
     if not safe_fields:
         raise ValueError("Airtable fields empty after cleaning")
 
+    # garde-fou ultime
+    safe_fields.pop("Owner", None)
+    safe_fields.pop("URL", None)
+    safe_fields.pop("http_target", None)
+    safe_fields.pop("HTTP_Method", None)
+    safe_fields.pop("HTTP_Headers_JSON", None)
+
     payload = {"fields": safe_fields}
     data = safe_json_dumps(payload).encode("utf-8")
+
+    print(f"AIRTABLE_FIELDS_KEYS = {list(safe_fields.keys())}")
 
     req = urllib.request.Request(
         url,
