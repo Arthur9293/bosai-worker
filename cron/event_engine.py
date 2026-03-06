@@ -171,7 +171,7 @@ def infer_command_from_event(event):
 
     fields = {
         "Capability": capability,
-        "Status_select": "Queue",
+        "Status_select": "Queued",
         "Idempotency_Key": f"evt-{event_id}",
         "Input_JSON": safe_json_dumps(input_json),
         "Approved": True,
@@ -193,7 +193,6 @@ def infer_command_from_event(event):
         fields["HTTP_Method"] = method
         fields["HTTP_Headers_JSON"] = safe_json_dumps(headers)
 
-    # garde-fou final avant retour
     return clean_airtable_fields(fields)
 
 
@@ -203,7 +202,6 @@ def create_airtable_command(fields):
 
     url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{urllib.parse.quote(AIRTABLE_COMMANDS_TABLE)}"
 
-    # double garde-fou: nettoie encore juste avant envoi
     safe_fields = clean_airtable_fields(fields)
 
     if not safe_fields:
@@ -290,7 +288,6 @@ def main():
 
             fields = infer_command_from_event(event)
 
-            # log de sécurité
             if "Owner" in fields:
                 raise RuntimeError("Guardrail failed: Owner still present in fields")
 
