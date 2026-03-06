@@ -5,6 +5,7 @@ import urllib.parse
 import urllib.error
 from datetime import datetime, timezone
 
+
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 SUPABASE_EVENTS_TABLE = os.getenv("SUPABASE_EVENTS_TABLE", "bosai_events").strip()
@@ -14,7 +15,17 @@ AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID", "").strip()
 AIRTABLE_COMMANDS_TABLE = os.getenv("AIRTABLE_COMMANDS_TABLE", "Commands").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
-EVENT_ENGINE_LIMIT = int(os.getenv("EVENT_ENGINE_LIMIT", "10"))
+
+try:
+    EVENT_ENGINE_LIMIT = int(os.getenv("EVENT_ENGINE_LIMIT", "10"))
+except Exception:
+    EVENT_ENGINE_LIMIT = 10
+
+if EVENT_ENGINE_LIMIT <= 0:
+    EVENT_ENGINE_LIMIT = 10
+
+if EVENT_ENGINE_LIMIT > 100:
+    EVENT_ENGINE_LIMIT = 100
 
 
 def now_iso():
@@ -22,8 +33,15 @@ def now_iso():
 
 
 def require_env(name, value):
-    if not value:
+    if not value or not str(value).strip():
         raise RuntimeError(f"Missing env var: {name}")
+
+
+def safe_json_dumps(value):
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except Exception:
+        return json.dumps({})
 
 
 def supabase_headers():
@@ -59,18 +77,36 @@ def fetch_events():
 
     with urllib.request.urlopen(req, timeout=30) as resp:
         body = resp.read().decode("utf-8")
-        return json.loads(body)
+        data = json.loads(body)
+
+        if not isinstance(data, list):
+            print("WARN fetch_events returned non-list, fallback to []")
+            return []
+
+        return data
+
+
+def normalize_payload(payload):
+    if isinstance(payload, dict):
+        return payload
+    return {}
 
 
 def infer_command_from_event(event):
+    if not isinstance(event, dict):
+        raise ValueError("Event must be a dict")
+
     event_id = event.get("id")
-    event_type = str(event.get("type", "")).lower()
-    payload = event.get("payload") or {}
+    if not event_id:
+        raise ValueError("Event missing id")
+
+    event_type = str(event.get("type", "") or "").strip().lower()
+    payload = normalize_payload(event.get("payload"))
 
     capability = "command_orchestrator"
     input_json = {}
 
-    if event_type in ("command_http_exec", "http_exec", "http_request"):
+    if event_type in ("command_http_exec", "http_exec", "http_request", "command.http_exec"):
         capability = "http_exec"
         input_json = {
             "url": payload.get("url", ""),
@@ -87,30 +123,49 @@ def infer_command_from_event(event):
         capability = "escalation_engine"
         input_json = payload
 
+    elif event_type in ("command_orchestrator", "orchestrator"):
+        capability = "command_orchestrator"
+        input_json = payload
+
+    else:
+        capability = "command_orchestrator"
+        input_json = payload
+
     fields = {
         "Capability": capability,
         "Status_select": "Queue",
         "Idempotency_Key": f"evt-{event_id}",
-        "Input_JSON": json.dumps(input_json),
+        "Input_JSON": safe_json_dumps(input_json),
         "Approved": True,
-        "Owner": "event_engine",
         "worker": WORKER_NAME,
         "Notes": f"Created from Supabase event {event_id}",
     }
 
     if capability == "http_exec":
-        fields["URL"] = input_json.get("url")
-        fields["HTTP_Method"] = input_json.get("method", "GET")
-        fields["HTTP_Headers_JSON"] = json.dumps(input_json.get("headers", {}))
+        url = str(input_json.get("url", "") or "").strip()
+        method = str(input_json.get("method", "GET") or "GET").strip().upper()
+        headers = input_json.get("headers", {})
+
+        if not isinstance(headers, dict):
+            headers = {}
+
+        if url:
+            fields["URL"] = url
+
+        fields["HTTP_Method"] = method
+        fields["HTTP_Headers_JSON"] = safe_json_dumps(headers)
 
     return fields
 
 
 def create_airtable_command(fields):
+    if not isinstance(fields, dict) or not fields:
+        raise ValueError("Invalid Airtable fields payload")
+
     url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{urllib.parse.quote(AIRTABLE_COMMANDS_TABLE)}"
 
     payload = {"fields": fields}
-    data = json.dumps(payload).encode("utf-8")
+    data = safe_json_dumps(payload).encode("utf-8")
 
     req = urllib.request.Request(
         url,
@@ -121,10 +176,18 @@ def create_airtable_command(fields):
 
     with urllib.request.urlopen(req, timeout=30) as resp:
         body = resp.read().decode("utf-8")
-        return json.loads(body)
+        parsed = json.loads(body)
+
+        if not isinstance(parsed, dict):
+            raise RuntimeError("Airtable create returned non-dict response")
+
+        return parsed
 
 
 def mark_event_processed(event_id):
+    if not event_id:
+        raise ValueError("Missing event_id for mark_event_processed")
+
     query = urllib.parse.urlencode({
         "id": f"eq.{event_id}"
     })
@@ -136,7 +199,7 @@ def mark_event_processed(event_id):
         "processed_by": "bosai-event-engine"
     }
 
-    data = json.dumps(payload).encode("utf-8")
+    data = safe_json_dumps(payload).encode("utf-8")
 
     req = urllib.request.Request(
         url,
@@ -155,6 +218,10 @@ def main():
     require_env("AIRTABLE_API_KEY", AIRTABLE_API_KEY)
     require_env("AIRTABLE_BASE_ID", AIRTABLE_BASE_ID)
 
+    print(f"EVENT_ENGINE_LIMIT = {EVENT_ENGINE_LIMIT}")
+    print(f"SUPABASE_EVENTS_TABLE = {SUPABASE_EVENTS_TABLE}")
+    print(f"AIRTABLE_COMMANDS_TABLE = {AIRTABLE_COMMANDS_TABLE}")
+
     events = fetch_events()
 
     print(f"Fetched events: {len(events)}")
@@ -164,15 +231,23 @@ def main():
     failed = 0
 
     for event in events:
-
-        event_id = event.get("id")
+        event_id = None
 
         try:
+            if not isinstance(event, dict):
+                raise ValueError("Fetched event is not a dict")
+
+            event_id = event.get("id")
+
+            if not event_id:
+                raise ValueError("Fetched event missing id")
+
             fields = infer_command_from_event(event)
 
             cmd = create_airtable_command(fields)
+            cmd_id = cmd.get("id")
 
-            print(f"Created command for event {event_id} -> {cmd.get('id')}")
+            print(f"Created command for event {event_id} -> {cmd_id}")
 
             created += 1
 
@@ -188,10 +263,10 @@ def main():
             failed += 1
 
         except Exception as e:
-            print(f"Error for event {event_id}: {e}")
+            print(f"Error for event {event_id}: {repr(e)}")
             failed += 1
 
-    print(json.dumps({
+    print(safe_json_dumps({
         "ok": True,
         "fetched": len(events),
         "created": created,
