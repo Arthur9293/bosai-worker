@@ -41,7 +41,14 @@ def safe_json_dumps(value):
     try:
         return json.dumps(value, ensure_ascii=False)
     except Exception:
-        return json.dumps({})
+        return json.dumps({}, ensure_ascii=False)
+
+
+def safe_json_loads(text, default):
+    try:
+        return json.loads(text)
+    except Exception:
+        return default
 
 
 def supabase_headers():
@@ -77,7 +84,7 @@ def fetch_events():
 
     with urllib.request.urlopen(req, timeout=30) as resp:
         body = resp.read().decode("utf-8")
-        data = json.loads(body)
+        data = safe_json_loads(body, [])
 
         if not isinstance(data, list):
             print("WARN fetch_events returned non-list, fallback to []")
@@ -90,6 +97,37 @@ def normalize_payload(payload):
     if isinstance(payload, dict):
         return payload
     return {}
+
+
+def clean_airtable_fields(fields):
+    """
+    Garde-fou principal:
+    - supprime Owner quoi qu'il arrive
+    - supprime None / chaînes vides inutiles
+    - garde False / 0 / True
+    """
+    if not isinstance(fields, dict):
+        return {}
+
+    cleaned = {}
+
+    for key, value in fields.items():
+        if key == "Owner":
+            continue
+
+        if value is None:
+            continue
+
+        if isinstance(value, str):
+            v = value.strip()
+            if v == "":
+                continue
+            cleaned[key] = v
+            continue
+
+        cleaned[key] = value
+
+    return cleaned
 
 
 def infer_command_from_event(event):
@@ -155,7 +193,8 @@ def infer_command_from_event(event):
         fields["HTTP_Method"] = method
         fields["HTTP_Headers_JSON"] = safe_json_dumps(headers)
 
-    return fields
+    # garde-fou final avant retour
+    return clean_airtable_fields(fields)
 
 
 def create_airtable_command(fields):
@@ -164,7 +203,13 @@ def create_airtable_command(fields):
 
     url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{urllib.parse.quote(AIRTABLE_COMMANDS_TABLE)}"
 
-    payload = {"fields": fields}
+    # double garde-fou: nettoie encore juste avant envoi
+    safe_fields = clean_airtable_fields(fields)
+
+    if not safe_fields:
+        raise ValueError("Airtable fields empty after cleaning")
+
+    payload = {"fields": safe_fields}
     data = safe_json_dumps(payload).encode("utf-8")
 
     req = urllib.request.Request(
@@ -176,7 +221,7 @@ def create_airtable_command(fields):
 
     with urllib.request.urlopen(req, timeout=30) as resp:
         body = resp.read().decode("utf-8")
-        parsed = json.loads(body)
+        parsed = safe_json_loads(body, {})
 
         if not isinstance(parsed, dict):
             raise RuntimeError("Airtable create returned non-dict response")
@@ -221,6 +266,7 @@ def main():
     print(f"EVENT_ENGINE_LIMIT = {EVENT_ENGINE_LIMIT}")
     print(f"SUPABASE_EVENTS_TABLE = {SUPABASE_EVENTS_TABLE}")
     print(f"AIRTABLE_COMMANDS_TABLE = {AIRTABLE_COMMANDS_TABLE}")
+    print(f"WORKER_NAME = {WORKER_NAME}")
 
     events = fetch_events()
 
@@ -243,6 +289,10 @@ def main():
                 raise ValueError("Fetched event missing id")
 
             fields = infer_command_from_event(event)
+
+            # log de sécurité
+            if "Owner" in fields:
+                raise RuntimeError("Guardrail failed: Owner still present in fields")
 
             cmd = create_airtable_command(fields)
             cmd_id = cmd.get("id")
