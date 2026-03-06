@@ -4,7 +4,7 @@ import urllib.request
 import urllib.parse
 import urllib.error
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
@@ -30,13 +30,9 @@ if EVENT_ENGINE_LIMIT > 100:
     EVENT_ENGINE_LIMIT = 100
 
 
-ALLOWED_CAPABILITIES = {
-    "http_exec",
-    "sla_machine",
-    "escalation_engine",
-    "command_orchestrator",
-}
-
+# ----------------------------
+# Helpers
+# ----------------------------
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -61,14 +57,12 @@ def safe_json_loads(text: str, default: Any) -> Any:
         return default
 
 
-def normalize_str(value: Any) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
+def normalize_text(value: Any) -> str:
+    return str(value or "").strip()
 
 
 def normalize_lower(value: Any) -> str:
-    return normalize_str(value).lower()
+    return normalize_text(value).lower()
 
 
 def normalize_payload(payload: Any) -> Dict[str, Any]:
@@ -77,14 +71,29 @@ def normalize_payload(payload: Any) -> Dict[str, Any]:
     return {}
 
 
-def merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
-    merged = dict(base)
-    for key, value in override.items():
-        merged[key] = value
-    return merged
+def supabase_headers() -> Dict[str, str]:
+    return {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Content-Type": "application/json",
+    }
+
+
+def airtable_headers() -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+        "Content-Type": "application/json",
+    }
 
 
 def clean_airtable_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Garde-fous Airtable :
+    - supprime Owner
+    - supprime None
+    - supprime chaînes vides
+    - conserve False / 0 / True
+    """
     if not isinstance(fields, dict):
         return {}
 
@@ -109,20 +118,9 @@ def clean_airtable_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
     return cleaned
 
 
-def supabase_headers() -> Dict[str, str]:
-    return {
-        "apikey": SUPABASE_SERVICE_ROLE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-        "Content-Type": "application/json",
-    }
-
-
-def airtable_headers() -> Dict[str, str]:
-    return {
-        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
+# ----------------------------
+# Supabase events
+# ----------------------------
 
 def fetch_events() -> List[Dict[str, Any]]:
     query = urllib.parse.urlencode({
@@ -148,232 +146,219 @@ def fetch_events() -> List[Dict[str, Any]]:
             print("WARN fetch_events returned non-list, fallback to []")
             return []
 
-        valid_events: List[Dict[str, Any]] = []
-        for item in data:
-            if isinstance(item, dict):
-                valid_events.append(item)
+        return [item for item in data if isinstance(item, dict)]
 
-        return valid_events
 
+def mark_event_processed(event_id: str) -> None:
+    if not event_id:
+        raise ValueError("Missing event_id for mark_event_processed")
+
+    query = urllib.parse.urlencode({
+        "id": f"eq.{event_id}"
+    })
+
+    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_EVENTS_TABLE}?{query}"
+
+    payload = {
+        "processed_at": now_iso(),
+        "processed_by": "bosai-event-engine"
+    }
+
+    data = safe_json_dumps(payload).encode("utf-8")
+
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers=supabase_headers(),
+        method="PATCH",
+    )
+
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        resp.read()
+
+
+# ----------------------------
+# Airtable policies
+# ----------------------------
 
 def fetch_event_policies() -> List[Dict[str, Any]]:
+    url = (
+        f"https://api.airtable.com/v0/"
+        f"{AIRTABLE_BASE_ID}/"
+        f"{urllib.parse.quote(AIRTABLE_EVENT_POLICIES_TABLE)}"
+    )
+
+    req = urllib.request.Request(
+        url,
+        headers=airtable_headers(),
+        method="GET",
+    )
+
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        body = resp.read().decode("utf-8")
+        data = safe_json_loads(body, {})
+        records = data.get("records", [])
+
+        if not isinstance(records, list):
+            print("WARN fetch_event_policies returned non-list records")
+            return []
+
+        return [item for item in records if isinstance(item, dict)]
+
+
+def build_policy_index(records: List[Dict[str, Any]]) -> Dict[Tuple[str, str], Dict[str, Any]]:
     """
-    Lit la table Airtable Event_Policies.
-    On récupère tous les records (pagination simple) puis on filtre côté Python.
+    Index par:
+    (event_type, event_source)
+
+    event_source peut être vide pour servir de fallback.
     """
-    all_records: List[Dict[str, Any]] = []
-    offset: Optional[str] = None
+    index: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
-    while True:
-        params = {
-            "pageSize": "100",
-        }
-        if offset:
-            params["offset"] = offset
-
-        query = urllib.parse.urlencode(params)
-        url = (
-            f"https://api.airtable.com/v0/"
-            f"{AIRTABLE_BASE_ID}/"
-            f"{urllib.parse.quote(AIRTABLE_EVENT_POLICIES_TABLE)}"
-            f"?{query}"
-        )
-
-        req = urllib.request.Request(
-            url,
-            headers=airtable_headers(),
-            method="GET",
-        )
-
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            body = resp.read().decode("utf-8")
-            parsed = safe_json_loads(body, {})
-
-        records = parsed.get("records", [])
-        if isinstance(records, list):
-            for record in records:
-                if isinstance(record, dict):
-                    all_records.append(record)
-
-        offset = parsed.get("offset")
-        if not offset:
-            break
-
-    return all_records
-
-
-def parse_policy_priority(value: Any) -> int:
-    try:
-        return int(value)
-    except Exception:
-        return 999999
-
-
-def parse_policy_input_json(value: Any) -> Dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-
-    if isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
-            return {}
-        parsed = safe_json_loads(stripped, {})
-        if isinstance(parsed, dict):
-            return parsed
-
-    return {}
-
-
-def is_policy_enabled(fields: Dict[str, Any]) -> bool:
-    value = fields.get("Enabled", False)
-    return bool(value)
-
-
-def event_matches_policy(event: Dict[str, Any], policy_fields: Dict[str, Any]) -> bool:
-    event_type = normalize_lower(event.get("type"))
-    event_source = normalize_lower(event.get("source"))
-
-    policy_type = normalize_lower(policy_fields.get("Event_Type"))
-    policy_source = normalize_lower(policy_fields.get("Event_Source"))
-
-    if not policy_type:
-        return False
-
-    if event_type != policy_type:
-        return False
-
-    # Event_Source vide = wildcard
-    if policy_source and event_source != policy_source:
-        return False
-
-    return True
-
-
-def resolve_policy_for_event(
-    event: Dict[str, Any],
-    policies: List[Dict[str, Any]],
-) -> Optional[Dict[str, Any]]:
-    matches: List[Dict[str, Any]] = []
-
-    for record in policies:
+    for record in records:
         fields = record.get("fields", {})
         if not isinstance(fields, dict):
             continue
 
-        if not is_policy_enabled(fields):
+        enabled = bool(fields.get("Enabled", False))
+        event_type = normalize_lower(fields.get("Event_Type"))
+        event_source = normalize_lower(fields.get("Event_Source"))
+
+        if not enabled:
             continue
 
-        if event_matches_policy(event, fields):
-            matches.append(record)
+        if not event_type:
+            continue
 
-    if not matches:
+        key = (event_type, event_source)
+        index[key] = fields
+
+    return index
+
+
+def find_policy_for_event(
+    event: Dict[str, Any],
+    policy_index: Dict[Tuple[str, str], Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    event_type = normalize_lower(event.get("type"))
+    event_source = normalize_lower(event.get("source"))
+
+    if not event_type:
         return None
 
-    matches.sort(key=lambda record: parse_policy_priority(record.get("fields", {}).get("Priority")))
-    return matches[0]
+    exact_key = (event_type, event_source)
+    fallback_key = (event_type, "")
+
+    if exact_key in policy_index:
+        return policy_index[exact_key]
+
+    if fallback_key in policy_index:
+        return policy_index[fallback_key]
+
+    return None
 
 
-def fallback_map_event_to_command(event: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Mapping stable historique.
-    Utilisé si aucune policy ne match.
-    """
+# ----------------------------
+# Mapping policy -> command
+# ----------------------------
+
+def build_input_from_event_and_policy(
+    event: Dict[str, Any],
+    policy: Dict[str, Any]
+) -> Dict[str, Any]:
+    payload = normalize_payload(event.get("payload"))
+    event_type = normalize_lower(event.get("type"))
+    target_input_json_raw = normalize_text(policy.get("Target_Input_JSON"))
+
+    # Si la policy définit explicitement un JSON, on l'utilise.
+    # Sinon fallback sur le payload natif de l'event.
+    if target_input_json_raw:
+        parsed = safe_json_loads(target_input_json_raw, {})
+        if isinstance(parsed, dict):
+            return parsed
+        return {}
+
+    # Garde-fou spécifique http_exec
+    if event_type in ("command_http_exec", "http_exec", "http_request", "command.http_exec"):
+        url = payload.get("url")
+        if not url or not isinstance(url, str):
+            raise ValueError("http_exec event missing url")
+
+        method = normalize_text(payload.get("method")) or "GET"
+        headers = payload.get("headers", {})
+        body_json = payload.get("json", payload.get("body", {}))
+
+        if not isinstance(headers, dict):
+            headers = {}
+
+        if isinstance(body_json, (list, str, int, float, bool)) or body_json is None:
+            body_json = {}
+
+        if not isinstance(body_json, dict):
+            body_json = {}
+
+        return {
+            "url": url.strip(),
+            "method": method.upper(),
+            "headers": headers,
+            "json": body_json,
+        }
+
+    return payload
+
+
+def map_event_to_command(event: Dict[str, Any], policy: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(event, dict):
         raise ValueError("Event must be a dict")
 
-    event_id = event.get("id")
+    if not isinstance(policy, dict):
+        raise ValueError("Policy must be a dict")
+
+    event_id = normalize_text(event.get("id"))
     if not event_id:
         raise ValueError("Event missing id")
 
-    event_type = normalize_lower(event.get("type"))
-    payload = normalize_payload(event.get("payload"))
+    capability = normalize_text(policy.get("Target_Capability"))
+    if not capability:
+        raise ValueError("Policy missing Target_Capability")
 
-    capability = "command_orchestrator"
-    input_json = payload
+    input_json = build_input_from_event_and_policy(event, policy)
 
-    if event_type in ("command_http_exec", "http_exec", "http_request", "command.http_exec"):
-        capability = "http_exec"
-        input_json = {
-            "url": payload.get("url", ""),
-            "method": payload.get("method", "GET"),
-            "headers": payload.get("headers", {}),
-            "json": payload.get("json", payload.get("body", {})),
-        }
-
-    elif event_type in ("sla_machine", "sla_check"):
-        capability = "sla_machine"
-        input_json = payload
-
-    elif event_type in ("escalation_engine", "escalate"):
-        capability = "escalation_engine"
-        input_json = payload
-
-    elif event_type in ("command_orchestrator", "orchestrator"):
-        capability = "command_orchestrator"
-        input_json = payload
-
-    fields = {
+    fields: Dict[str, Any] = {
         "Capability": capability,
         "Status_select": "Queued",
         "Idempotency_Key": f"evt-{event_id}",
         "Input_JSON": safe_json_dumps(input_json),
         "Approved": True,
         "worker": WORKER_NAME,
-        "Notes": f"Created from Supabase event {event_id} (fallback)",
+        "Notes": f"Created from Supabase event {event_id}",
     }
+
+    # Pour http_exec, on remplit aussi les champs utiles SI disponibles.
+    # Le worker peut lire Input_JSON, mais ces champs restent pratiques pour le cockpit.
+    if capability == "http_exec":
+        url = normalize_text(input_json.get("url"))
+        method = normalize_text(input_json.get("method")) or "GET"
+        headers = input_json.get("headers", {})
+
+        if not isinstance(headers, dict):
+            headers = {}
+
+        if url:
+            fields["http_target"] = url
+
+        fields["HTTP_Method"] = method.upper()
+        fields["HTTP_Headers_JSON"] = safe_json_dumps(headers)
+
+    # Si Policy définit une priorité texte/numérique côté cockpit plus tard,
+    # on pourra l'ajouter ici sans casser la base.
 
     return clean_airtable_fields(fields)
 
 
-def map_event_to_command_with_policy(
-    event: Dict[str, Any],
-    policies: List[Dict[str, Any]],
-) -> Dict[str, Any]:
-    if not isinstance(event, dict):
-        raise ValueError("Event must be a dict")
-
-    event_id = normalize_str(event.get("id"))
-    if not event_id:
-        raise ValueError("Event missing id")
-
-    event_payload = normalize_payload(event.get("payload"))
-    matched_policy = resolve_policy_for_event(event, policies)
-
-    if not matched_policy:
-        print(f"INFO no policy matched for event {event_id}, using fallback")
-        return fallback_map_event_to_command(event)
-
-    policy_fields = matched_policy.get("fields", {})
-    policy_name = normalize_str(policy_fields.get("Name")) or "Unnamed Policy"
-    target_capability = normalize_lower(policy_fields.get("Target_Capability"))
-    target_input_json = parse_policy_input_json(policy_fields.get("Target_Input_JSON"))
-
-    if not target_capability:
-        raise RuntimeError(f"Policy '{policy_name}' missing Target_Capability")
-
-    if target_capability not in ALLOWED_CAPABILITIES:
-        raise RuntimeError(
-            f"Policy '{policy_name}' uses unsupported Target_Capability '{target_capability}'"
-        )
-
-    # Règle de merge sûre :
-    # - base = payload event
-    # - override = Target_Input_JSON policy
-    # => la policy peut compléter / surcharger
-    final_input_json = merge_dicts(event_payload, target_input_json)
-
-    fields = {
-        "Capability": target_capability,
-        "Status_select": "Queued",
-        "Idempotency_Key": f"evt-{event_id}",
-        "Input_JSON": safe_json_dumps(final_input_json),
-        "Approved": True,
-        "worker": WORKER_NAME,
-        "Notes": f"Created from Supabase event {event_id} via policy {policy_name}",
-    }
-
-    return clean_airtable_fields(fields)
-
+# ----------------------------
+# Airtable commands
+# ----------------------------
 
 def create_airtable_command(fields: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(fields, dict) or not fields:
@@ -409,39 +394,17 @@ def create_airtable_command(fields: Dict[str, Any]) -> Dict[str, Any]:
         return parsed
 
 
-def mark_event_processed(event_id: str) -> None:
-    if not event_id:
-        raise ValueError("Missing event_id for mark_event_processed")
-
-    query = urllib.parse.urlencode({
-        "id": f"eq.{event_id}"
-    })
-
-    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_EVENTS_TABLE}?{query}"
-
-    payload = {
-        "processed_at": now_iso(),
-        "processed_by": "bosai-event-engine"
-    }
-
-    data = safe_json_dumps(payload).encode("utf-8")
-
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers=supabase_headers(),
-        method="PATCH",
-    )
-
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        resp.read()
-
+# ----------------------------
+# Main
+# ----------------------------
 
 def main() -> None:
     require_env("SUPABASE_URL", SUPABASE_URL)
     require_env("SUPABASE_SERVICE_ROLE_KEY", SUPABASE_SERVICE_ROLE_KEY)
     require_env("AIRTABLE_API_KEY", AIRTABLE_API_KEY)
     require_env("AIRTABLE_BASE_ID", AIRTABLE_BASE_ID)
+    require_env("AIRTABLE_COMMANDS_TABLE", AIRTABLE_COMMANDS_TABLE)
+    require_env("AIRTABLE_EVENT_POLICIES_TABLE", AIRTABLE_EVENT_POLICIES_TABLE)
 
     print(f"EVENT_ENGINE_LIMIT = {EVENT_ENGINE_LIMIT}")
     print(f"SUPABASE_EVENTS_TABLE = {SUPABASE_EVENTS_TABLE}")
@@ -449,11 +412,15 @@ def main() -> None:
     print(f"AIRTABLE_EVENT_POLICIES_TABLE = {AIRTABLE_EVENT_POLICIES_TABLE}")
     print(f"WORKER_NAME = {WORKER_NAME}")
 
-    policies = fetch_event_policies()
-    print(f"Loaded policies: {len(policies)}")
+    policy_records = fetch_event_policies()
+    policy_index = build_policy_index(policy_records)
+    print(f"Loaded policies: {len(policy_index)}")
 
     events = fetch_events()
     print(f"Fetched events: {len(events)}")
+
+    if not events:
+        print("No events to process")
 
     created = 0
     processed = 0
@@ -466,12 +433,21 @@ def main() -> None:
             if not isinstance(event, dict):
                 raise ValueError("Fetched event is not a dict")
 
-            event_id = normalize_str(event.get("id"))
+            event_id = normalize_text(event.get("id"))
             if not event_id:
                 raise ValueError("Fetched event missing id")
 
-            fields = map_event_to_command_with_policy(event, policies)
+            event_type = normalize_text(event.get("type"))
+            if not event_type:
+                raise ValueError(f"Event {event_id} missing type")
 
+            policy = find_policy_for_event(event, policy_index)
+            if not policy:
+                raise ValueError(
+                    f"No policy found for event type={event.get('type')} source={event.get('source')}"
+                )
+
+            fields = map_event_to_command(event, policy)
             cmd = create_airtable_command(fields)
             cmd_id = cmd.get("id")
 
@@ -488,7 +464,7 @@ def main() -> None:
             failed += 1
 
         except Exception as e:
-            print(f"Error for event {event_id}: {repr(e)}")
+            print(f"Event skipped {event_id}: {repr(e)}")
             failed += 1
 
     print(safe_json_dumps({
