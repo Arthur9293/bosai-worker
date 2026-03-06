@@ -1,10 +1,15 @@
 import os
+import sys
 import json
 import urllib.request
 import urllib.parse
 import urllib.error
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURRENT_DIR not in sys.path:
+    sys.path.append(CURRENT_DIR)
 
 from chaos_guard import ChaosGuard, build_chaos_guard_config
 
@@ -608,6 +613,44 @@ def map_event_to_command(
         fields["HTTP_Headers_JSON"] = safe_json_dumps(headers)
 
     return clean_airtable_fields(fields)
+
+
+# ----------------------------
+# Airtable Commands
+# ----------------------------
+
+def create_airtable_command(fields: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(fields, dict) or not fields:
+        raise ValueError("Invalid Airtable fields payload")
+
+    safe_fields = clean_airtable_fields(fields)
+    if not safe_fields:
+        raise ValueError("Airtable fields empty after cleaning")
+
+    payload = {"fields": safe_fields}
+    data = safe_json_dumps(payload).encode("utf-8")
+
+    url = (
+        f"https://api.airtable.com/v0/"
+        f"{AIRTABLE_BASE_ID}/"
+        f"{urllib.parse.quote(AIRTABLE_COMMANDS_TABLE)}"
+    )
+
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers=airtable_headers(),
+        method="POST",
+    )
+
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        body = resp.read().decode("utf-8")
+        parsed = safe_json_loads(body, {})
+
+        if not isinstance(parsed, dict):
+            raise RuntimeError("Airtable create returned non-dict response")
+
+        return parsed
 
 
 # ----------------------------
