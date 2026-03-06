@@ -187,8 +187,11 @@ def infer_command_from_event(event):
         if not isinstance(headers, dict):
             headers = {}
 
+        # Garde-fou important:
+        # on n'écrit PAS dans le champ "URL" car il semble mal typé côté Airtable.
+        # On garde l'URL dans Input_JSON et on utilise "http_target" si ce champ existe dans ta base.
         if url:
-            fields["URL"] = url
+            fields["http_target"] = url
 
         fields["HTTP_Method"] = method
         fields["HTTP_Headers_JSON"] = safe_json_dumps(headers)
