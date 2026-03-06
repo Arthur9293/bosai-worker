@@ -28,30 +28,30 @@ if EVENT_ENGINE_LIMIT > 100:
     EVENT_ENGINE_LIMIT = 100
 
 
-def now_iso():
+def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def require_env(name, value):
+def require_env(name: str, value: str) -> None:
     if not value or not str(value).strip():
         raise RuntimeError(f"Missing env var: {name}")
 
 
-def safe_json_dumps(value):
+def safe_json_dumps(value) -> str:
     try:
         return json.dumps(value, ensure_ascii=False)
     except Exception:
         return json.dumps({}, ensure_ascii=False)
 
 
-def safe_json_loads(text, default):
+def safe_json_loads(text: str, default):
     try:
         return json.loads(text)
     except Exception:
         return default
 
 
-def supabase_headers():
+def supabase_headers() -> dict:
     return {
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
         "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
@@ -59,14 +59,14 @@ def supabase_headers():
     }
 
 
-def airtable_headers():
+def airtable_headers() -> dict:
     return {
         "Authorization": f"Bearer {AIRTABLE_API_KEY}",
         "Content-Type": "application/json",
     }
 
 
-def fetch_events():
+def fetch_events() -> list:
     query = urllib.parse.urlencode({
         "select": "*",
         "processed_at": "is.null",
@@ -79,7 +79,7 @@ def fetch_events():
     req = urllib.request.Request(
         url,
         headers=supabase_headers(),
-        method="GET"
+        method="GET",
     )
 
     with urllib.request.urlopen(req, timeout=30) as resp:
@@ -99,13 +99,7 @@ def normalize_payload(payload):
     return {}
 
 
-def clean_airtable_fields(fields):
-    """
-    Garde-fous:
-    - supprime Owner quoi qu'il arrive
-    - supprime None / chaînes vides
-    - ne garde que des champs simples et sûrs
-    """
+def clean_airtable_fields(fields: dict) -> dict:
     if not isinstance(fields, dict):
         return {}
 
@@ -119,10 +113,10 @@ def clean_airtable_fields(fields):
             continue
 
         if isinstance(value, str):
-            v = value.strip()
-            if v == "":
+            stripped = value.strip()
+            if stripped == "":
                 continue
-            cleaned[key] = v
+            cleaned[key] = stripped
             continue
 
         cleaned[key] = value
@@ -130,7 +124,7 @@ def clean_airtable_fields(fields):
     return cleaned
 
 
-def infer_command_from_event(event):
+def map_event_to_command(event: dict) -> dict:
     if not isinstance(event, dict):
         raise ValueError("Event must be a dict")
 
@@ -142,7 +136,7 @@ def infer_command_from_event(event):
     payload = normalize_payload(event.get("payload"))
 
     capability = "command_orchestrator"
-    input_json = {}
+    input_json = payload
 
     if event_type in ("command_http_exec", "http_exec", "http_request", "command.http_exec"):
         capability = "http_exec"
@@ -165,14 +159,6 @@ def infer_command_from_event(event):
         capability = "command_orchestrator"
         input_json = payload
 
-    else:
-        capability = "command_orchestrator"
-        input_json = payload
-
-    # IMPORTANT:
-    # On n'envoie PLUS aucun champ HTTP dédié dans Airtable
-    # pour éviter les erreurs 422 sur les champs select mal typés.
-    # Toute la donnée utile reste dans Input_JSON.
     fields = {
         "Capability": capability,
         "Status_select": "Queued",
@@ -183,37 +169,29 @@ def infer_command_from_event(event):
         "Notes": f"Created from Supabase event {event_id}",
     }
 
+    # On ne pousse aucun champ HTTP dédié ici.
+    # Le worker lit Input_JSON, ce qui évite les erreurs de type Airtable.
     return clean_airtable_fields(fields)
 
 
-def create_airtable_command(fields):
+def create_airtable_command(fields: dict) -> dict:
     if not isinstance(fields, dict) or not fields:
         raise ValueError("Invalid Airtable fields payload")
 
-    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{urllib.parse.quote(AIRTABLE_COMMANDS_TABLE)}"
-
     safe_fields = clean_airtable_fields(fields)
-
     if not safe_fields:
         raise ValueError("Airtable fields empty after cleaning")
-
-    # garde-fou ultime
-    safe_fields.pop("Owner", None)
-    safe_fields.pop("URL", None)
-    safe_fields.pop("http_target", None)
-    safe_fields.pop("HTTP_Method", None)
-    safe_fields.pop("HTTP_Headers_JSON", None)
 
     payload = {"fields": safe_fields}
     data = safe_json_dumps(payload).encode("utf-8")
 
-    print(f"AIRTABLE_FIELDS_KEYS = {list(safe_fields.keys())}")
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{urllib.parse.quote(AIRTABLE_COMMANDS_TABLE)}"
 
     req = urllib.request.Request(
         url,
         data=data,
         headers=airtable_headers(),
-        method="POST"
+        method="POST",
     )
 
     with urllib.request.urlopen(req, timeout=30) as resp:
@@ -226,7 +204,7 @@ def create_airtable_command(fields):
         return parsed
 
 
-def mark_event_processed(event_id):
+def mark_event_processed(event_id: str) -> None:
     if not event_id:
         raise ValueError("Missing event_id for mark_event_processed")
 
@@ -247,14 +225,14 @@ def mark_event_processed(event_id):
         url,
         data=data,
         headers=supabase_headers(),
-        method="PATCH"
+        method="PATCH",
     )
 
     with urllib.request.urlopen(req, timeout=30) as resp:
         resp.read()
 
 
-def main():
+def main() -> None:
     require_env("SUPABASE_URL", SUPABASE_URL)
     require_env("SUPABASE_SERVICE_ROLE_KEY", SUPABASE_SERVICE_ROLE_KEY)
     require_env("AIRTABLE_API_KEY", AIRTABLE_API_KEY)
@@ -266,7 +244,6 @@ def main():
     print(f"WORKER_NAME = {WORKER_NAME}")
 
     events = fetch_events()
-
     print(f"Fetched events: {len(events)}")
 
     created = 0
@@ -281,26 +258,18 @@ def main():
                 raise ValueError("Fetched event is not a dict")
 
             event_id = event.get("id")
-
             if not event_id:
                 raise ValueError("Fetched event missing id")
 
-            fields = infer_command_from_event(event)
-
-            if "Owner" in fields:
-                raise RuntimeError("Guardrail failed: Owner still present in fields")
-
+            fields = map_event_to_command(event)
             cmd = create_airtable_command(fields)
             cmd_id = cmd.get("id")
 
             print(f"Created command for event {event_id} -> {cmd_id}")
-
             created += 1
 
             mark_event_processed(event_id)
-
             print(f"Marked processed {event_id}")
-
             processed += 1
 
         except urllib.error.HTTPError as e:
@@ -317,7 +286,7 @@ def main():
         "fetched": len(events),
         "created": created,
         "processed": processed,
-        "failed": failed
+        "failed": failed,
     }))
 
 
