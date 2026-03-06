@@ -5,6 +5,13 @@ import urllib.parse
 import urllib.error
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+import sys
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURRENT_DIR not in sys.path:
+    sys.path.append(CURRENT_DIR)
+
+from chaos_guard import ChaosGuard, build_chaos_guard_config
 
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
@@ -108,13 +115,18 @@ def update_event(event_id: str, patch: Dict[str, Any]) -> None:
         resp.read()
 
 
+def is_valid_http_url(url: str) -> bool:
+    text = normalize_text(url)
+    return text.startswith("http://") or text.startswith("https://")
+
+
 def derive_error_code(exc: Exception) -> str:
     message = repr(exc).lower()
 
     if "invalid_url" in message or "missing valid url" in message:
         return "INVALID_URL"
 
-    if "policy_not_found" in message:
+    if "policy_not_found" in message or "unsupported event type" in message:
         return "POLICY_NOT_FOUND"
 
     if "disallowed_method" in message:
@@ -125,6 +137,18 @@ def derive_error_code(exc: Exception) -> str:
 
     if "https_required" in message:
         return "HTTPS_REQUIRED"
+
+    if "rate_limit_exceeded" in message:
+        return "CHAOS_RATE_LIMIT"
+
+    if "payload_too_large" in message:
+        return "CHAOS_PAYLOAD_TOO_LARGE"
+
+    if "source_blocked" in message:
+        return "CHAOS_SOURCE_BLOCKED"
+
+    if "event_not_dict" in message:
+        return "CHAOS_EVENT_INVALID"
 
     if isinstance(exc, urllib.error.HTTPError):
         return "HTTP_ERROR"
@@ -138,7 +162,7 @@ def derive_error_code(exc: Exception) -> str:
 
 def claim_event(event: Dict[str, Any]) -> bool:
     """
-    Claim simple et sûr :
+    Claim simple :
     on ne traite que les events encore pending.
     """
     event_id = normalize_text(event.get("id"))
@@ -247,12 +271,9 @@ def handle_http_exec_event(event: Dict[str, Any]) -> Dict[str, Any]:
     url = normalize_text(payload.get("url"))
     method = normalize_text(payload.get("method") or "GET").upper()
 
-    if not (url.startswith("http://") or url.startswith("https://")):
+    if not is_valid_http_url(url):
         raise ValueError("INVALID_URL: http_exec event missing valid url")
 
-    # Pour cette V1 dispatcher :
-    # on valide seulement la structure.
-    # L’exécution réelle reste dans le flow Commands / Orchestrator.
     return {
         "ok": True,
         "validated": True,
@@ -295,9 +316,20 @@ def main() -> None:
     require_env("SUPABASE_SERVICE_ROLE_KEY", SUPABASE_SERVICE_ROLE_KEY)
     require_env("SUPABASE_EVENTS_TABLE", SUPABASE_EVENTS_TABLE)
 
+    chaos_guard_config = build_chaos_guard_config({
+        "max_events_per_minute": os.getenv("CHAOS_GUARD_MAX_EVENTS_PER_MINUTE", "50"),
+        "payload_size_limit": os.getenv("CHAOS_GUARD_PAYLOAD_SIZE_LIMIT", "4096"),
+        "blocked_sources": safe_json_loads(
+            os.getenv("CHAOS_GUARD_BLOCKED_SOURCES_JSON", "[]"),
+            []
+        ),
+    })
+    chaos_guard = ChaosGuard(chaos_guard_config)
+
     print(f"SUPABASE_EVENTS_TABLE = {SUPABASE_EVENTS_TABLE}")
     print(f"WORKER_NAME = {WORKER_NAME}")
     print(f"DISPATCH_LIMIT = {DISPATCH_LIMIT}")
+    print(f"CHAOS_GUARD_CONFIG = {safe_json_dumps(chaos_guard_config)}")
 
     events = fetch_pending_events()
     print(f"Fetched pending events: {len(events)}")
@@ -323,6 +355,16 @@ def main() -> None:
                 continue
 
             claimed += 1
+
+            ok, chaos_reason = chaos_guard.validate_event(event)
+            if not ok:
+                err = ValueError(f"chaos_guard_reject:{chaos_reason}")
+                error_code = derive_error_code(err)
+                reject_event(event_id, repr(err), error_code)
+                print(f"Rejected by chaos guard event {event_id} -> {error_code}")
+                rejected += 1
+                continue
+
             result = dispatch_event(event)
 
             print(f"Dispatched event {event_id} -> {safe_json_dumps(result)}")
