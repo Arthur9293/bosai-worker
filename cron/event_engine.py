@@ -15,6 +15,7 @@ AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY", "").strip()
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID", "").strip()
 AIRTABLE_COMMANDS_TABLE = os.getenv("AIRTABLE_COMMANDS_TABLE", "Commands").strip()
 AIRTABLE_EVENT_POLICIES_TABLE = os.getenv("AIRTABLE_EVENT_POLICIES_TABLE", "Event_Policies").strip()
+AIRTABLE_COMMAND_POLICIES_TABLE = os.getenv("AIRTABLE_COMMAND_POLICIES_TABLE", "Command_Policies").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 
@@ -164,6 +165,10 @@ def is_valid_http_url(url: str) -> bool:
     return text.startswith("http://") or text.startswith("https://")
 
 
+def is_https_url(url: str) -> bool:
+    return normalize_text(url).startswith("https://")
+
+
 def parse_json_object_from_text(text: str) -> Dict[str, Any]:
     parsed = safe_json_loads(text, {})
     if isinstance(parsed, dict):
@@ -171,20 +176,71 @@ def parse_json_object_from_text(text: str) -> Dict[str, Any]:
     return {}
 
 
-def derive_error_code(exc: Exception) -> str:
-    message = repr(exc)
+def parse_json_list_from_text(text: str) -> List[str]:
+    parsed = safe_json_loads(normalize_text(text), [])
+    if not isinstance(parsed, list):
+        return []
 
-    if "missing valid url" in message.lower():
+    out: List[str] = []
+    for item in parsed:
+        val = normalize_text(item)
+        if val:
+            out.append(val)
+    return out
+
+
+def extract_host_from_url(url: str) -> str:
+    text = normalize_text(url)
+    if not text:
+        return ""
+
+    try:
+        parsed = urllib.parse.urlparse(text)
+        return normalize_lower(parsed.hostname or "")
+    except Exception:
+        return ""
+
+
+def method_allowed(method: str, allowed_methods: List[str]) -> bool:
+    if not allowed_methods:
+        return True
+    allowed = {normalize_upper(x) for x in allowed_methods if normalize_text(x)}
+    return normalize_upper(method) in allowed
+
+
+def host_allowed(host: str, allowed_hosts: List[str]) -> bool:
+    if not allowed_hosts:
+        return True
+    allowed = {normalize_lower(x) for x in allowed_hosts if normalize_text(x)}
+    return normalize_lower(host) in allowed
+
+
+def derive_error_code(exc: Exception) -> str:
+    message = repr(exc).lower()
+
+    if "missing valid url" in message:
         return "INVALID_URL"
 
-    if "no policy found" in message.lower():
+    if "no policy found" in message:
         return "POLICY_NOT_FOUND"
 
-    if "input_json too large" in message.lower():
+    if "input_json too large" in message:
         return "INPUT_TOO_LARGE"
 
-    if "airtable create" in message.lower():
+    if "airtable create" in message:
         return "AIRTABLE_CREATE_FAILED"
+
+    if "command policy" in message:
+        return "COMMAND_POLICY_ERROR"
+
+    if "host not allowed" in message:
+        return "DISALLOWED_HOST"
+
+    if "method not allowed" in message:
+        return "DISALLOWED_METHOD"
+
+    if "requires https" in message:
+        return "HTTPS_REQUIRED"
 
     if isinstance(exc, urllib.error.HTTPError):
         return "HTTP_ERROR"
@@ -294,11 +350,11 @@ def dead_letter_event(event_id: str, reason: str, error_code: str, payload: Dict
 # Airtable Event Policies
 # ----------------------------
 
-def fetch_event_policies() -> List[Dict[str, Any]]:
+def fetch_airtable_table_records(table_name: str) -> List[Dict[str, Any]]:
     base_url = (
         f"https://api.airtable.com/v0/"
         f"{AIRTABLE_BASE_ID}/"
-        f"{urllib.parse.quote(AIRTABLE_EVENT_POLICIES_TABLE)}"
+        f"{urllib.parse.quote(table_name)}"
     )
 
     all_records: List[Dict[str, Any]] = []
@@ -330,6 +386,14 @@ def fetch_event_policies() -> List[Dict[str, Any]]:
     return all_records
 
 
+def fetch_event_policies() -> List[Dict[str, Any]]:
+    return fetch_airtable_table_records(AIRTABLE_EVENT_POLICIES_TABLE)
+
+
+def fetch_command_policies() -> List[Dict[str, Any]]:
+    return fetch_airtable_table_records(AIRTABLE_COMMAND_POLICIES_TABLE)
+
+
 def build_policy_index(records: List[Dict[str, Any]]) -> Dict[Tuple[str, str], Dict[str, Any]]:
     """
     Index by:
@@ -356,6 +420,28 @@ def build_policy_index(records: List[Dict[str, Any]]) -> Dict[Tuple[str, str], D
 
         key = (event_type, event_source)
         index[key] = fields
+
+    return index
+
+
+def build_command_policy_index(records: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    index: Dict[str, Dict[str, Any]] = {}
+
+    for record in records:
+        fields = record.get("fields", {})
+        if not isinstance(fields, dict):
+            continue
+
+        enabled = bool(fields.get("Enabled", False))
+        capability = normalize_text(fields.get("Capability"))
+
+        if not enabled:
+            continue
+
+        if not capability:
+            continue
+
+        index[capability] = fields
 
     return index
 
@@ -429,22 +515,69 @@ def build_input_from_event_and_policy(
     return payload
 
 
-def map_event_to_command(event: Dict[str, Any], policy: Dict[str, Any]) -> Dict[str, Any]:
+def validate_command_against_policy(
+    capability: str,
+    input_json: Dict[str, Any],
+    command_policy: Dict[str, Any],
+) -> None:
+    if not isinstance(command_policy, dict):
+        raise ValueError(f"No command policy found for capability={capability}")
+
+    max_input_chars = safe_priority_number(command_policy.get("Max_Input_Chars"), default=12000)
+    input_json_text = safe_json_dumps(input_json)
+
+    if len(input_json_text) > max_input_chars:
+        raise ValueError(
+            f"Input_JSON too large for capability={capability} "
+            f"({len(input_json_text)} > {max_input_chars})"
+        )
+
+    require_https = bool(command_policy.get("Require_Https", False))
+    allowed_hosts = parse_json_list_from_text(command_policy.get("Allowed_Hosts_JSON", "[]"))
+    allowed_methods = parse_json_list_from_text(command_policy.get("Allowed_Methods_JSON", "[]"))
+
+    if capability == "http_exec":
+        url = normalize_text(input_json.get("url"))
+        method = normalize_upper(input_json.get("method") or "GET")
+        host = extract_host_from_url(url)
+
+        if not is_valid_http_url(url):
+            raise ValueError("http_exec event missing valid url")
+
+        if require_https and not is_https_url(url):
+            raise ValueError(f"http_exec requires https url: {url}")
+
+        if not host_allowed(host, allowed_hosts):
+            raise ValueError(f"http_exec host not allowed: {host}")
+
+        if not method_allowed(method, allowed_methods):
+            raise ValueError(f"http_exec method not allowed: {method}")
+
+
+def map_event_to_command(
+    event: Dict[str, Any],
+    event_policy: Dict[str, Any],
+    command_policy_index: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
     if not isinstance(event, dict):
         raise ValueError("Event must be a dict")
 
-    if not isinstance(policy, dict):
-        raise ValueError("Policy must be a dict")
+    if not isinstance(event_policy, dict):
+        raise ValueError("Event policy must be a dict")
 
     event_id = normalize_text(event.get("id"))
     if not event_id:
         raise ValueError("Event missing id")
 
-    capability = normalize_text(policy.get("Target_Capability"))
+    capability = normalize_text(event_policy.get("Target_Capability"))
     if not capability:
-        raise ValueError("Policy missing Target_Capability")
+        raise ValueError("Event policy missing Target_Capability")
 
-    input_json = build_input_from_event_and_policy(event, policy)
+    input_json = build_input_from_event_and_policy(event, event_policy)
+
+    command_policy = command_policy_index.get(capability)
+    validate_command_against_policy(capability, input_json, command_policy)
+
     input_json_text = safe_json_dumps(input_json)
 
     if len(input_json_text) > MAX_INPUT_JSON_CHARS:
@@ -464,14 +597,10 @@ def map_event_to_command(event: Dict[str, Any], policy: Dict[str, Any]) -> Dict[
         "Notes": notes,
     }
 
-    # Useful cockpit fields for http_exec
     if capability == "http_exec":
         url = normalize_text(input_json.get("url"))
         method = normalize_upper(input_json.get("method") or "GET")
         headers = input_json.get("headers", {})
-
-        if not is_valid_http_url(url):
-            raise ValueError("Mapped http_exec command missing valid url")
 
         if not isinstance(headers, dict):
             headers = {}
@@ -532,16 +661,22 @@ def main() -> None:
     require_env("AIRTABLE_BASE_ID", AIRTABLE_BASE_ID)
     require_env("AIRTABLE_COMMANDS_TABLE", AIRTABLE_COMMANDS_TABLE)
     require_env("AIRTABLE_EVENT_POLICIES_TABLE", AIRTABLE_EVENT_POLICIES_TABLE)
+    require_env("AIRTABLE_COMMAND_POLICIES_TABLE", AIRTABLE_COMMAND_POLICIES_TABLE)
 
     print(f"EVENT_ENGINE_LIMIT = {EVENT_ENGINE_LIMIT}")
     print(f"SUPABASE_EVENTS_TABLE = {SUPABASE_EVENTS_TABLE}")
     print(f"AIRTABLE_COMMANDS_TABLE = {AIRTABLE_COMMANDS_TABLE}")
     print(f"AIRTABLE_EVENT_POLICIES_TABLE = {AIRTABLE_EVENT_POLICIES_TABLE}")
+    print(f"AIRTABLE_COMMAND_POLICIES_TABLE = {AIRTABLE_COMMAND_POLICIES_TABLE}")
     print(f"WORKER_NAME = {WORKER_NAME}")
 
     policy_records = fetch_event_policies()
     policy_index = build_policy_index(policy_records)
-    print(f"Loaded policies: {len(policy_index)}")
+    print(f"Loaded event policies: {len(policy_index)}")
+
+    command_policy_records = fetch_command_policies()
+    command_policy_index = build_command_policy_index(command_policy_records)
+    print(f"Loaded command policies: {len(command_policy_index)}")
 
     events = fetch_events()
     print(f"Fetched events: {len(events)}")
@@ -594,7 +729,7 @@ def main() -> None:
                 skipped += 1
                 continue
 
-            fields = map_event_to_command(event, policy)
+            fields = map_event_to_command(event, policy, command_policy_index)
             cmd = create_airtable_command(fields)
             cmd_id = normalize_text(cmd.get("id"))
 
@@ -624,13 +759,20 @@ def main() -> None:
             failed += 1
 
         except Exception as e:
+            reason = repr(e)
             error_code = derive_error_code(e)
-            reject_event(
-                event_id=event_id or "",
-                reason=repr(e),
-                error_code=error_code,
-            )
-            print(f"Rejected event {event_id} -> {error_code}")
+            print(f"Event rejected {event_id}: {reason}")
+
+            try:
+                reject_event(
+                    event_id=event_id or "",
+                    reason=reason,
+                    error_code=error_code,
+                )
+                print(f"Rejected event {event_id} -> {error_code}")
+            except Exception as reject_err:
+                print(f"Reject failed for event {event_id}: {repr(reject_err)}")
+
             failed += 1
 
     print(safe_json_dumps({
