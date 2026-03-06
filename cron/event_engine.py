@@ -6,6 +6,8 @@ import urllib.error
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from chaos_guard import ChaosGuard, build_chaos_guard_config
+
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
@@ -129,13 +131,6 @@ def airtable_headers() -> Dict[str, str]:
 
 
 def clean_airtable_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Airtable guardrails:
-    - remove Owner
-    - remove None
-    - remove empty strings
-    - keep False / 0 / True
-    """
     if not isinstance(fields, dict):
         return {}
 
@@ -242,6 +237,18 @@ def derive_error_code(exc: Exception) -> str:
     if "requires https" in message:
         return "HTTPS_REQUIRED"
 
+    if "rate_limit_exceeded" in message:
+        return "CHAOS_RATE_LIMIT"
+
+    if "payload_too_large" in message:
+        return "CHAOS_PAYLOAD_TOO_LARGE"
+
+    if "source_blocked" in message:
+        return "CHAOS_SOURCE_BLOCKED"
+
+    if "event_not_dict" in message:
+        return "CHAOS_EVENT_INVALID"
+
     if isinstance(exc, urllib.error.HTTPError):
         return "HTTP_ERROR"
 
@@ -347,7 +354,7 @@ def dead_letter_event(event_id: str, reason: str, error_code: str, payload: Dict
 
 
 # ----------------------------
-# Airtable Event Policies
+# Airtable tables
 # ----------------------------
 
 def fetch_airtable_table_records(table_name: str) -> List[Dict[str, Any]]:
@@ -395,12 +402,6 @@ def fetch_command_policies() -> List[Dict[str, Any]]:
 
 
 def build_policy_index(records: List[Dict[str, Any]]) -> Dict[Tuple[str, str], Dict[str, Any]]:
-    """
-    Index by:
-    (event_type, event_source)
-
-    Empty event_source = fallback for a given type.
-    """
     index: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
     for record in records:
@@ -480,13 +481,11 @@ def build_input_from_event_and_policy(
     event_type = normalize_lower(event.get("type"))
     target_input_json_raw = normalize_text(policy.get("Target_Input_JSON"))
 
-    # 1) Policy override wins if valid JSON object
     if target_input_json_raw:
         parsed = parse_json_object_from_text(target_input_json_raw)
         if parsed:
             return parsed
 
-    # 2) Smart fallback by event type
     if event_type in ("command_http_exec", "http_exec", "http_request", "command.http_exec"):
         url = normalize_text(payload.get("url"))
         if not is_valid_http_url(url):
@@ -511,7 +510,6 @@ def build_input_from_event_and_policy(
             "json": body_json,
         }
 
-    # 3) Generic fallback
     return payload
 
 
@@ -613,44 +611,6 @@ def map_event_to_command(
 
 
 # ----------------------------
-# Airtable Commands
-# ----------------------------
-
-def create_airtable_command(fields: Dict[str, Any]) -> Dict[str, Any]:
-    if not isinstance(fields, dict) or not fields:
-        raise ValueError("Invalid Airtable fields payload")
-
-    safe_fields = clean_airtable_fields(fields)
-    if not safe_fields:
-        raise ValueError("Airtable fields empty after cleaning")
-
-    payload = {"fields": safe_fields}
-    data = safe_json_dumps(payload).encode("utf-8")
-
-    url = (
-        f"https://api.airtable.com/v0/"
-        f"{AIRTABLE_BASE_ID}/"
-        f"{urllib.parse.quote(AIRTABLE_COMMANDS_TABLE)}"
-    )
-
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers=airtable_headers(),
-        method="POST",
-    )
-
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        body = resp.read().decode("utf-8")
-        parsed = safe_json_loads(body, {})
-
-        if not isinstance(parsed, dict):
-            raise RuntimeError("Airtable create returned non-dict response")
-
-        return parsed
-
-
-# ----------------------------
 # Main
 # ----------------------------
 
@@ -663,12 +623,23 @@ def main() -> None:
     require_env("AIRTABLE_EVENT_POLICIES_TABLE", AIRTABLE_EVENT_POLICIES_TABLE)
     require_env("AIRTABLE_COMMAND_POLICIES_TABLE", AIRTABLE_COMMAND_POLICIES_TABLE)
 
+    chaos_guard_config = build_chaos_guard_config({
+        "max_events_per_minute": os.getenv("CHAOS_GUARD_MAX_EVENTS_PER_MINUTE", "50"),
+        "payload_size_limit": os.getenv("CHAOS_GUARD_PAYLOAD_SIZE_LIMIT", "4096"),
+        "blocked_sources": safe_json_loads(
+            os.getenv("CHAOS_GUARD_BLOCKED_SOURCES_JSON", "[]"),
+            []
+        ),
+    })
+    chaos_guard = ChaosGuard(chaos_guard_config)
+
     print(f"EVENT_ENGINE_LIMIT = {EVENT_ENGINE_LIMIT}")
     print(f"SUPABASE_EVENTS_TABLE = {SUPABASE_EVENTS_TABLE}")
     print(f"AIRTABLE_COMMANDS_TABLE = {AIRTABLE_COMMANDS_TABLE}")
     print(f"AIRTABLE_EVENT_POLICIES_TABLE = {AIRTABLE_EVENT_POLICIES_TABLE}")
     print(f"AIRTABLE_COMMAND_POLICIES_TABLE = {AIRTABLE_COMMAND_POLICIES_TABLE}")
     print(f"WORKER_NAME = {WORKER_NAME}")
+    print(f"CHAOS_GUARD_CONFIG = {safe_json_dumps(chaos_guard_config)}")
 
     policy_records = fetch_event_policies()
     policy_index = build_policy_index(policy_records)
@@ -718,6 +689,15 @@ def main() -> None:
 
             if not event_type:
                 raise ValueError(f"Event {event_id} missing type")
+
+            ok, chaos_reason = chaos_guard.validate_event(event)
+            if not ok:
+                err = ValueError(f"chaos_guard_reject:{chaos_reason}")
+                error_code = derive_error_code(err)
+                reject_event(event_id, repr(err), error_code)
+                print(f"Rejected by chaos guard event {event_id} -> {error_code}")
+                skipped += 1
+                continue
 
             if not policy:
                 err = ValueError(
