@@ -1,7 +1,7 @@
-import time
 import json
+import time
 from collections import deque
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Deque, Dict, Optional, Tuple
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -37,20 +37,24 @@ def build_chaos_guard_config(overrides: Optional[Dict[str, Any]] = None) -> Dict
     if not isinstance(blocked_sources, list):
         blocked_sources = []
 
-    config["blocked_sources"] = [str(x).strip() for x in blocked_sources if str(x).strip()]
+    config["blocked_sources"] = [
+        str(item).strip()
+        for item in blocked_sources
+        if str(item).strip()
+    ]
 
     return config
 
 
 class ChaosGuard:
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
         self.config = build_chaos_guard_config(config)
-        self.event_window = deque()
+        self.event_window: Deque[float] = deque()
 
     def check_event_rate(self) -> Tuple[bool, Optional[str]]:
         now = time.time()
 
-        while self.event_window and now - self.event_window[0] > 60:
+        while self.event_window and (now - self.event_window[0] > 60):
             self.event_window.popleft()
 
         if len(self.event_window) >= self.config["max_events_per_minute"]:
@@ -61,7 +65,7 @@ class ChaosGuard:
 
     def check_payload_size(self, payload: Any) -> Tuple[bool, Optional[str]]:
         try:
-            payload_text = json.dumps(payload, ensure_ascii=False)
+            payload_text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         except Exception:
             payload_text = str(payload)
 
@@ -82,11 +86,11 @@ class ChaosGuard:
         if not isinstance(event, dict):
             return False, "event_not_dict"
 
-        checks = [
+        checks = (
             self.check_event_rate(),
             self.check_payload_size(event.get("payload")),
             self.check_source(event.get("source")),
-        ]
+        )
 
         for ok, reason in checks:
             if not ok:
