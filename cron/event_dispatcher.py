@@ -224,7 +224,7 @@ def claim_event(event: Dict[str, Any]) -> bool:
     return True
 
 
-def mark_event_processed(event_id: str, command_id: str = "") -> None:
+def mark_event_processed(event_id: str) -> None:
     patch: Dict[str, Any] = {
         "event_status": "processed",
         "processed_at": now_iso(),
@@ -234,9 +234,6 @@ def mark_event_processed(event_id: str, command_id: str = "") -> None:
         "rejected_by": None,
         "rejected_reason": None,
     }
-
-    if command_id:
-        patch["dispatched_command_id"] = command_id
 
     update_event(event_id, patch)
 
@@ -479,7 +476,7 @@ def main() -> None:
                 f"-> capability={fields.get('Capability')} command_id={command_id}"
             )
 
-            mark_event_processed(event_id, command_id=command_id)
+            mark_event_processed(event_id)
             processed += 1
 
         except urllib.error.HTTPError as e:
