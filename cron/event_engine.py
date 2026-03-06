@@ -29,6 +29,28 @@ if EVENT_ENGINE_LIMIT <= 0:
 if EVENT_ENGINE_LIMIT > 100:
     EVENT_ENGINE_LIMIT = 100
 
+# ----------------------------
+# Chaos guard / guardrails
+# ----------------------------
+
+try:
+    MAX_INPUT_JSON_CHARS = int(os.getenv("MAX_INPUT_JSON_CHARS", "12000"))
+except Exception:
+    MAX_INPUT_JSON_CHARS = 12000
+
+if MAX_INPUT_JSON_CHARS <= 0:
+    MAX_INPUT_JSON_CHARS = 12000
+
+try:
+    MAX_NOTES_CHARS = int(os.getenv("MAX_NOTES_CHARS", "500"))
+except Exception:
+    MAX_NOTES_CHARS = 500
+
+if MAX_NOTES_CHARS <= 0:
+    MAX_NOTES_CHARS = 500
+
+ALLOW_MARK_PROCESSED_ON_SKIP = normalize_bool = None  # placeholder set below
+
 
 # ----------------------------
 # Helpers
@@ -45,9 +67,9 @@ def require_env(name: str, value: str) -> None:
 
 def safe_json_dumps(value: Any) -> str:
     try:
-        return json.dumps(value, ensure_ascii=False)
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     except Exception:
-        return json.dumps({}, ensure_ascii=False)
+        return json.dumps({}, ensure_ascii=False, separators=(",", ":"))
 
 
 def safe_json_loads(text: str, default: Any) -> Any:
@@ -65,10 +87,49 @@ def normalize_lower(value: Any) -> str:
     return normalize_text(value).lower()
 
 
+def normalize_upper(value: Any) -> str:
+    return normalize_text(value).upper()
+
+
 def normalize_payload(payload: Any) -> Dict[str, Any]:
     if isinstance(payload, dict):
         return payload
     return {}
+
+
+def normalize_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+
+    text = normalize_lower(value)
+    if text in ("1", "true", "yes", "y", "on"):
+        return True
+    if text in ("0", "false", "no", "n", "off", ""):
+        return False
+    return default
+
+
+ALLOW_MARK_PROCESSED_ON_SKIP = normalize_bool(
+    os.getenv("ALLOW_MARK_PROCESSED_ON_SKIP", "false"),
+    default=False,
+)
+
+
+def truncate_text(value: str, limit: int) -> str:
+    value = normalize_text(value)
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 3)] + "..."
+
+
+def safe_priority_number(value: Any, default: int = 100) -> int:
+    try:
+        n = int(value)
+        if n < 0:
+            return default
+        return n
+    except Exception:
+        return default
 
 
 def supabase_headers() -> Dict[str, str]:
@@ -118,6 +179,18 @@ def clean_airtable_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
     return cleaned
 
 
+def is_valid_http_url(url: str) -> bool:
+    text = normalize_text(url)
+    return text.startswith("http://") or text.startswith("https://")
+
+
+def parse_json_object_from_text(text: str) -> Dict[str, Any]:
+    parsed = safe_json_loads(text, {})
+    if isinstance(parsed, dict):
+        return parsed
+    return {}
+
+
 # ----------------------------
 # Supabase events
 # ----------------------------
@@ -157,324 +230,4 @@ def mark_event_processed(event_id: str) -> None:
         "id": f"eq.{event_id}"
     })
 
-    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_EVENTS_TABLE}?{query}"
-
-    payload = {
-        "processed_at": now_iso(),
-        "processed_by": "bosai-event-engine"
-    }
-
-    data = safe_json_dumps(payload).encode("utf-8")
-
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers=supabase_headers(),
-        method="PATCH",
-    )
-
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        resp.read()
-
-
-# ----------------------------
-# Airtable policies
-# ----------------------------
-
-def fetch_event_policies() -> List[Dict[str, Any]]:
-    url = (
-        f"https://api.airtable.com/v0/"
-        f"{AIRTABLE_BASE_ID}/"
-        f"{urllib.parse.quote(AIRTABLE_EVENT_POLICIES_TABLE)}"
-    )
-
-    req = urllib.request.Request(
-        url,
-        headers=airtable_headers(),
-        method="GET",
-    )
-
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        body = resp.read().decode("utf-8")
-        data = safe_json_loads(body, {})
-        records = data.get("records", [])
-
-        if not isinstance(records, list):
-            print("WARN fetch_event_policies returned non-list records")
-            return []
-
-        return [item for item in records if isinstance(item, dict)]
-
-
-def build_policy_index(records: List[Dict[str, Any]]) -> Dict[Tuple[str, str], Dict[str, Any]]:
-    """
-    Index par:
-    (event_type, event_source)
-
-    event_source peut être vide pour servir de fallback.
-    """
-    index: Dict[Tuple[str, str], Dict[str, Any]] = {}
-
-    for record in records:
-        fields = record.get("fields", {})
-        if not isinstance(fields, dict):
-            continue
-
-        enabled = bool(fields.get("Enabled", False))
-        event_type = normalize_lower(fields.get("Event_Type"))
-        event_source = normalize_lower(fields.get("Event_Source"))
-
-        if not enabled:
-            continue
-
-        if not event_type:
-            continue
-
-        key = (event_type, event_source)
-        index[key] = fields
-
-    return index
-
-
-def find_policy_for_event(
-    event: Dict[str, Any],
-    policy_index: Dict[Tuple[str, str], Dict[str, Any]]
-) -> Optional[Dict[str, Any]]:
-    event_type = normalize_lower(event.get("type"))
-    event_source = normalize_lower(event.get("source"))
-
-    if not event_type:
-        return None
-
-    exact_key = (event_type, event_source)
-    fallback_key = (event_type, "")
-
-    if exact_key in policy_index:
-        return policy_index[exact_key]
-
-    if fallback_key in policy_index:
-        return policy_index[fallback_key]
-
-    return None
-
-
-# ----------------------------
-# Mapping policy -> command
-# ----------------------------
-
-def build_input_from_event_and_policy(
-    event: Dict[str, Any],
-    policy: Dict[str, Any]
-) -> Dict[str, Any]:
-    payload = normalize_payload(event.get("payload"))
-    event_type = normalize_lower(event.get("type"))
-    target_input_json_raw = normalize_text(policy.get("Target_Input_JSON"))
-
-    # Si la policy définit explicitement un JSON, on l'utilise.
-    # Sinon fallback sur le payload natif de l'event.
-    if target_input_json_raw:
-        parsed = safe_json_loads(target_input_json_raw, {})
-        if isinstance(parsed, dict):
-            return parsed
-        return {}
-
-    # Garde-fou spécifique http_exec
-    if event_type in ("command_http_exec", "http_exec", "http_request", "command.http_exec"):
-        url = payload.get("url")
-        if not url or not isinstance(url, str):
-            raise ValueError("http_exec event missing url")
-
-        method = normalize_text(payload.get("method")) or "GET"
-        headers = payload.get("headers", {})
-        body_json = payload.get("json", payload.get("body", {}))
-
-        if not isinstance(headers, dict):
-            headers = {}
-
-        if isinstance(body_json, (list, str, int, float, bool)) or body_json is None:
-            body_json = {}
-
-        if not isinstance(body_json, dict):
-            body_json = {}
-
-        return {
-            "url": url.strip(),
-            "method": method.upper(),
-            "headers": headers,
-            "json": body_json,
-        }
-
-    return payload
-
-
-def map_event_to_command(event: Dict[str, Any], policy: Dict[str, Any]) -> Dict[str, Any]:
-    if not isinstance(event, dict):
-        raise ValueError("Event must be a dict")
-
-    if not isinstance(policy, dict):
-        raise ValueError("Policy must be a dict")
-
-    event_id = normalize_text(event.get("id"))
-    if not event_id:
-        raise ValueError("Event missing id")
-
-    capability = normalize_text(policy.get("Target_Capability"))
-    if not capability:
-        raise ValueError("Policy missing Target_Capability")
-
-    input_json = build_input_from_event_and_policy(event, policy)
-
-    fields: Dict[str, Any] = {
-        "Capability": capability,
-        "Status_select": "Queued",
-        "Idempotency_Key": f"evt-{event_id}",
-        "Input_JSON": safe_json_dumps(input_json),
-        "Approved": True,
-        "worker": WORKER_NAME,
-        "Notes": f"Created from Supabase event {event_id}",
-    }
-
-    # Pour http_exec, on remplit aussi les champs utiles SI disponibles.
-    # Le worker peut lire Input_JSON, mais ces champs restent pratiques pour le cockpit.
-    if capability == "http_exec":
-        url = normalize_text(input_json.get("url"))
-        method = normalize_text(input_json.get("method")) or "GET"
-        headers = input_json.get("headers", {})
-
-        if not isinstance(headers, dict):
-            headers = {}
-
-        if url:
-            fields["http_target"] = url
-
-        fields["HTTP_Method"] = method.upper()
-        fields["HTTP_Headers_JSON"] = safe_json_dumps(headers)
-
-    # Si Policy définit une priorité texte/numérique côté cockpit plus tard,
-    # on pourra l'ajouter ici sans casser la base.
-
-    return clean_airtable_fields(fields)
-
-
-# ----------------------------
-# Airtable commands
-# ----------------------------
-
-def create_airtable_command(fields: Dict[str, Any]) -> Dict[str, Any]:
-    if not isinstance(fields, dict) or not fields:
-        raise ValueError("Invalid Airtable fields payload")
-
-    safe_fields = clean_airtable_fields(fields)
-    if not safe_fields:
-        raise ValueError("Airtable fields empty after cleaning")
-
-    payload = {"fields": safe_fields}
-    data = safe_json_dumps(payload).encode("utf-8")
-
-    url = (
-        f"https://api.airtable.com/v0/"
-        f"{AIRTABLE_BASE_ID}/"
-        f"{urllib.parse.quote(AIRTABLE_COMMANDS_TABLE)}"
-    )
-
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers=airtable_headers(),
-        method="POST",
-    )
-
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        body = resp.read().decode("utf-8")
-        parsed = safe_json_loads(body, {})
-
-        if not isinstance(parsed, dict):
-            raise RuntimeError("Airtable create returned non-dict response")
-
-        return parsed
-
-
-# ----------------------------
-# Main
-# ----------------------------
-
-def main() -> None:
-    require_env("SUPABASE_URL", SUPABASE_URL)
-    require_env("SUPABASE_SERVICE_ROLE_KEY", SUPABASE_SERVICE_ROLE_KEY)
-    require_env("AIRTABLE_API_KEY", AIRTABLE_API_KEY)
-    require_env("AIRTABLE_BASE_ID", AIRTABLE_BASE_ID)
-    require_env("AIRTABLE_COMMANDS_TABLE", AIRTABLE_COMMANDS_TABLE)
-    require_env("AIRTABLE_EVENT_POLICIES_TABLE", AIRTABLE_EVENT_POLICIES_TABLE)
-
-    print(f"EVENT_ENGINE_LIMIT = {EVENT_ENGINE_LIMIT}")
-    print(f"SUPABASE_EVENTS_TABLE = {SUPABASE_EVENTS_TABLE}")
-    print(f"AIRTABLE_COMMANDS_TABLE = {AIRTABLE_COMMANDS_TABLE}")
-    print(f"AIRTABLE_EVENT_POLICIES_TABLE = {AIRTABLE_EVENT_POLICIES_TABLE}")
-    print(f"WORKER_NAME = {WORKER_NAME}")
-
-    policy_records = fetch_event_policies()
-    policy_index = build_policy_index(policy_records)
-    print(f"Loaded policies: {len(policy_index)}")
-
-    events = fetch_events()
-    print(f"Fetched events: {len(events)}")
-
-    if not events:
-        print("No events to process")
-
-    created = 0
-    processed = 0
-    failed = 0
-
-    for event in events:
-        event_id = None
-
-        try:
-            if not isinstance(event, dict):
-                raise ValueError("Fetched event is not a dict")
-
-            event_id = normalize_text(event.get("id"))
-            if not event_id:
-                raise ValueError("Fetched event missing id")
-
-            event_type = normalize_text(event.get("type"))
-            if not event_type:
-                raise ValueError(f"Event {event_id} missing type")
-
-            policy = find_policy_for_event(event, policy_index)
-            if not policy:
-                raise ValueError(
-                    f"No policy found for event type={event.get('type')} source={event.get('source')}"
-                )
-
-            fields = map_event_to_command(event, policy)
-            cmd = create_airtable_command(fields)
-            cmd_id = cmd.get("id")
-
-            print(f"Created command for event {event_id} -> {cmd_id}")
-            created += 1
-
-            mark_event_processed(event_id)
-            print(f"Marked processed {event_id}")
-            processed += 1
-
-        except urllib.error.HTTPError as e:
-            err = e.read().decode("utf-8", errors="ignore")
-            print(f"HTTP error {e.code} for event {event_id}: {err}")
-            failed += 1
-
-        except Exception as e:
-            print(f"Event skipped {event_id}: {repr(e)}")
-            failed += 1
-
-    print(safe_json_dumps({
-        "ok": True,
-        "fetched": len(events),
-        "created": created,
-        "processed": processed,
-        "failed": failed,
-    }))
-
-
-if __name__ == "__main__":
-    main()
+    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_EVENTS
