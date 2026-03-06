@@ -17,8 +17,8 @@ AIRTABLE_COMMANDS_TABLE = os.getenv("AIRTABLE_COMMANDS_TABLE", "Commands").strip
 AIRTABLE_EVENT_POLICIES_TABLE = os.getenv("AIRTABLE_EVENT_POLICIES_TABLE", "Event_Policies").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
-EVENT_ENGINE_NAME = "bosai-event-engine"
 
+# Event fetch limit
 try:
     EVENT_ENGINE_LIMIT = int(os.getenv("EVENT_ENGINE_LIMIT", "10"))
 except Exception:
@@ -30,6 +30,7 @@ if EVENT_ENGINE_LIMIT <= 0:
 if EVENT_ENGINE_LIMIT > 100:
     EVENT_ENGINE_LIMIT = 100
 
+# Guardrails
 try:
     MAX_INPUT_JSON_CHARS = int(os.getenv("MAX_INPUT_JSON_CHARS", "12000"))
 except Exception:
@@ -92,25 +93,13 @@ def normalize_payload(payload: Any) -> Dict[str, Any]:
     return {}
 
 
-def normalize_bool(value: Any, default: bool = False) -> bool:
-    if isinstance(value, bool):
-        return value
-
-    text = normalize_lower(value)
-    if text in ("1", "true", "yes", "y", "on"):
-        return True
-    if text in ("0", "false", "no", "n", "off", ""):
-        return False
-    return default
-
-
 def truncate_text(value: str, limit: int) -> str:
-    value = normalize_text(value)
-    if len(value) <= limit:
-        return value
+    text = normalize_text(value)
+    if len(text) <= limit:
+        return text
     if limit <= 3:
-        return value[:limit]
-    return value[: limit - 3] + "..."
+        return text[:limit]
+    return text[: limit - 3] + "..."
 
 
 def safe_priority_number(value: Any, default: int = 100) -> int:
@@ -140,11 +129,11 @@ def airtable_headers() -> Dict[str, str]:
 
 def clean_airtable_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Garde-fous Airtable :
-    - supprime Owner
-    - supprime None
-    - supprime chaînes vides
-    - conserve False / 0 / True
+    Airtable guardrails:
+    - remove Owner
+    - remove None
+    - remove empty strings
+    - keep False / 0 / True
     """
     if not isinstance(fields, dict):
         return {}
@@ -182,6 +171,27 @@ def parse_json_object_from_text(text: str) -> Dict[str, Any]:
     return {}
 
 
+def derive_error_code(exc: Exception) -> str:
+    message = repr(exc)
+
+    if "missing valid url" in message.lower():
+        return "INVALID_URL"
+
+    if "no policy found" in message.lower():
+        return "POLICY_NOT_FOUND"
+
+    if "input_json too large" in message.lower():
+        return "INPUT_TOO_LARGE"
+
+    if "airtable create" in message.lower():
+        return "AIRTABLE_CREATE_FAILED"
+
+    if isinstance(exc, urllib.error.HTTPError):
+        return "HTTP_ERROR"
+
+    return "UNKNOWN_ERROR"
+
+
 # ----------------------------
 # Supabase events
 # ----------------------------
@@ -191,6 +201,7 @@ def fetch_events() -> List[Dict[str, Any]]:
         "select": "*",
         "processed_at": "is.null",
         "rejected_at": "is.null",
+        "dead_lettered": "eq.false",
         "order": "created_at.asc",
         "limit": str(EVENT_ENGINE_LIMIT),
     })
@@ -214,87 +225,69 @@ def fetch_events() -> List[Dict[str, Any]]:
         return [item for item in data if isinstance(item, dict)]
 
 
+def update_event(event_id: str, patch: Dict[str, Any]) -> None:
+    if not event_id:
+        raise ValueError("Missing event_id for update_event")
+
+    if not isinstance(patch, dict) or not patch:
+        raise ValueError("Missing patch for update_event")
+
+    query = urllib.parse.urlencode({
+        "id": f"eq.{event_id}"
+    })
+
+    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_EVENTS_TABLE}?{query}"
+    data = safe_json_dumps(patch).encode("utf-8")
+
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers=supabase_headers(),
+        method="PATCH",
+    )
+
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        resp.read()
+
+
 def mark_event_processed(event_id: str) -> None:
-    if not event_id:
-        raise ValueError("Missing event_id for mark_event_processed")
-
-    query = urllib.parse.urlencode({
-        "id": f"eq.{event_id}"
-    })
-
-    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_EVENTS_TABLE}?{query}"
-
-    payload = {
-        "processed_at": now_iso(),
-        "processed_by": EVENT_ENGINE_NAME,
-        "rejected_at": None,
-        "rejected_by": None,
-        "rejected_reason": None,
-        "dead_lettered": False,
-        "dead_letter_payload": None,
-    }
-
-    data = safe_json_dumps(payload).encode("utf-8")
-
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers=supabase_headers(),
-        method="PATCH",
+    update_event(
+        event_id,
+        {
+            "processed_at": now_iso(),
+            "processed_by": "bosai-event-engine",
+            "event_status": "processed",
+            "last_error_code": None,
+        },
     )
 
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        resp.read()
 
-
-def reject_event(
-    event_id: str,
-    reason: str,
-    event: Optional[Dict[str, Any]] = None,
-    dead_lettered: bool = True,
-) -> None:
-    if not event_id:
-        raise ValueError("Missing event_id for reject_event")
-
-    query = urllib.parse.urlencode({
-        "id": f"eq.{event_id}"
-    })
-
-    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_EVENTS_TABLE}?{query}"
-
-    dead_letter_payload: Dict[str, Any] = {
-        "reason": truncate_text(reason, 1000),
-        "rejected_by": EVENT_ENGINE_NAME,
-        "rejected_at": now_iso(),
-    }
-
-    if isinstance(event, dict):
-        dead_letter_payload["event_snapshot"] = {
-            "id": event.get("id"),
-            "type": event.get("type"),
-            "source": event.get("source"),
-            "payload": event.get("payload"),
-        }
-
-    payload = {
-        "rejected_at": now_iso(),
-        "rejected_by": EVENT_ENGINE_NAME,
-        "rejected_reason": truncate_text(reason, 1000),
-        "dead_lettered": bool(dead_lettered),
-        "dead_letter_payload": dead_letter_payload,
-    }
-
-    data = safe_json_dumps(payload).encode("utf-8")
-
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers=supabase_headers(),
-        method="PATCH",
+def reject_event(event_id: str, reason: str, error_code: str) -> None:
+    update_event(
+        event_id,
+        {
+            "rejected_at": now_iso(),
+            "rejected_by": "bosai-event-engine",
+            "rejected_reason": truncate_text(reason, 1000),
+            "event_status": "rejected",
+            "last_error_code": error_code,
+        },
     )
 
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        resp.read()
+
+def dead_letter_event(event_id: str, reason: str, error_code: str, payload: Dict[str, Any]) -> None:
+    update_event(
+        event_id,
+        {
+            "rejected_at": now_iso(),
+            "rejected_by": "bosai-event-engine",
+            "rejected_reason": truncate_text(reason, 1000),
+            "dead_lettered": True,
+            "dead_letter_payload": payload,
+            "event_status": "dead_lettered",
+            "last_error_code": error_code,
+        },
+    )
 
 
 # ----------------------------
@@ -326,6 +319,7 @@ def fetch_event_policies() -> List[Dict[str, Any]]:
             body = resp.read().decode("utf-8")
             data = safe_json_loads(body, {})
             records = data.get("records", [])
+
             if isinstance(records, list):
                 all_records.extend([r for r in records if isinstance(r, dict)])
 
@@ -337,6 +331,12 @@ def fetch_event_policies() -> List[Dict[str, Any]]:
 
 
 def build_policy_index(records: List[Dict[str, Any]]) -> Dict[Tuple[str, str], Dict[str, Any]]:
+    """
+    Index by:
+    (event_type, event_source)
+
+    Empty event_source = fallback for a given type.
+    """
     index: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
     for record in records:
@@ -394,11 +394,13 @@ def build_input_from_event_and_policy(
     event_type = normalize_lower(event.get("type"))
     target_input_json_raw = normalize_text(policy.get("Target_Input_JSON"))
 
+    # 1) Policy override wins if valid JSON object
     if target_input_json_raw:
         parsed = parse_json_object_from_text(target_input_json_raw)
         if parsed:
             return parsed
 
+    # 2) Smart fallback by event type
     if event_type in ("command_http_exec", "http_exec", "http_request", "command.http_exec"):
         url = normalize_text(payload.get("url"))
         if not is_valid_http_url(url):
@@ -423,6 +425,7 @@ def build_input_from_event_and_policy(
             "json": body_json,
         }
 
+    # 3) Generic fallback
     return payload
 
 
@@ -461,6 +464,7 @@ def map_event_to_command(event: Dict[str, Any], policy: Dict[str, Any]) -> Dict[
         "Notes": notes,
     }
 
+    # Useful cockpit fields for http_exec
     if capability == "http_exec":
         url = normalize_text(input_json.get("url"))
         method = normalize_upper(input_json.get("method") or "GET")
@@ -518,31 +522,6 @@ def create_airtable_command(fields: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ----------------------------
-# Dead-letter decision
-# ----------------------------
-
-def should_dead_letter(reason: str) -> bool:
-    text = normalize_lower(reason)
-
-    terminal_markers = [
-        "missing valid url",
-        "policy missing target_capability",
-        "event missing id",
-        "event missing type",
-        "input_json too large",
-        "mapped http_exec command missing valid url",
-        "invalid airtable fields payload",
-        "airtable fields empty after cleaning",
-    ]
-
-    for marker in terminal_markers:
-        if marker in text:
-            return True
-
-    return False
-
-
-# ----------------------------
 # Main
 # ----------------------------
 
@@ -587,7 +566,6 @@ def main() -> None:
     processed = 0
     failed = 0
     skipped = 0
-    dead_lettered = 0
 
     for priority, event, policy in enriched_events:
         event_id = None
@@ -598,7 +576,7 @@ def main() -> None:
 
             event_id = normalize_text(event.get("id"))
             if not event_id:
-                raise ValueError("Event missing id")
+                raise ValueError("Fetched event missing id")
 
             event_type = normalize_text(event.get("type"))
             event_source = normalize_text(event.get("source"))
@@ -607,12 +585,13 @@ def main() -> None:
                 raise ValueError(f"Event {event_id} missing type")
 
             if not policy:
-                skipped += 1
-                msg = (
-                    f"No policy found for event_id={event_id} "
-                    f"type={event_type} source={event_source}"
+                err = ValueError(
+                    f"No policy found for event_id={event_id} type={event_type} source={event_source}"
                 )
-                print(msg)
+                error_code = derive_error_code(err)
+                reject_event(event_id, repr(err), error_code)
+                print(f"Rejected event {event_id} -> {error_code}")
+                skipped += 1
                 continue
 
             fields = map_event_to_command(event, policy)
@@ -630,37 +609,29 @@ def main() -> None:
             processed += 1
 
         except urllib.error.HTTPError as e:
-            err = e.read().decode("utf-8", errors="ignore")
-            reason = f"HTTP error {e.code}: {err}"
-            print(f"HTTP error for event {event_id}: {reason}")
+            error_body = e.read().decode("utf-8", errors="ignore")
+            error_code = derive_error_code(e)
+            dead_letter_event(
+                event_id=event_id or "",
+                reason=f"HTTP error {e.code}: {error_body}",
+                error_code=error_code,
+                payload={
+                    "http_status": e.code,
+                    "body": truncate_text(error_body, 4000),
+                },
+            )
+            print(f"Dead-lettered event {event_id} -> {error_code}")
             failed += 1
-
-            if event_id and should_dead_letter(reason):
-                reject_event(
-                    event_id=event_id,
-                    reason=reason,
-                    event=event,
-                    dead_lettered=True,
-                )
-                dead_lettered += 1
-                print(f"Dead-lettered event {event_id}")
 
         except Exception as e:
-            reason = repr(e)
-            print(f"Event failed {event_id}: {reason}")
+            error_code = derive_error_code(e)
+            reject_event(
+                event_id=event_id or "",
+                reason=repr(e),
+                error_code=error_code,
+            )
+            print(f"Rejected event {event_id} -> {error_code}")
             failed += 1
-
-            if event_id and should_dead_letter(reason):
-                reject_event(
-                    event_id=event_id,
-                    reason=reason,
-                    event=event,
-                    dead_lettered=True,
-                )
-                dead_lettered += 1
-                print(f"Dead-lettered event {event_id}")
-            else:
-                skipped += 1
 
     print(safe_json_dumps({
         "ok": True,
@@ -669,7 +640,6 @@ def main() -> None:
         "processed": processed,
         "failed": failed,
         "skipped": skipped,
-        "dead_lettered": dead_lettered,
     }))
 
 
