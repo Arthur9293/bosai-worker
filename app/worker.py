@@ -1793,6 +1793,98 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         idem = str(fields.get("Idempotency_Key", "")).strip() or f"cmd:{cid}:{capability}"
         cmd_input = _compose_command_input(fields)
 
+
+                idem = str(fields.get("Idempotency_Key", "")).strip() or f"cmd:{cid}:{capability}"
+        cmd_input = _compose_command_input(fields)
+
+        # SAFE guardrail for http_exec:
+        # fail clearly before capability call if command has no usable URL
+        if capability == "http_exec":
+            resolved_url = (
+                str(cmd_input.get("url", "") or "").strip()
+                or str(cmd_input.get("http_target", "") or "").strip()
+                or str(cmd_input.get("URL", "") or "").strip()
+            )
+            if not resolved_url:
+                msg = "HTTP_EXEC missing url (Input_JSON.url / http_target / URL)"
+                failed += 1
+
+                try:
+                    retry_count = int(fields.get("Retry_Count", 0) or 0)
+                except Exception:
+                    retry_count = 0
+                try:
+                    retry_max = int(fields.get("Retry_Max", 0) or 0)
+                except Exception:
+                    retry_max = 0
+
+                if POLICY_RETRY_LIMIT > 0:
+                    retry_max = POLICY_RETRY_LIMIT
+                elif retry_max <= 0:
+                    retry_max = 3
+
+                if retry_count < retry_max:
+                    next_at = _compute_next_retry_at(fields)
+                    _airtable_update_best_effort(
+                        COMMANDS_TABLE_NAME,
+                        cid,
+                        [
+                            {
+                                "Status_select": "Retry",
+                                "Retry_Count": retry_count + 1,
+                                "Next_Retry_At": next_at,
+                                "Last_Error": msg,
+                                "Error_Message": msg,
+                                "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
+                                "Linked_Run": [run_record_id],
+                                "Is_Locked": False,
+                                "Lock_Expires_At": None,
+                                "Lock_Token": "",
+                            },
+                            {
+                                "Status_select": "Retry",
+                                "Retry_Count": retry_count + 1,
+                                "Next_Retry_At": next_at,
+                                "Last_Error": msg,
+                                "Error_Message": msg,
+                                "Linked_Run": [run_record_id],
+                            },
+                            {
+                                "Status_select": "Error",
+                                "Error_Message": msg,
+                                "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
+                                "Linked_Run": [run_record_id],
+                            },
+                        ],
+                    )
+                else:
+                    _airtable_update_best_effort(
+                        COMMANDS_TABLE_NAME,
+                        cid,
+                        [
+                            {
+                                "Status_select": "Dead",
+                                "Last_Error": msg,
+                                "Error_Message": msg,
+                                "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
+                                "Linked_Run": [run_record_id],
+                                "Is_Locked": False,
+                                "Lock_Expires_At": None,
+                                "Lock_Token": "",
+                            },
+                            {"Status_select": "Dead", "Last_Error": msg, "Linked_Run": [run_record_id]},
+                            {"Status_select": "Error", "Error_Message": msg, "Linked_Run": [run_record_id]},
+                        ],
+                    )
+
+                _release_command_lock_best_effort(cid)
+                errors.append(f"{cid}: {msg}")
+                continue
+
+        now = utc_now_iso()
+
+
+
         now = utc_now_iso()
         ttl_min = _command_lock_ttl_min()
         lock_token = _new_lock_token()
