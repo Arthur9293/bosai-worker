@@ -29,6 +29,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.capabilities.http_exec import capability_http_exec as capability_http_exec_impl
+from app.policies import get_policies
 
 # ============================================================
 # Env / settings
@@ -86,6 +87,52 @@ STATE_LOCK_EXPIRED = os.getenv("STATE_LOCK_EXPIRED", "Expired").strip()
 HTTP_EXEC_ALLOWLIST_RAW = os.getenv("HTTP_EXEC_ALLOWLIST", "").strip()
 HTTP_EXEC_TARGETS_JSON = os.getenv("HTTP_EXEC_TARGETS_JSON", "").strip()
 TOOLCATALOG_ENFORCE_HTTP_EXEC = (os.getenv("TOOLCATALOG_ENFORCE_HTTP_EXEC", "1").strip() != "0")
+
+# ============================================================
+# Policies (SAFE, defaults-first)
+# ============================================================
+
+POLICIES = get_policies() or {}
+
+def _policy_get(name: str, default: Any) -> Any:
+    try:
+        value = POLICIES.get(name, default)
+        return default if value is None else value
+    except Exception:
+        return default
+
+def _policy_get_bool(name: str, default: bool) -> bool:
+    value = _policy_get(name, default)
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    s = str(value).strip().lower()
+    if s in ("1", "true", "yes", "y", "on"):
+        return True
+    if s in ("0", "false", "no", "n", "off"):
+        return False
+    return default
+
+def _policy_get_int(name: str, default: int) -> int:
+    try:
+        return int(_policy_get(name, default))
+    except Exception:
+        return default
+
+def _policy_get_float(name: str, default: float) -> float:
+    try:
+        return float(_policy_get(name, default))
+    except Exception:
+        return default
+
+POLICY_MAX_TOOL_CALLS = _policy_get_int("MAX_TOOL_CALLS", 0)
+POLICY_RETRY_LIMIT = _policy_get_int("RETRY_LIMIT", 0)
+POLICY_LOCK_TTL_MINUTES = _policy_get_int("LOCK_TTL_MINUTES", 0)
+POLICY_SLA_WARNING_THRESHOLD_MIN = _policy_get_float("SLA_WARNING_THRESHOLD_MIN", SLA_WARNING_THRESHOLD_MIN)
+POLICY_APPROVAL_REQUIRED_FOR_WRITE = _policy_get_bool("APPROVAL_REQUIRED_FOR_WRITE", False)
+POLICY_REDACT_SECRETS_IN_LOGS = _policy_get_bool("REDACT_SECRETS_IN_LOGS", True)
+POLICY_STORE_TOOL_TRACE = _policy_get_bool("STORE_TOOL_TRACE", False)
 
 # ============================================================
 # FastAPI
@@ -389,6 +436,8 @@ def _new_lock_token() -> str:
 
 def _command_lock_ttl_min() -> int:
     try:
+        if POLICY_LOCK_TTL_MINUTES and POLICY_LOCK_TTL_MINUTES > 0:
+            return POLICY_LOCK_TTL_MINUTES
         v = int(COMMAND_LOCK_TTL_MIN or 10)
         return v if v > 0 else 10
     except Exception:
@@ -414,6 +463,9 @@ def _compute_next_retry_at(fields: Dict[str, Any]) -> str:
         count = int(fields.get("Retry_Count", 0) or 0)
     except Exception:
         count = 0
+
+    if POLICY_RETRY_LIMIT > 0 and count > POLICY_RETRY_LIMIT:
+        count = POLICY_RETRY_LIMIT
 
     if base <= 0:
         base = 60
@@ -659,9 +711,10 @@ def capability_health_tick(req: RunRequest, run_record_id: str) -> Dict[str, Any
 
 
 def _sla_status_for_remaining(remaining_min: float) -> str:
+    warning_threshold = POLICY_SLA_WARNING_THRESHOLD_MIN
     if remaining_min <= 0:
         return SLA_STATUS_BREACHED
-    if remaining_min <= SLA_WARNING_THRESHOLD_MIN:
+    if remaining_min <= warning_threshold:
         return SLA_STATUS_WARNING
     return SLA_STATUS_OK
 
@@ -729,7 +782,6 @@ def capability_escalation_engine(req: RunRequest, run_record_id: str) -> Dict[st
     if limit > 500:
         limit = 500
 
-    # default: only breached
     only_breached = bool(inp.get("only_breached", True))
 
     records = airtable_list_view(LOGS_ERRORS_TABLE_NAME, LOGS_ERRORS_VIEW_NAME, max_records=limit)
@@ -1042,7 +1094,6 @@ def capability_lock_recovery(req: RunRequest, run_record_id: str) -> Dict[str, A
 
     view_name = (req.view or COMMANDS_VIEW_NAME or "Queue").strip()
 
-    # Prefer formula via Is_Lock_Stale if you have it; fallback if not.
     formula = (
         "OR("
         "{Is_Lock_Stale}=1,"
@@ -1077,12 +1128,10 @@ def capability_lock_recovery(req: RunRequest, run_record_id: str) -> Dict[str, A
         fields = r.get("fields", {}) or {}
         status = _read_command_status(fields)
 
-        # Only touch obviously stuck cases
         if status not in ("Running", "Queued", "Retry"):
             skipped += 1
             continue
 
-        # If it’s Running but not locked, ignore
         is_locked = fields.get("Is_Locked")
         if status == "Running" and is_locked is not True:
             skipped += 1
@@ -1123,7 +1172,6 @@ def capability_lock_recovery(req: RunRequest, run_record_id: str) -> Dict[str, A
             failed += 1
             errors.append(f"{cid}: {res.get('error')}")
 
-        # Ensure lock fields cleared if partially updated
         _release_command_lock_best_effort(cid)
 
     return {
@@ -1139,6 +1187,9 @@ def capability_lock_recovery(req: RunRequest, run_record_id: str) -> Dict[str, A
 
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     max_cmds = int(req.max_commands or 0) or 5
+    if POLICY_MAX_TOOL_CALLS > 0:
+        max_cmds = min(max_cmds, POLICY_MAX_TOOL_CALLS)
+
     view_name = (req.view or COMMANDS_VIEW_NAME or "Queue").strip()
 
     formula = (
@@ -1217,6 +1268,25 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             )
             _release_command_lock_best_effort(cid)
             continue
+
+        if POLICY_APPROVAL_REQUIRED_FOR_WRITE and capability in ("http_exec", "state_put"):
+            approved = fields.get("Approved")
+            if approved is not True:
+                blocked += 1
+                _airtable_update_best_effort(
+                    COMMANDS_TABLE_NAME,
+                    cid,
+                    [
+                        {
+                            "Status_select": "Blocked",
+                            "Error_Message": "Approval required by policy",
+                            "Linked_Run": [run_record_id],
+                        },
+                        {"Status_select": "Blocked"},
+                    ],
+                )
+                _release_command_lock_best_effort(cid)
+                continue
 
         idem = str(fields.get("Idempotency_Key", "")).strip() or f"cmd:{cid}:{capability}"
         cmd_input = _compose_command_input(fields)
@@ -1340,7 +1410,10 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                 retry_max = int(fields.get("Retry_Max", 0) or 0)
             except Exception:
                 retry_max = 0
-            if retry_max <= 0:
+
+            if POLICY_RETRY_LIMIT > 0:
+                retry_max = POLICY_RETRY_LIMIT
+            elif retry_max <= 0:
                 retry_max = 3
 
             if retry_count < retry_max:
@@ -1407,7 +1480,10 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                 retry_max = int(fields.get("Retry_Max", 0) or 0)
             except Exception:
                 retry_max = 0
-            if retry_max <= 0:
+
+            if POLICY_RETRY_LIMIT > 0:
+                retry_max = POLICY_RETRY_LIMIT
+            elif retry_max <= 0:
                 retry_max = 3
 
             if retry_count < retry_max:
@@ -1477,7 +1553,6 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         "errors": errors[:10],
     }
 
-    # Optional post-ops controlled by flags in input
     inp2 = req.input or {}
     post_ops: Dict[str, Any] = {}
     if bool(inp2.get("run_retry_queue")):
@@ -1506,7 +1581,7 @@ CAPABILITIES = {
     "health_tick": capability_health_tick,
     "commands_tick": capability_commands_tick,
     "sla_machine": capability_sla_machine,
-    "escalation_engine": capability_escalation_engine,  # NEW
+    "escalation_engine": capability_escalation_engine,
     "http_exec": capability_http_exec,
     "state_get": capability_state_get,
     "state_put": capability_state_put,
@@ -1536,6 +1611,8 @@ def health() -> Dict[str, Any]:
         "version": APP_VERSION,
         "worker": WORKER_NAME,
         "capabilities": sorted(list(CAPABILITIES.keys())),
+        "policies_loaded": bool(POLICIES),
+        "policy_keys": sorted(list(POLICIES.keys())) if isinstance(POLICIES, dict) else [],
         "ts": utc_now_iso(),
     }
 
@@ -1557,6 +1634,8 @@ def health_score() -> Dict[str, Any]:
         issues.append("http_exec_no_alias_targets")
     if TOOLCATALOG_ENFORCE_HTTP_EXEC:
         issues.append("toolcatalog_http_exec_enforced")
+    if POLICIES:
+        issues.append("policies_loaded")
     return {"ok": True, "score": max(0, score), "issues": issues, "ts": utc_now_iso()}
 
 
