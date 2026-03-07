@@ -48,11 +48,12 @@ LOGS_ERRORS_TABLE_NAME = os.getenv("LOGS_ERRORS_TABLE_NAME", "Logs_Erreurs").str
 STATE_TABLE_NAME = os.getenv("STATE_TABLE_NAME", "State").strip()
 TOOLCATALOG_TABLE_NAME = os.getenv("TOOLCATALOG_TABLE_NAME", "ToolCatalog").strip()
 EVENTS_TABLE_NAME = os.getenv("EVENTS_TABLE_NAME", "Events").strip()
-EVENTS_DASHBOARD_VIEW_NAME = os.getenv("EVENTS_DASHBOARD_VIEW_NAME", EVENTS_VIEW_NAME or "Grid view").strip()
 
 LOGS_ERRORS_VIEW_NAME = os.getenv("LOGS_ERRORS_VIEW_NAME", "Active").strip()
 COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 EVENTS_VIEW_NAME = os.getenv("EVENTS_VIEW_NAME", "Queue").strip()
+EVENTS_DASHBOARD_VIEW_NAME = os.getenv("EVENTS_DASHBOARD_VIEW_NAME", EVENTS_VIEW_NAME or "Grid view").strip()
+
 
 # SAFE read-only dashboard view settings
 SYSTEM_RUNS_VIEW_NAME = os.getenv("SYSTEM_RUNS_VIEW_NAME", "Grid view").strip()
@@ -1790,14 +1791,9 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                 )
                 _release_command_lock_best_effort(cid)
                 continue
-
+                
         idem = str(fields.get("Idempotency_Key", "")).strip() or f"cmd:{cid}:{capability}"
         cmd_input = _compose_command_input(fields)
-
-
-        idem = str(fields.get("Idempotency_Key", "")).strip() or f"cmd:{cid}:{capability}"
-        cmd_input = _compose_command_input(fields)
-
         # SAFE guardrail for http_exec:
         # fail clearly before capability call if command has no usable URL
         if capability == "http_exec":
@@ -1881,10 +1877,6 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                 _release_command_lock_best_effort(cid)
                 errors.append(f"{cid}: {msg}")
                 continue
-
-        now = utc_now_iso()
-
-
 
         now = utc_now_iso()
         ttl_min = _command_lock_ttl_min()
@@ -2260,7 +2252,7 @@ def health_score() -> Dict[str, Any]:
 @app.get("/runs")
 def get_runs(limit: int = 20) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=20, minimum=1, maximum=100)
-    records, meta = _safe_records_from_view(EVENTS_TABLE_NAME, EVENTS_DASHBOARD_VIEW_NAME, limit)
+   records, meta = _safe_records_from_view(SYSTEM_RUNS_TABLE_NAME, SYSTEM_RUNS_VIEW_NAME, limit)
     runs: List[Dict[str, Any]] = []
     stats = {
         "running": 0,
