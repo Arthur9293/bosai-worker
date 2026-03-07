@@ -1,12 +1,15 @@
-# app/worker.py — BOSAI Worker (v2.5.3)
-# SAFE PATCH over your v2.5.2:
-# - Adds CORS support without changing existing worker behavior
-# - Keeps auth/idempotency/locks/retry logic unchanged
-# - Keeps escalation_engine intact
-# - Uses safe defaults:
-#   * allow_origins="*" by default
-#   * allow_credentials=false by default
-#   * configurable via env if needed
+# app/worker.py — BOSAI Worker (v2.5.4)
+# SAFE PATCH over your v2.5.3:
+# - Keeps existing behavior intact (auth/idempotency/locks/retry/CORS unchanged)
+# - Adds READ-ONLY dashboard endpoints:
+#   * GET /runs
+#   * GET /commands
+#   * GET /sla
+# - Uses guardrails:
+#   * no write side-effects in new endpoints
+#   * no crash if Airtable env missing
+#   * no crash if view missing / formula invalid / fields absent
+#   * best-effort fallback to empty payloads with diagnostic info
 
 import os
 import json
@@ -43,9 +46,14 @@ TOOLCATALOG_TABLE_NAME = os.getenv("TOOLCATALOG_TABLE_NAME", "ToolCatalog").stri
 LOGS_ERRORS_VIEW_NAME = os.getenv("LOGS_ERRORS_VIEW_NAME", "Active").strip()
 COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 
+# SAFE read-only dashboard view settings
+SYSTEM_RUNS_VIEW_NAME = os.getenv("SYSTEM_RUNS_VIEW_NAME", "Grid view").strip()
+COMMANDS_DASHBOARD_VIEW_NAME = os.getenv("COMMANDS_DASHBOARD_VIEW_NAME", COMMANDS_VIEW_NAME or "Queue").strip()
+SLA_DASHBOARD_VIEW_NAME = os.getenv("SLA_DASHBOARD_VIEW_NAME", LOGS_ERRORS_VIEW_NAME or "Active").strip()
+
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.5.3").strip()
+APP_VERSION = os.getenv("APP_VERSION", "2.5.4").strip()
 
 RUN_MAX_SECONDS = float((os.getenv("RUN_MAX_SECONDS", "30") or "30").strip())
 HTTP_TIMEOUT_SECONDS = float((os.getenv("HTTP_TIMEOUT_SECONDS", "20") or "20").strip())
@@ -428,6 +436,36 @@ def _is_truthy(v: Any) -> bool:
     return s in ("1", "true", "yes", "y", "on")
 
 
+def _safe_limit(raw_limit: int, default: int, minimum: int = 1, maximum: int = 200) -> int:
+    try:
+        v = int(raw_limit)
+    except Exception:
+        v = default
+    if v < minimum:
+        return default
+    if v > maximum:
+        return maximum
+    return v
+
+
+def _safe_records_from_view(table_name: str, view_name: str, limit: int) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    SAFE read helper:
+    - never crashes the endpoint
+    - returns [] + diagnostic metadata on failure
+    """
+    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+        return [], {"ok": False, "reason": "airtable_env_missing", "table": table_name, "view": view_name}
+
+    try:
+        records = airtable_list_view(table_name, view_name, max_records=limit)
+        return records, {"ok": True, "table": table_name, "view": view_name}
+    except HTTPException as e:
+        return [], {"ok": False, "reason": "airtable_read_failed", "detail": str(e.detail), "table": table_name, "view": view_name}
+    except Exception as e:
+        return [], {"ok": False, "reason": "exception", "detail": repr(e), "table": table_name, "view": view_name}
+
+
 # ============================================================
 # Commands idempotency protection (SAFE)
 # ============================================================
@@ -792,10 +830,6 @@ def capability_sla_machine(req: RunRequest, run_record_id: str) -> Dict[str, Any
 
     return {"ok": True, "updated": updated, "skipped": skipped, "errors_count": len(errors), "errors": errors[:10]}
 
-
-# ============================================================
-# NEW: Escalation Engine (SAFE, best-effort)
-# ============================================================
 
 def capability_escalation_engine(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     """
@@ -1650,6 +1684,11 @@ def health() -> Dict[str, Any]:
             "expose_headers": CORS_EXPOSE_HEADERS,
             "allow_credentials": CORS_ALLOW_CREDENTIALS,
         },
+        "dashboard_views": {
+            "system_runs_view": SYSTEM_RUNS_VIEW_NAME,
+            "commands_dashboard_view": COMMANDS_DASHBOARD_VIEW_NAME,
+            "sla_dashboard_view": SLA_DASHBOARD_VIEW_NAME,
+        },
         "ts": utc_now_iso(),
     }
 
@@ -1674,6 +1713,187 @@ def health_score() -> Dict[str, Any]:
     if POLICIES:
         issues.append("policies_loaded")
     return {"ok": True, "score": max(0, score), "issues": issues, "ts": utc_now_iso()}
+
+
+# ============================================================
+# READ-ONLY dashboard endpoints (SAFE)
+# ============================================================
+
+@app.get("/runs")
+def get_runs(limit: int = 20) -> Dict[str, Any]:
+    limit = _safe_limit(limit, default=20, minimum=1, maximum=100)
+    records, meta = _safe_records_from_view(SYSTEM_RUNS_TABLE_NAME, SYSTEM_RUNS_VIEW_NAME, limit)
+
+    runs: List[Dict[str, Any]] = []
+    stats = {
+        "running": 0,
+        "done": 0,
+        "error": 0,
+        "unsupported": 0,
+        "other": 0,
+    }
+
+    for r in records:
+        f = r.get("fields", {}) or {}
+        status = str(f.get("Status_select", "") or "").strip()
+
+        if status == "Running":
+            stats["running"] += 1
+        elif status == "Done":
+            stats["done"] += 1
+        elif status == "Error":
+            stats["error"] += 1
+        elif status == "Unsupported":
+            stats["unsupported"] += 1
+        else:
+            stats["other"] += 1
+
+        runs.append(
+            {
+                "id": r.get("id"),
+                "run_id": f.get("Run_ID"),
+                "worker": f.get("Worker"),
+                "capability": f.get("Capability"),
+                "status": status,
+                "priority": f.get("Priority"),
+                "started_at": f.get("Started_At"),
+                "finished_at": f.get("Finished_At"),
+                "dry_run": f.get("Dry_Run"),
+            }
+        )
+
+    return {
+        "ok": bool(meta.get("ok")),
+        "source": meta,
+        "count": len(runs),
+        "stats": stats,
+        "runs": runs,
+        "ts": utc_now_iso(),
+    }
+
+
+@app.get("/commands")
+def get_commands(limit: int = 30) -> Dict[str, Any]:
+    limit = _safe_limit(limit, default=30, minimum=1, maximum=100)
+    records, meta = _safe_records_from_view(COMMANDS_TABLE_NAME, COMMANDS_DASHBOARD_VIEW_NAME, limit)
+
+    commands: List[Dict[str, Any]] = []
+    stats = {
+        "queued": 0,
+        "running": 0,
+        "retry": 0,
+        "done": 0,
+        "dead": 0,
+        "blocked": 0,
+        "unsupported": 0,
+        "error": 0,
+        "other": 0,
+    }
+
+    for r in records:
+        f = r.get("fields", {}) or {}
+        status = _read_command_status(f)
+
+        key = status.lower()
+        if key == "queued" or key == "queue":
+            stats["queued"] += 1
+        elif key == "running":
+            stats["running"] += 1
+        elif key == "retry":
+            stats["retry"] += 1
+        elif key == "done":
+            stats["done"] += 1
+        elif key == "dead":
+            stats["dead"] += 1
+        elif key == "blocked":
+            stats["blocked"] += 1
+        elif key == "unsupported":
+            stats["unsupported"] += 1
+        elif key == "error":
+            stats["error"] += 1
+        else:
+            stats["other"] += 1
+
+        commands.append(
+            {
+                "id": r.get("id"),
+                "capability": f.get("Capability"),
+                "status": status,
+                "priority": f.get("Priority"),
+                "retry_count": f.get("Retry_Count"),
+                "retry_max": f.get("Retry_Max"),
+                "scheduled_at": f.get("Scheduled_At"),
+                "next_retry_at": f.get("Next_Retry_At"),
+                "is_locked": f.get("Is_Locked"),
+                "locked_by": f.get("Locked_By"),
+                "idempotency_key": f.get("Idempotency_Key"),
+            }
+        )
+
+    return {
+        "ok": bool(meta.get("ok")),
+        "source": meta,
+        "count": len(commands),
+        "stats": stats,
+        "commands": commands,
+        "ts": utc_now_iso(),
+    }
+
+
+@app.get("/sla")
+def get_sla(limit: int = 50) -> Dict[str, Any]:
+    limit = _safe_limit(limit, default=50, minimum=1, maximum=200)
+    records, meta = _safe_records_from_view(LOGS_ERRORS_TABLE_NAME, SLA_DASHBOARD_VIEW_NAME, limit)
+
+    incidents: List[Dict[str, Any]] = []
+    stats = {
+        "ok": 0,
+        "warning": 0,
+        "breached": 0,
+        "escalated": 0,
+        "unknown": 0,
+        "escalation_queued": 0,
+    }
+
+    for r in records:
+        f = r.get("fields", {}) or {}
+        status = str(f.get("SLA_Status", "") or "").strip()
+
+        if status == SLA_STATUS_OK:
+            stats["ok"] += 1
+        elif status == SLA_STATUS_WARNING:
+            stats["warning"] += 1
+        elif status == SLA_STATUS_BREACHED:
+            stats["breached"] += 1
+        elif status == SLA_STATUS_ESCALATED:
+            stats["escalated"] += 1
+        else:
+            stats["unknown"] += 1
+
+        escalation_queued = _is_truthy(f.get("Escalation_Queued"))
+        if escalation_queued:
+            stats["escalation_queued"] += 1
+
+        incidents.append(
+            {
+                "id": r.get("id"),
+                "name": f.get("Name"),
+                "sla_status": status,
+                "sla_remaining_minutes": f.get("SLA_Remaining_Minutes"),
+                "escalation_queued": escalation_queued,
+                "last_sla_check": f.get("Last_SLA_Check"),
+                "linked_run": f.get("Linked_Run"),
+            }
+        )
+
+    return {
+        "ok": bool(meta.get("ok")),
+        "source": meta,
+        "count": len(incidents),
+        "stats": stats,
+        "incidents": incidents,
+        "ts": utc_now_iso(),
+    }
 
 
 @app.post("/run", response_model=RunResponse)
