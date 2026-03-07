@@ -1794,7 +1794,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         cmd_input = _compose_command_input(fields)
 
 
-                idem = str(fields.get("Idempotency_Key", "")).strip() or f"cmd:{cid}:{capability}"
+        idem = str(fields.get("Idempotency_Key", "")).strip() or f"cmd:{cid}:{capability}"
         cmd_input = _compose_command_input(fields)
 
         # SAFE guardrail for http_exec:
