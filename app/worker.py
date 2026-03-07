@@ -48,6 +48,7 @@ LOGS_ERRORS_TABLE_NAME = os.getenv("LOGS_ERRORS_TABLE_NAME", "Logs_Erreurs").str
 STATE_TABLE_NAME = os.getenv("STATE_TABLE_NAME", "State").strip()
 TOOLCATALOG_TABLE_NAME = os.getenv("TOOLCATALOG_TABLE_NAME", "ToolCatalog").strip()
 EVENTS_TABLE_NAME = os.getenv("EVENTS_TABLE_NAME", "Events").strip()
+EVENTS_DASHBOARD_VIEW_NAME = os.getenv("EVENTS_DASHBOARD_VIEW_NAME", EVENTS_VIEW_NAME or "Grid view").strip()
 
 LOGS_ERRORS_VIEW_NAME = os.getenv("LOGS_ERRORS_VIEW_NAME", "Active").strip()
 COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
@@ -2220,11 +2221,12 @@ def health() -> Dict[str, Any]:
             "expose_headers": CORS_EXPOSE_HEADERS,
             "allow_credentials": CORS_ALLOW_CREDENTIALS,
         },
-        "dashboard_views": {
+       "dashboard_views": {
             "system_runs_view": SYSTEM_RUNS_VIEW_NAME,
             "commands_dashboard_view": COMMANDS_DASHBOARD_VIEW_NAME,
             "sla_dashboard_view": SLA_DASHBOARD_VIEW_NAME,
-        },
+            "events_dashboard_view": EVENTS_DASHBOARD_VIEW_NAME,
+       },
         "ts": utc_now_iso(),
     }
 
@@ -2258,8 +2260,7 @@ def health_score() -> Dict[str, Any]:
 @app.get("/runs")
 def get_runs(limit: int = 20) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=20, minimum=1, maximum=100)
-    records, meta = _safe_records_from_view(SYSTEM_RUNS_TABLE_NAME, SYSTEM_RUNS_VIEW_NAME, limit)
-
+    records, meta = _safe_records_from_view(EVENTS_TABLE_NAME, EVENTS_DASHBOARD_VIEW_NAME, limit)
     runs: List[Dict[str, Any]] = []
     stats = {
         "running": 0,
