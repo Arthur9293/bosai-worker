@@ -1,15 +1,20 @@
-# app/worker.py — BOSAI Worker (v2.5.4)
-# SAFE PATCH over your v2.5.3:
+# app/worker.py — BOSAI Worker (v2.5.5)
+# SAFE PATCH over your v2.5.4:
 # - Keeps existing behavior intact (auth/idempotency/locks/retry/CORS unchanged)
-# - Adds READ-ONLY dashboard endpoints:
+# - Keeps existing /run and command_orchestrator behavior intact
+# - Keeps READ-ONLY dashboard endpoints intact:
 #   * GET /runs
 #   * GET /commands
 #   * GET /sla
-# - Uses guardrails:
-#   * no write side-effects in new endpoints
+# - Adds Event Engine v1:
+#   * new Airtable table: Events
+#   * new env vars: EVENTS_TABLE_NAME, EVENTS_VIEW_NAME
+#   * new capability: event_engine
+# - Event Engine guardrails:
 #   * no crash if Airtable env missing
-#   * no crash if view missing / formula invalid / fields absent
-#   * best-effort fallback to empty payloads with diagnostic info
+#   * no crash if fields absent / payload empty / view missing
+#   * best-effort create/update
+#   * anti-duplicate via deterministic command idempotency key per event
 
 import os
 import json
@@ -42,9 +47,11 @@ COMMANDS_TABLE_NAME = os.getenv("COMMANDS_TABLE_NAME", "Commands").strip()
 LOGS_ERRORS_TABLE_NAME = os.getenv("LOGS_ERRORS_TABLE_NAME", "Logs_Erreurs").strip()
 STATE_TABLE_NAME = os.getenv("STATE_TABLE_NAME", "State").strip()
 TOOLCATALOG_TABLE_NAME = os.getenv("TOOLCATALOG_TABLE_NAME", "ToolCatalog").strip()
+EVENTS_TABLE_NAME = os.getenv("EVENTS_TABLE_NAME", "Events").strip()
 
 LOGS_ERRORS_VIEW_NAME = os.getenv("LOGS_ERRORS_VIEW_NAME", "Active").strip()
 COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
+EVENTS_VIEW_NAME = os.getenv("EVENTS_VIEW_NAME", "Queue").strip()
 
 # SAFE read-only dashboard view settings
 SYSTEM_RUNS_VIEW_NAME = os.getenv("SYSTEM_RUNS_VIEW_NAME", "Grid view").strip()
@@ -53,7 +60,7 @@ SLA_DASHBOARD_VIEW_NAME = os.getenv("SLA_DASHBOARD_VIEW_NAME", LOGS_ERRORS_VIEW_
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.5.4").strip()
+APP_VERSION = os.getenv("APP_VERSION", "2.5.5").strip()
 
 RUN_MAX_SECONDS = float((os.getenv("RUN_MAX_SECONDS", "30") or "30").strip())
 HTTP_TIMEOUT_SECONDS = float((os.getenv("HTTP_TIMEOUT_SECONDS", "20") or "20").strip())
@@ -497,6 +504,21 @@ def find_done_command_by_idem(idem_key: str, exclude_record_id: str) -> Optional
         return None
 
 
+def find_command_by_idem(idem_key: str) -> Optional[Dict[str, Any]]:
+    """
+    Find any existing command by deterministic idempotency key.
+    SAFE: returns None on any Airtable error.
+    """
+    try:
+        idem = _at_escape(idem_key)
+        if not idem:
+            return None
+        formula = f"{{Idempotency_Key}}='{idem}'"
+        return airtable_find_first(COMMANDS_TABLE_NAME, formula=formula, max_records=1)
+    except Exception:
+        return None
+
+
 # ============================================================
 # Commands Lock / Retry helpers (SAFE, best-effort)
 # ============================================================
@@ -562,6 +584,23 @@ def _airtable_update_best_effort(table_name: str, record_id: str, candidates: Li
             last_err = repr(e)
             continue
     return {"ok": False, "error": last_err or "update_failed"}
+
+
+def _airtable_create_best_effort(table_name: str, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    last_err: Optional[str] = None
+    for fields in candidates:
+        if not fields:
+            continue
+        try:
+            record_id = airtable_create(table_name, fields)
+            return {"ok": True, "record_id": record_id, "applied_fields": list(fields.keys())}
+        except HTTPException as e:
+            last_err = str(e.detail)
+            continue
+        except Exception as e:
+            last_err = repr(e)
+            continue
+    return {"ok": False, "error": last_err or "create_failed"}
 
 
 def _release_command_lock_best_effort(command_id: str) -> None:
@@ -768,6 +807,218 @@ def lock_release(lock_key: str, holder: str) -> Dict[str, Any]:
         },
     )
     return {"ok": True, "released": True, "record_id": rec["id"]}
+
+
+# ============================================================
+# Event Engine helpers (SAFE, deterministic)
+# ============================================================
+
+EVENT_TYPE_TO_CAPABILITY: Dict[str, str] = {
+    "sla.breached": "escalation_engine",
+    "command.stale_lock": "lock_recovery",
+    "system.health.check": "health_tick",
+    "http.call.requested": "http_exec",
+}
+
+
+def _event_target_capability(event_type: str) -> Optional[str]:
+    return EVENT_TYPE_TO_CAPABILITY.get(str(event_type or "").strip())
+
+
+def _event_command_idem(event_id: str, target_capability: str) -> str:
+    return f"event:{event_id}:{target_capability}"
+
+
+def _event_has_linked_command(fields: Dict[str, Any]) -> bool:
+    linked = fields.get("Linked_Command")
+    if isinstance(linked, list) and len(linked) > 0:
+        return True
+    if linked:
+        return True
+    return False
+
+
+def _event_payload(fields: Dict[str, Any]) -> Dict[str, Any]:
+    payload = _json_load_maybe(fields.get("Payload_JSON"))
+    if isinstance(payload, dict):
+        return payload
+    return {}
+
+
+def _event_status(fields: Dict[str, Any]) -> str:
+    return str(fields.get("Status", fields.get("Status_select", "")) or "").strip()
+
+
+def _build_command_fields_candidates(
+    capability: str,
+    idem_key: str,
+    input_obj: Dict[str, Any],
+    run_record_id: str,
+    event_id: str,
+    event_type: str,
+) -> List[Dict[str, Any]]:
+    input_json = json.dumps(input_obj or {}, ensure_ascii=False)
+    now = utc_now_iso()
+
+    return [
+        {
+            "Capability": capability,
+            "Status_select": "Queued",
+            "Idempotency_Key": idem_key,
+            "Input_JSON": input_json,
+            "Linked_Run": [run_record_id],
+            "Source_Event_ID": event_id,
+            "Event_Type": event_type,
+            "Scheduled_At": now,
+        },
+        {
+            "Capability": capability,
+            "Status_select": "Queued",
+            "Idempotency_Key": idem_key,
+            "Input_JSON": input_json,
+            "Linked_Run": [run_record_id],
+            "Source_Event_ID": event_id,
+            "Event_Type": event_type,
+        },
+        {
+            "Capability": capability,
+            "Status_select": "Queued",
+            "Idempotency_Key": idem_key,
+            "Input_JSON": input_json,
+            "Linked_Run": [run_record_id],
+        },
+        {
+            "Capability": capability,
+            "Status_select": "Queued",
+            "Idempotency_Key": idem_key,
+            "Input_JSON": input_json,
+        },
+        {
+            "Capability": capability,
+            "Status_select": "Queued",
+            "Idempotency_Key": idem_key,
+        },
+    ]
+
+
+def _mark_event_processed_best_effort(event_id: str, command_record_id: str, capability: str) -> Dict[str, Any]:
+    now = utc_now_iso()
+    return _airtable_update_best_effort(
+        EVENTS_TABLE_NAME,
+        event_id,
+        [
+            {
+                "Status": "Processed",
+                "Command_Created": True,
+                "Linked_Command": [command_record_id],
+                "Processed_At": now,
+                "Mapped_Capability": capability,
+            },
+            {
+                "Status_select": "Processed",
+                "Command_Created": True,
+                "Linked_Command": [command_record_id],
+                "Processed_At": now,
+                "Mapped_Capability": capability,
+            },
+            {
+                "Status": "Processed",
+                "Command_Created": True,
+                "Linked_Command": [command_record_id],
+            },
+            {
+                "Status_select": "Processed",
+                "Command_Created": True,
+                "Linked_Command": [command_record_id],
+            },
+            {
+                "Status": "Processed",
+                "Command_Created": True,
+            },
+            {
+                "Status_select": "Processed",
+                "Command_Created": True,
+            },
+            {
+                "Command_Created": True,
+                "Linked_Command": [command_record_id],
+            },
+        ],
+    )
+
+
+def _mark_event_ignored_best_effort(event_id: str, reason: str, event_type: str) -> Dict[str, Any]:
+    now = utc_now_iso()
+    payload = json.dumps({"reason": reason, "event_type": event_type}, ensure_ascii=False)
+    return _airtable_update_best_effort(
+        EVENTS_TABLE_NAME,
+        event_id,
+        [
+            {
+                "Status": "Ignored",
+                "Processed_At": now,
+                "Error_Message": reason,
+                "Result_JSON": payload,
+            },
+            {
+                "Status_select": "Ignored",
+                "Processed_At": now,
+                "Error_Message": reason,
+                "Result_JSON": payload,
+            },
+            {
+                "Status": "Ignored",
+                "Error_Message": reason,
+            },
+            {
+                "Status_select": "Ignored",
+                "Error_Message": reason,
+            },
+            {
+                "Status": "Ignored",
+            },
+            {
+                "Status_select": "Ignored",
+            },
+        ],
+    )
+
+
+def _mark_event_error_best_effort(event_id: str, error_message: str) -> Dict[str, Any]:
+    now = utc_now_iso()
+    payload = json.dumps({"error": error_message}, ensure_ascii=False)
+    return _airtable_update_best_effort(
+        EVENTS_TABLE_NAME,
+        event_id,
+        [
+            {
+                "Status": "Error",
+                "Processed_At": now,
+                "Error_Message": error_message,
+                "Result_JSON": payload,
+            },
+            {
+                "Status_select": "Error",
+                "Processed_At": now,
+                "Error_Message": error_message,
+                "Result_JSON": payload,
+            },
+            {
+                "Status": "Error",
+                "Error_Message": error_message,
+            },
+            {
+                "Status_select": "Error",
+                "Error_Message": error_message,
+            },
+            {
+                "Status": "Error",
+            },
+            {
+                "Status_select": "Error",
+            },
+        ],
+    )
 
 
 # ============================================================
@@ -1249,6 +1500,193 @@ def capability_lock_recovery(req: RunRequest, run_record_id: str) -> Dict[str, A
     }
 
 
+# ============================================================
+# Event Engine v1 (SAFE, best-effort)
+# ============================================================
+
+def capability_event_engine(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    """
+    Event Engine v1:
+    - Read Events view Queue
+    - If Status=Queued and no command already created:
+      -> map Event_Type deterministically to target capability
+      -> create one Command
+      -> mark Event Processed + Command_Created + Linked_Command
+    - Unknown Event_Type -> Ignored
+    - Error -> Error
+    Guardrails:
+    - anti-duplicate via deterministic command idempotency key
+    - Payload_JSON may be empty
+    - best-effort updates
+    - no crash if fields absent
+    """
+    inp = req.input or {}
+    limit = int(inp.get("limit", 50) or 50)
+    if limit <= 0:
+        limit = 50
+    if limit > 200:
+        limit = 200
+
+    view_name = (req.view or EVENTS_VIEW_NAME or "Queue").strip()
+
+    try:
+        events = airtable_list_view(EVENTS_TABLE_NAME, view_name, max_records=limit)
+        selection_mode = "view"
+    except Exception as e:
+        return {
+            "ok": True,
+            "view": view_name,
+            "selection_mode": "view_error",
+            "scanned": 0,
+            "created": 0,
+            "processed": 0,
+            "ignored": 0,
+            "errors_count": 1,
+            "errors": [repr(e)],
+            "run_record_id": run_record_id,
+            "ts": utc_now_iso(),
+        }
+
+    scanned = 0
+    created = 0
+    processed = 0
+    ignored = 0
+    skipped = 0
+    errored = 0
+
+    commands_record_ids: List[str] = []
+    processed_event_ids: List[str] = []
+    ignored_event_ids: List[str] = []
+    skipped_event_ids: List[str] = []
+    error_event_ids: List[str] = []
+    errors: List[str] = []
+
+    for ev in events:
+        event_id = ev.get("id")
+        if not event_id:
+            continue
+
+        scanned += 1
+        fields = ev.get("fields", {}) or {}
+
+        status = _event_status(fields)
+        command_created = _is_truthy(fields.get("Command_Created"))
+        has_linked_command = _event_has_linked_command(fields)
+
+        if status != "Queued":
+            skipped += 1
+            skipped_event_ids.append(event_id)
+            continue
+
+        if command_created or has_linked_command:
+            skipped += 1
+            skipped_event_ids.append(event_id)
+            continue
+
+        event_type = str(fields.get("Event_Type", "") or "").strip()
+        target_capability = _event_target_capability(event_type)
+
+        if not target_capability:
+            res = _mark_event_ignored_best_effort(event_id, "Unknown Event_Type", event_type)
+            if not res.get("ok"):
+                errors.append(f"{event_id}: ignored_update_failed:{res.get('error')}")
+                errored += 1
+                error_event_ids.append(event_id)
+            else:
+                ignored += 1
+                ignored_event_ids.append(event_id)
+            continue
+
+        idem_key = _event_command_idem(event_id, target_capability)
+
+        existing_cmd = find_command_by_idem(idem_key)
+        if existing_cmd:
+            existing_cmd_id = existing_cmd.get("id")
+            if existing_cmd_id:
+                res = _mark_event_processed_best_effort(event_id, existing_cmd_id, target_capability)
+                if res.get("ok"):
+                    processed += 1
+                    processed_event_ids.append(event_id)
+                    commands_record_ids.append(existing_cmd_id)
+                else:
+                    errored += 1
+                    error_event_ids.append(event_id)
+                    errors.append(f"{event_id}: processed_update_failed:{res.get('error')}")
+            else:
+                err = "existing_command_without_id"
+                _mark_event_error_best_effort(event_id, err)
+                errored += 1
+                error_event_ids.append(event_id)
+                errors.append(f"{event_id}: {err}")
+            continue
+
+        payload = _event_payload(fields)
+        if not isinstance(payload, dict):
+            payload = {}
+
+        create_res = _airtable_create_best_effort(
+            COMMANDS_TABLE_NAME,
+            _build_command_fields_candidates(
+                capability=target_capability,
+                idem_key=idem_key,
+                input_obj=payload,
+                run_record_id=run_record_id,
+                event_id=event_id,
+                event_type=event_type,
+            ),
+        )
+
+        if not create_res.get("ok"):
+            err = f"command_create_failed:{create_res.get('error')}"
+            _mark_event_error_best_effort(event_id, err)
+            errored += 1
+            error_event_ids.append(event_id)
+            errors.append(f"{event_id}: {err}")
+            continue
+
+        command_record_id = str(create_res.get("record_id") or "").strip()
+        if not command_record_id:
+            err = "command_created_but_missing_record_id"
+            _mark_event_error_best_effort(event_id, err)
+            errored += 1
+            error_event_ids.append(event_id)
+            errors.append(f"{event_id}: {err}")
+            continue
+
+        created += 1
+        commands_record_ids.append(command_record_id)
+
+        mark_res = _mark_event_processed_best_effort(event_id, command_record_id, target_capability)
+        if mark_res.get("ok"):
+            processed += 1
+            processed_event_ids.append(event_id)
+        else:
+            errored += 1
+            error_event_ids.append(event_id)
+            errors.append(f"{event_id}: processed_update_failed:{mark_res.get('error')}")
+
+    return {
+        "ok": True,
+        "view": view_name,
+        "selection_mode": selection_mode,
+        "scanned": scanned,
+        "created": created,
+        "processed": processed,
+        "ignored": ignored,
+        "skipped": skipped,
+        "errored": errored,
+        "commands_record_ids": commands_record_ids,
+        "processed_event_ids": processed_event_ids,
+        "ignored_event_ids": ignored_event_ids,
+        "skipped_event_ids": skipped_event_ids,
+        "error_event_ids": error_event_ids,
+        "errors_count": len(errors),
+        "errors": errors[:10],
+        "run_record_id": run_record_id,
+        "ts": utc_now_iso(),
+    }
+
+
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     max_cmds = int(req.max_commands or 0) or 5
     if POLICY_MAX_TOOL_CALLS > 0:
@@ -1634,6 +2072,11 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             post_ops["escalation_engine"] = capability_escalation_engine(req, run_record_id)
         except Exception as e:
             post_ops["escalation_engine"] = {"ok": False, "error": repr(e)}
+    if bool(inp2.get("run_event_engine")):
+        try:
+            post_ops["event_engine"] = capability_event_engine(req, run_record_id)
+        except Exception as e:
+            post_ops["event_engine"] = {"ok": False, "error": repr(e)}
 
     if post_ops:
         result["post_ops"] = post_ops
@@ -1653,6 +2096,7 @@ CAPABILITIES = {
     "lock_release": capability_lock_release,
     "retry_queue": capability_retry_queue,
     "lock_recovery": capability_lock_recovery,
+    "event_engine": capability_event_engine,
     "command_orchestrator": capability_command_orchestrator,
 }
 
