@@ -179,6 +179,54 @@ def derive_error_code(exc: Exception) -> str:
     return "UNKNOWN_ERROR"
 
 
+def parse_headers(payload: Dict[str, Any]) -> Dict[str, Any]:
+    headers = payload.get("headers")
+
+    if isinstance(headers, dict):
+        return headers
+
+    alt = payload.get("HTTP_Headers_JSON")
+    if isinstance(alt, dict):
+        return alt
+
+    if isinstance(alt, str) and alt.strip():
+        parsed = safe_json_loads(alt, {})
+        if isinstance(parsed, dict):
+            return parsed
+
+    return {}
+
+
+def parse_body_json(payload: Dict[str, Any]) -> Dict[str, Any]:
+    for key in ("json", "body", "Payload_JSON"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str) and value.strip():
+            parsed = safe_json_loads(value, {})
+            if isinstance(parsed, dict):
+                return parsed
+    return {}
+
+
+def resolve_http_url(payload: Dict[str, Any]) -> str:
+    return normalize_text(
+        payload.get("url")
+        or payload.get("http_target")
+        or payload.get("URL")
+        or payload.get("target")
+    )
+
+
+def resolve_http_method(payload: Dict[str, Any]) -> str:
+    return normalize_upper(
+        payload.get("method")
+        or payload.get("http_method")
+        or payload.get("HTTP_Method")
+        or "GET"
+    )
+
+
 # ----------------------------
 # Supabase event state
 # ----------------------------
@@ -338,13 +386,13 @@ def build_http_exec_command_fields(event: Dict[str, Any]) -> Dict[str, Any]:
     event_id = normalize_text(event.get("id"))
     payload = normalize_payload(event.get("payload"))
 
-    url = normalize_text(payload.get("url"))
-    method = normalize_upper(payload.get("method") or "GET")
-    headers = payload.get("headers", {})
-    body_json = payload.get("json", payload.get("body", {}))
+    url = resolve_http_url(payload)
+    method = resolve_http_method(payload)
+    headers = parse_headers(payload)
+    body_json = parse_body_json(payload)
 
     if not is_valid_http_url(url):
-        raise ValueError("INVALID_URL: http_exec event missing valid url")
+        raise ValueError(f"INVALID_URL: http_exec event missing valid url for event_id={event_id}")
 
     if not isinstance(headers, dict):
         headers = {}
@@ -354,6 +402,8 @@ def build_http_exec_command_fields(event: Dict[str, Any]) -> Dict[str, Any]:
 
     input_json = {
         "url": url,
+        "http_target": url,
+        "URL": url,
         "method": method,
         "headers": headers,
         "json": body_json,
@@ -368,8 +418,10 @@ def build_http_exec_command_fields(event: Dict[str, Any]) -> Dict[str, Any]:
         "worker": WORKER_NAME,
         "Notes": truncate_text(f"Created from event {event_id}", 500),
         "http_target": url,
+        "URL": url,
         "HTTP_Method": method,
         "HTTP_Headers_JSON": safe_json_dumps(headers),
+        "Payload_JSON": safe_json_dumps(body_json),
     }
 
 
@@ -396,7 +448,7 @@ def build_sla_machine_command_fields(event: Dict[str, Any]) -> Dict[str, Any]:
 def map_event_to_command_fields(event: Dict[str, Any]) -> Dict[str, Any]:
     event_type = normalize_lower(event.get("type"))
 
-    if event_type == "http_exec":
+    if event_type in ("http_exec", "http.call.requested", "command.http_exec"):
         return build_http_exec_command_fields(event)
 
     if event_type == "sla_machine":
