@@ -1,17 +1,12 @@
-# app/worker.py — BOSAI Worker (v2.5.2)
-# SAFE PATCH over your v2.5.1:
-# - Adds 1 new capability: escalation_engine (best-effort, non-breaking)
-# - Does NOT change existing behaviors (auth/idempotency/locks/retry remain identical)
-# - Uses the same guardrails:
-#   * no crash if Airtable fields missing
-#   * best-effort updates
-#   * skips if nothing allowed to update
-#
-# escalation_engine behavior (SAFE):
-# - Scan Logs_Erreurs view Active
-# - If record is breached (SLA_Status == Breached OR SLA_Remaining_Minutes <= 0)
-#   and not already Escalated / not already Escalation_Queued
-#   -> set Escalation_Queued=true (if allowed) + Linked_Run=[run_record_id] (if allowed)
+# app/worker.py — BOSAI Worker (v2.5.3)
+# SAFE PATCH over your v2.5.2:
+# - Adds CORS support without changing existing worker behavior
+# - Keeps auth/idempotency/locks/retry logic unchanged
+# - Keeps escalation_engine intact
+# - Uses safe defaults:
+#   * allow_origins="*" by default
+#   * allow_credentials=false by default
+#   * configurable via env if needed
 
 import os
 import json
@@ -26,6 +21,7 @@ from typing import Any, Dict, Optional, List, Tuple
 import requests
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from app.capabilities.http_exec import capability_http_exec as capability_http_exec_impl
@@ -68,7 +64,6 @@ LOGS_ERRORS_FIELDS_ALLOWED = set(
         s.strip()
         for s in os.getenv(
             "LOGS_ERRORS_FIELDS_ALLOWED",
-            # PATCH: add Escalation_Queued (SAFE; if missing in Airtable, update will fail and be counted, no crash)
             "SLA_Status,Last_SLA_Check,Linked_Run,Escalation_Queued",
         ).split(",")
         if s.strip()
@@ -89,10 +84,37 @@ HTTP_EXEC_TARGETS_JSON = os.getenv("HTTP_EXEC_TARGETS_JSON", "").strip()
 TOOLCATALOG_ENFORCE_HTTP_EXEC = (os.getenv("TOOLCATALOG_ENFORCE_HTTP_EXEC", "1").strip() != "0")
 
 # ============================================================
+# CORS (SAFE)
+# ============================================================
+
+CORS_ALLOW_ORIGINS_RAW = os.getenv("CORS_ALLOW_ORIGINS", "*").strip()
+CORS_ALLOW_METHODS_RAW = os.getenv("CORS_ALLOW_METHODS", "*").strip()
+CORS_ALLOW_HEADERS_RAW = os.getenv("CORS_ALLOW_HEADERS", "*").strip()
+CORS_EXPOSE_HEADERS_RAW = os.getenv("CORS_EXPOSE_HEADERS", "X-Run-Record-Id,X-Run-Id").strip()
+CORS_ALLOW_CREDENTIALS = (os.getenv("CORS_ALLOW_CREDENTIALS", "0").strip().lower() in ("1", "true", "yes", "on"))
+
+
+def _csv_env_list(raw: str, default: List[str]) -> List[str]:
+    items = [x.strip() for x in (raw or "").split(",") if x.strip()]
+    return items or default
+
+
+CORS_ALLOW_ORIGINS = _csv_env_list(CORS_ALLOW_ORIGINS_RAW, ["*"])
+CORS_ALLOW_METHODS = _csv_env_list(CORS_ALLOW_METHODS_RAW, ["*"])
+CORS_ALLOW_HEADERS = _csv_env_list(CORS_ALLOW_HEADERS_RAW, ["*"])
+CORS_EXPOSE_HEADERS = _csv_env_list(CORS_EXPOSE_HEADERS_RAW, ["X-Run-Record-Id", "X-Run-Id"])
+
+# Starlette/FastAPI rule:
+# allow_credentials=True cannot be combined with wildcard "*" safely for origins.
+if CORS_ALLOW_CREDENTIALS and "*" in CORS_ALLOW_ORIGINS:
+    CORS_ALLOW_CREDENTIALS = False
+
+# ============================================================
 # Policies (SAFE, defaults-first)
 # ============================================================
 
 POLICIES = get_policies() or {}
+
 
 def _policy_get(name: str, default: Any) -> Any:
     try:
@@ -100,6 +122,7 @@ def _policy_get(name: str, default: Any) -> Any:
         return default if value is None else value
     except Exception:
         return default
+
 
 def _policy_get_bool(name: str, default: bool) -> bool:
     value = _policy_get(name, default)
@@ -114,17 +137,20 @@ def _policy_get_bool(name: str, default: bool) -> bool:
         return False
     return default
 
+
 def _policy_get_int(name: str, default: int) -> int:
     try:
         return int(_policy_get(name, default))
     except Exception:
         return default
 
+
 def _policy_get_float(name: str, default: float) -> float:
     try:
         return float(_policy_get(name, default))
     except Exception:
         return default
+
 
 POLICY_MAX_TOOL_CALLS = _policy_get_int("MAX_TOOL_CALLS", 0)
 POLICY_RETRY_LIMIT = _policy_get_int("RETRY_LIMIT", 0)
@@ -139,6 +165,16 @@ POLICY_STORE_TOOL_TRACE = _policy_get_bool("STORE_TOOL_TRACE", False)
 # ============================================================
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ALLOW_ORIGINS,
+    allow_credentials=CORS_ALLOW_CREDENTIALS,
+    allow_methods=CORS_ALLOW_METHODS,
+    allow_headers=CORS_ALLOW_HEADERS,
+    expose_headers=CORS_EXPOSE_HEADERS,
+)
+
 _HTTP_SESSION = requests.Session()
 
 
@@ -174,17 +210,14 @@ class RunRequest(BaseModel):
 
         p = dict(payload)
 
-        # compat: capacity -> capability
         if "capability" not in p and "capacity" in p:
             p["capability"] = p.get("capacity")
         p.pop("capacity", None)
 
-        # compat: idempotencyKey -> idempotency_key
         if "idempotency_key" not in p and "idempotencyKey" in p:
             p["idempotency_key"] = p.get("idempotencyKey")
         p.pop("idempotencyKey", None)
 
-        # compat: inputs -> input
         if "input" not in p and "inputs" in p:
             p["input"] = p.get("inputs")
         p.pop("inputs", None)
@@ -494,9 +527,6 @@ def _airtable_update_best_effort(table_name: str, record_id: str, candidates: Li
 
 
 def _release_command_lock_best_effort(command_id: str) -> None:
-    """
-    SAFE: attempts to clear lock fields if they exist; otherwise no-op.
-    """
     now = utc_now_iso()
     _airtable_update_best_effort(
         COMMANDS_TABLE_NAME,
@@ -1613,6 +1643,13 @@ def health() -> Dict[str, Any]:
         "capabilities": sorted(list(CAPABILITIES.keys())),
         "policies_loaded": bool(POLICIES),
         "policy_keys": sorted(list(POLICIES.keys())) if isinstance(POLICIES, dict) else [],
+        "cors": {
+            "allow_origins": CORS_ALLOW_ORIGINS,
+            "allow_methods": CORS_ALLOW_METHODS,
+            "allow_headers": CORS_ALLOW_HEADERS,
+            "expose_headers": CORS_EXPOSE_HEADERS,
+            "allow_credentials": CORS_ALLOW_CREDENTIALS,
+        },
         "ts": utc_now_iso(),
     }
 
