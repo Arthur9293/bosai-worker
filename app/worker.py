@@ -2340,6 +2340,65 @@ def get_sla(limit: int = 50) -> Dict[str, Any]:
     }
 
 
+@app.get("/events")
+def get_events(limit: int = 30) -> Dict[str, Any]:
+    limit = _safe_limit(limit, default=30, minimum=1, maximum=100)
+    records, meta = _safe_records_from_view(EVENTS_TABLE_NAME, EVENTS_VIEW_NAME, limit)
+
+    events: List[Dict[str, Any]] = []
+    stats = {
+        "queued": 0,
+        "processed": 0,
+        "ignored": 0,
+        "error": 0,
+        "other": 0,
+    }
+
+    for r in records:
+        f = r.get("fields", {}) or {}
+
+        status = str(f.get("Status", f.get("Status_select", "")) or "").strip()
+        key = status.lower()
+
+        if key == "queued":
+            stats["queued"] += 1
+        elif key == "processed":
+            stats["processed"] += 1
+        elif key == "ignored":
+            stats["ignored"] += 1
+        elif key == "error":
+            stats["error"] += 1
+        else:
+            stats["other"] += 1
+
+        payload = _event_payload(f)
+
+        events.append(
+            {
+                "id": r.get("id"),
+                "event_type": f.get("Event_Type"),
+                "status": status,
+                "command_created": _is_truthy(f.get("Command_Created")),
+                "linked_command": f.get("Linked_Command"),
+                "mapped_capability": f.get("Mapped_Capability"),
+                "processed_at": f.get("Processed_At"),
+                "source": payload.get("source") if isinstance(payload, dict) else None,
+                "run_id": payload.get("run_id") if isinstance(payload, dict) else None,
+                "command_id": payload.get("command_id") if isinstance(payload, dict) else None,
+                "payload": payload,
+            }
+        )
+
+    return {
+        "ok": bool(meta.get("ok")),
+        "source": meta,
+        "count": len(events),
+        "stats": stats,
+        "events": events,
+        "ts": utc_now_iso(),
+    }
+
+
 @app.post("/run", response_model=RunResponse)
 async def run(request: Request, response: Response) -> RunResponse:
     started = time.time()
