@@ -47,6 +47,7 @@ COMMANDS_TABLE_NAME = os.getenv("COMMANDS_TABLE_NAME", "Commands").strip()
 LOGS_ERRORS_TABLE_NAME = os.getenv("LOGS_ERRORS_TABLE_NAME", "Logs_Erreurs").strip()
 STATE_TABLE_NAME = os.getenv("STATE_TABLE_NAME", "State").strip()
 TOOLCATALOG_TABLE_NAME = os.getenv("TOOLCATALOG_TABLE_NAME", "ToolCatalog").strip()
+
 EVENTS_TABLE_NAME = os.getenv("EVENTS_TABLE_NAME", "Events").strip()
 
 LOGS_ERRORS_VIEW_NAME = os.getenv("LOGS_ERRORS_VIEW_NAME", "Active").strip()
@@ -2252,7 +2253,7 @@ def health_score() -> Dict[str, Any]:
 @app.get("/runs")
 def get_runs(limit: int = 20) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=20, minimum=1, maximum=100)
-   records, meta = _safe_records_from_view(SYSTEM_RUNS_TABLE_NAME, SYSTEM_RUNS_VIEW_NAME, limit)
+    records, meta = _safe_records_from_view(SYSTEM_RUNS_TABLE_NAME, SYSTEM_RUNS_VIEW_NAME, limit)
     runs: List[Dict[str, Any]] = []
     stats = {
         "running": 0,
