@@ -1242,6 +1242,14 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     if http_target:
         built["http_target"] = http_target
 
+    url_value = str(fields.get("URL", "") or "").strip()
+    if url_value:
+        built["URL"] = url_value
+
+    url_lower = str(fields.get("url", "") or "").strip()
+    if url_lower:
+        built["url"] = url_lower
+
     method = str(fields.get("HTTP_Method", "") or "").strip()
     if method:
         built["method"] = method
@@ -1257,15 +1265,18 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     tool_key = str(fields.get("Tool_Key", "") or "").strip()
     if tool_key:
         built["Tool_Key"] = tool_key
+
     tool_mode = str(fields.get("Tool_Mode", "") or "").strip()
     if tool_mode:
         built["Tool_Mode"] = tool_mode
+
     tool_intent = str(fields.get("Tool_Intent", "") or "").strip()
     if tool_intent:
         built["Tool_Intent"] = tool_intent
+
     approved = fields.get("Approved")
     if approved is not None:
-        built["Approved"] = bool(approved)
+        built["Approved"] = approved
 
     return built
 
@@ -2023,7 +2034,6 @@ def _command_mark_retry_or_dead_best_effort(
         ],
     )    
 
-
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     max_cmds = int(req.max_commands or 0) or 5
     if POLICY_MAX_TOOL_CALLS > 0:
@@ -2105,8 +2115,14 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
 
         if POLICY_APPROVAL_REQUIRED_FOR_WRITE and capability in ("http_exec", "state_put"):
             approved = fields.get("Approved")
-            if approved is not True:
+            if not _is_truthy(approved):
                 blocked += 1
+                approval_payload = {
+                    "error": "Approval required by policy",
+                    "capability": capability,
+                    "approved_raw": approved,
+                    "policy": "APPROVAL_REQUIRED_FOR_WRITE",
+                }
                 _airtable_update_best_effort(
                     COMMANDS_TABLE_NAME,
                     cid,
@@ -2116,11 +2132,16 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                             "Finished_At": utc_now_iso(),
                             "Error_Message": "Approval required by policy",
                             "Last_Error": "Approval required by policy",
+                            "Result_JSON": json.dumps(approval_payload, ensure_ascii=False),
                             "Linked_Run": [run_record_id],
+                            "Is_Locked": False,
+                            "Lock_Expires_At": None,
+                            "Lock_Token": "",
                         },
                         {
                             "Status_select": "Blocked",
                             "Error_Message": "Approval required by policy",
+                            "Result_JSON": json.dumps(approval_payload, ensure_ascii=False),
                             "Linked_Run": [run_record_id],
                         },
                         {"Status_select": "Blocked"},
@@ -2132,8 +2153,35 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         idem = str(fields.get("Idempotency_Key", "")).strip() or f"cmd:{cid}:{capability}"
         cmd_input = _compose_command_input(fields)
 
-               # SAFE guardrail for http_exec:
-        # fail clearly before capability call if command has no usable URL
+        dup_done = find_done_command_by_idem(idem, exclude_record_id=cid)
+        if dup_done:
+            note = {
+                "ok": True,
+                "skipped": True,
+                "reason": "idempotent_duplicate_done_exists",
+                "idempotency_key": idem,
+                "matched_done_record_id": dup_done.get("id"),
+            }
+            _command_mark_blocked_duplicate_best_effort(
+                command_id=cid,
+                run_record_id=run_record_id,
+                note=note,
+            )
+            _release_command_lock_best_effort(cid)
+            blocked += 1
+            continue
+
+        lock_res = _command_mark_running_best_effort(
+            command_id=cid,
+            run_record_id=run_record_id,
+            worker_name=req.worker,
+            idem=idem,
+        )
+        if not lock_res.get("ok"):
+            blocked += 1
+            errors.append(f"{cid}: failed_to_mark_running:{lock_res.get('error')}")
+            continue
+
         if capability == "http_exec":
             resolved_url = _resolve_http_exec_url_from_command_input(cmd_input)
             if not resolved_url:
@@ -2164,6 +2212,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                                 "Status_select": "Retry",
                                 "Retry_Count": retry_count + 1,
                                 "Next_Retry_At": next_at,
+                                "Finished_At": utc_now_iso(),
                                 "Last_Error": msg,
                                 "Error_Message": msg,
                                 "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
@@ -2195,6 +2244,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                         [
                             {
                                 "Status_select": "Dead",
+                                "Finished_At": utc_now_iso(),
                                 "Last_Error": msg,
                                 "Error_Message": msg,
                                 "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
@@ -2211,7 +2261,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                 _release_command_lock_best_effort(cid)
                 errors.append(f"{cid}: {msg}")
                 continue
-                
+
         executed += 1
 
         try:
