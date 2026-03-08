@@ -1,0 +1,200 @@
+from __future__ import annotations
+
+import json
+import os
+from typing import Any, Dict, List, Optional
+
+from app.decision_models import DecisionInput, DecisionResult
+
+
+# ============================================================
+# Env / config
+# ============================================================
+
+DECISION_BLOCKED_SOURCES_RAW = os.getenv("DECISION_BLOCKED_SOURCES", "").strip()
+DECISION_MAX_PAYLOAD_BYTES = int((os.getenv("DECISION_MAX_PAYLOAD_BYTES", "4096") or "4096").strip())
+DECISION_DEFAULT_MAX_RETRIES = int((os.getenv("DECISION_DEFAULT_MAX_RETRIES", "3") or "3").strip())
+
+EVENT_TYPE_TO_CAPABILITY: Dict[str, str] = {
+    "http.call.requested": "http_exec",
+    "http_exec": "http_exec",
+    "sla.breach.detected": "sla_machine",
+    "sla_machine": "sla_machine",
+    "health.check.requested": "health_tick",
+    "health_tick": "health_tick",
+}
+
+EVENT_TYPE_TO_PRIORITY: Dict[str, int] = {
+    "sla.breach.detected": 10,
+    "sla_machine": 10,
+    "http.call.requested": 5,
+    "http_exec": 5,
+    "health.check.requested": 2,
+    "health_tick": 2,
+}
+
+
+def _csv_to_set(raw: str) -> set[str]:
+    return {x.strip() for x in raw.split(",") if x.strip()}
+
+
+BLOCKED_SOURCES = _csv_to_set(DECISION_BLOCKED_SOURCES_RAW)
+
+
+# ============================================================
+# Helpers
+# ============================================================
+
+def normalize_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def payload_size_bytes(payload: Dict[str, Any]) -> int:
+    try:
+        return len(json.dumps(payload or {}, ensure_ascii=False).encode("utf-8"))
+    except Exception:
+        return 0
+
+
+def resolve_http_url(payload: Dict[str, Any]) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("http_target", "url", "URL"):
+        value = normalize_text(payload.get(key))
+        if value:
+            return value
+    return ""
+
+
+def resolve_priority(event_type: str) -> int:
+    return EVENT_TYPE_TO_PRIORITY.get(event_type, 1)
+
+
+def resolve_capability(event_type: str) -> Optional[str]:
+    return EVENT_TYPE_TO_CAPABILITY.get(event_type)
+
+
+# ============================================================
+# Validators
+# ============================================================
+
+def validate_source(source: str) -> Optional[DecisionResult]:
+    if source and source in BLOCKED_SOURCES:
+        return DecisionResult(
+            decision="reject",
+            blocked=True,
+            priority=1,
+            reason="blocked_source",
+            rejected_reason=f"Source blocked: {source}",
+            metadata={"source": source},
+        )
+    return None
+
+
+def validate_payload_size(payload: Dict[str, Any]) -> Optional[DecisionResult]:
+    size = payload_size_bytes(payload)
+    if size > DECISION_MAX_PAYLOAD_BYTES:
+        return DecisionResult(
+            decision="reject",
+            blocked=True,
+            priority=1,
+            reason="payload_too_large",
+            rejected_reason=f"Payload too large: {size} bytes",
+            metadata={
+                "payload_size_bytes": size,
+                "max_payload_bytes": DECISION_MAX_PAYLOAD_BYTES,
+            },
+        )
+    return None
+
+
+def validate_retry_limit(retry_count: int, max_retries: int) -> Optional[DecisionResult]:
+    if retry_count >= max_retries:
+        return DecisionResult(
+            decision="dead_letter",
+            blocked=True,
+            priority=1,
+            reason="retry_limit_exceeded",
+            rejected_reason=f"Retry limit exceeded: retry_count={retry_count}, max_retries={max_retries}",
+            metadata={
+                "retry_count": retry_count,
+                "max_retries": max_retries,
+            },
+        )
+    return None
+
+
+def validate_event_type(event_type: str) -> Optional[DecisionResult]:
+    capability = resolve_capability(event_type)
+    if not capability:
+        return DecisionResult(
+            decision="reject",
+            blocked=True,
+            priority=1,
+            reason="unknown_event_type",
+            rejected_reason=f"Unknown event type: {event_type}",
+            metadata={"event_type": event_type},
+        )
+    return None
+
+
+def validate_http_payload(event_type: str, payload: Dict[str, Any]) -> Optional[DecisionResult]:
+    if event_type not in ("http.call.requested", "http_exec"):
+        return None
+
+    url = resolve_http_url(payload)
+    if not url:
+        return DecisionResult(
+            decision="reject",
+            blocked=True,
+            priority=1,
+            reason="missing_http_target",
+            rejected_reason="Missing http_target/url in payload",
+            metadata={"event_type": event_type},
+        )
+
+    return None
+
+
+# ============================================================
+# Core decision
+# ============================================================
+
+def decide_event(data: DecisionInput) -> DecisionResult:
+    event_type = normalize_text(data.event_type)
+    source = normalize_text(data.source)
+    payload = data.payload if isinstance(data.payload, dict) else {}
+    retry_count = int(data.retry_count or 0)
+    max_retries = int(data.max_retries or DECISION_DEFAULT_MAX_RETRIES)
+
+    checks = [
+        validate_source(source),
+        validate_payload_size(payload),
+        validate_retry_limit(retry_count, max_retries),
+        validate_event_type(event_type),
+        validate_http_payload(event_type, payload),
+    ]
+
+    for result in checks:
+        if result is not None:
+            return result
+
+    capability = resolve_capability(event_type)
+    priority = resolve_priority(event_type)
+
+    return DecisionResult(
+        decision="create_command",
+        capability=capability,
+        priority=priority,
+        blocked=False,
+        reason="mapped_by_event_type",
+        rejected_reason="",
+        metadata={
+            "event_id": data.event_id,
+            "event_type": event_type,
+            "source": source,
+            "payload_size_bytes": payload_size_bytes(payload),
+        },
+    )
