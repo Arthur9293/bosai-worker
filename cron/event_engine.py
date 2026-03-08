@@ -56,6 +56,9 @@ if MAX_NOTES_CHARS <= 0:
     MAX_NOTES_CHARS = 500
 
 
+EVENT_ENGINE_ACTOR = "bosai-event-engine"
+
+
 # ----------------------------
 # Helpers
 # ----------------------------
@@ -126,6 +129,12 @@ def supabase_headers() -> Dict[str, str]:
         "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
         "Content-Type": "application/json",
     }
+
+
+def supabase_headers_with_representation() -> Dict[str, str]:
+    headers = supabase_headers().copy()
+    headers["Prefer"] = "return=representation"
+    return headers
 
 
 def airtable_headers() -> Dict[str, str]:
@@ -260,21 +269,73 @@ def derive_error_code(exc: Exception) -> str:
     return "UNKNOWN_ERROR"
 
 
+def build_supabase_table_url() -> str:
+    return f"{SUPABASE_URL}/rest/v1/{SUPABASE_EVENTS_TABLE}"
+
+
+def encode_supabase_query(params: Dict[str, Any]) -> str:
+    clean: Dict[str, str] = {}
+    for key, value in params.items():
+        if value is None:
+            continue
+        clean[str(key)] = str(value)
+    return urllib.parse.urlencode(clean)
+
+
+def resolve_event_http_url(payload: Dict[str, Any]) -> str:
+    for key in ("url", "http_target", "URL"):
+        value = normalize_text(payload.get(key))
+        if value:
+            return value
+    return ""
+
+
+def resolve_event_http_method(payload: Dict[str, Any]) -> str:
+    for key in ("method", "http_method", "HTTP_Method"):
+        value = normalize_upper(payload.get(key))
+        if value:
+            return value
+    return "GET"
+
+
+def resolve_event_http_headers(payload: Dict[str, Any]) -> Dict[str, Any]:
+    for key in ("headers", "HTTP_Headers", "HTTP_Headers_JSON"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            parsed = parse_json_object_from_text(value)
+            if parsed:
+                return parsed
+    return {}
+
+
+def resolve_event_http_body(payload: Dict[str, Any]) -> Dict[str, Any]:
+    for key in ("json", "body", "payload_json"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            parsed = parse_json_object_from_text(value)
+            if parsed:
+                return parsed
+    return {}
+
+
 # ----------------------------
 # Supabase events
 # ----------------------------
 
 def fetch_events() -> List[Dict[str, Any]]:
-    query = urllib.parse.urlencode({
+    query = encode_supabase_query({
         "select": "*",
-        "processed_at": "is.null",
-        "rejected_at": "is.null",
+        "event_status": "eq.pending",
         "dead_lettered": "eq.false",
         "order": "created_at.asc",
         "limit": str(EVENT_ENGINE_LIMIT),
     })
 
-    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_EVENTS_TABLE}?{query}"
+    url = f"{build_supabase_table_url()}?{query}"
 
     req = urllib.request.Request(
         url,
@@ -293,29 +354,85 @@ def fetch_events() -> List[Dict[str, Any]]:
         return [item for item in data if isinstance(item, dict)]
 
 
-def update_event(event_id: str, patch: Dict[str, Any]) -> None:
+def update_event(
+    event_id: str,
+    patch: Dict[str, Any],
+    extra_filters: Optional[Dict[str, Any]] = None,
+    return_rows: bool = False,
+) -> List[Dict[str, Any]]:
     if not event_id:
         raise ValueError("Missing event_id for update_event")
 
     if not isinstance(patch, dict) or not patch:
         raise ValueError("Missing patch for update_event")
 
-    query = urllib.parse.urlencode({
-        "id": f"eq.{event_id}"
-    })
+    query_dict: Dict[str, Any] = {"id": f"eq.{event_id}"}
+    if isinstance(extra_filters, dict):
+        query_dict.update(extra_filters)
 
-    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_EVENTS_TABLE}?{query}"
+    query = encode_supabase_query(query_dict)
+    url = f"{build_supabase_table_url()}?{query}"
     data = safe_json_dumps(patch).encode("utf-8")
 
     req = urllib.request.Request(
         url,
         data=data,
-        headers=supabase_headers(),
+        headers=supabase_headers_with_representation() if return_rows else supabase_headers(),
         method="PATCH",
     )
 
     with urllib.request.urlopen(req, timeout=30) as resp:
-        resp.read()
+        body = resp.read().decode("utf-8")
+        if not return_rows:
+            return []
+
+        parsed = safe_json_loads(body, [])
+        if isinstance(parsed, list):
+            return [item for item in parsed if isinstance(item, dict)]
+        return []
+
+
+def claim_event(event_id: str) -> bool:
+    rows = update_event(
+        event_id=event_id,
+        patch={
+            "processing_started_at": now_iso(),
+            "locked_at": now_iso(),
+            "locked_by": EVENT_ENGINE_ACTOR,
+            "last_error_code": None,
+            "error": None,
+        },
+        extra_filters={
+            "event_status": "eq.pending",
+            "processed_at": "is.null",
+            "rejected_at": "is.null",
+        },
+        return_rows=True,
+    )
+    return len(rows) == 1
+
+
+def mark_event_queued(event_id: str, command_id: str, capability: str) -> None:
+    update_event(
+        event_id,
+        {
+            "processed_at": now_iso(),
+            "processed_by": EVENT_ENGINE_ACTOR,
+            "event_status": "queued",
+            "dispatched_command_id": normalize_text(command_id),
+            "last_error_code": None,
+            "error": None,
+            "locked_at": None,
+            "locked_by": None,
+            "result": {
+                "status": "command_created",
+                "command_id": normalize_text(command_id),
+                "capability": normalize_text(capability),
+                "by": EVENT_ENGINE_ACTOR,
+                "at": now_iso(),
+            },
+        },
+    )
 
 
 def mark_event_processed(event_id: str) -> None:
@@ -323,9 +440,12 @@ def mark_event_processed(event_id: str) -> None:
         event_id,
         {
             "processed_at": now_iso(),
-            "processed_by": "bosai-event-engine",
+            "processed_by": EVENT_ENGINE_ACTOR,
             "event_status": "processed",
             "last_error_code": None,
+            "error": None,
+            "locked_at": None,
+            "locked_by": None,
         },
     )
 
@@ -335,10 +455,13 @@ def reject_event(event_id: str, reason: str, error_code: str) -> None:
         event_id,
         {
             "rejected_at": now_iso(),
-            "rejected_by": "bosai-event-engine",
+            "rejected_by": EVENT_ENGINE_ACTOR,
             "rejected_reason": truncate_text(reason, 1000),
             "event_status": "rejected",
             "last_error_code": error_code,
+            "error": truncate_text(reason, 2000),
+            "locked_at": None,
+            "locked_by": None,
         },
     )
 
@@ -348,12 +471,15 @@ def dead_letter_event(event_id: str, reason: str, error_code: str, payload: Dict
         event_id,
         {
             "rejected_at": now_iso(),
-            "rejected_by": "bosai-event-engine",
+            "rejected_by": EVENT_ENGINE_ACTOR,
             "rejected_reason": truncate_text(reason, 1000),
             "dead_lettered": True,
             "dead_letter_payload": payload,
             "event_status": "dead_lettered",
             "last_error_code": error_code,
+            "error": truncate_text(reason, 2000),
+            "locked_at": None,
+            "locked_by": None,
         },
     )
 
@@ -491,22 +617,20 @@ def build_input_from_event_and_policy(
         if parsed:
             return parsed
 
-    if event_type in ("command_http_exec", "http_exec", "http_request", "command.http_exec"):
-        url = normalize_text(payload.get("url"))
+    if event_type in (
+        "command_http_exec",
+        "http_exec",
+        "http_request",
+        "command.http_exec",
+        "http.call.requested",
+    ):
+        url = resolve_event_http_url(payload)
         if not is_valid_http_url(url):
             raise ValueError("http_exec event missing valid url")
 
-        method = normalize_upper(payload.get("method") or "GET")
-        if not method:
-            method = "GET"
-
-        headers = payload.get("headers", {})
-        if not isinstance(headers, dict):
-            headers = {}
-
-        body_json = payload.get("json", payload.get("body", {}))
-        if not isinstance(body_json, dict):
-            body_json = {}
+        method = resolve_event_http_method(payload)
+        headers = resolve_event_http_headers(payload)
+        body_json = resolve_event_http_body(payload)
 
         return {
             "url": url,
@@ -718,6 +842,7 @@ def main() -> None:
 
     for priority, event, policy in enriched_events:
         event_id = None
+        claimed = False
 
         try:
             if not isinstance(event, dict):
@@ -732,6 +857,12 @@ def main() -> None:
 
             if not event_type:
                 raise ValueError(f"Event {event_id} missing type")
+
+            claimed = claim_event(event_id)
+            if not claimed:
+                print(f"Skipped event {event_id}: already claimed or no longer pending")
+                skipped += 1
+                continue
 
             ok, chaos_reason = chaos_guard.validate_event(event)
             if not ok:
@@ -755,30 +886,36 @@ def main() -> None:
             fields = map_event_to_command(event, policy, command_policy_index)
             cmd = create_airtable_command(fields)
             cmd_id = normalize_text(cmd.get("id"))
+            capability = normalize_text(fields.get("Capability"))
 
             print(
                 f"Created command for event {event_id} "
-                f"(priority={priority}, capability={fields.get('Capability')}) -> {cmd_id}"
+                f"(priority={priority}, capability={capability}) -> {cmd_id}"
             )
             created += 1
 
-            mark_event_processed(event_id)
-            print(f"Marked processed {event_id}")
+            mark_event_queued(event_id, cmd_id, capability)
+            print(f"Marked queued {event_id}")
             processed += 1
 
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8", errors="ignore")
             error_code = derive_error_code(e)
-            dead_letter_event(
-                event_id=event_id or "",
-                reason=f"HTTP error {e.code}: {error_body}",
-                error_code=error_code,
-                payload={
-                    "http_status": e.code,
-                    "body": truncate_text(error_body, 4000),
-                },
-            )
-            print(f"Dead-lettered event {event_id} -> {error_code}")
+
+            if event_id:
+                dead_letter_event(
+                    event_id=event_id,
+                    reason=f"HTTP error {e.code}: {error_body}",
+                    error_code=error_code,
+                    payload={
+                        "http_status": e.code,
+                        "body": truncate_text(error_body, 4000),
+                    },
+                )
+                print(f"Dead-lettered event {event_id} -> {error_code}")
+            else:
+                print(f"Dead-letter skipped: missing event_id -> {error_code}")
+
             failed += 1
 
         except Exception as e:
@@ -787,12 +924,15 @@ def main() -> None:
             print(f"Event rejected {event_id}: {reason}")
 
             try:
-                reject_event(
-                    event_id=event_id or "",
-                    reason=reason,
-                    error_code=error_code,
-                )
-                print(f"Rejected event {event_id} -> {error_code}")
+                if event_id:
+                    reject_event(
+                        event_id=event_id,
+                        reason=reason,
+                        error_code=error_code,
+                    )
+                    print(f"Rejected event {event_id} -> {error_code}")
+                else:
+                    print(f"Reject skipped: missing event_id -> {error_code}")
             except Exception as reject_err:
                 print(f"Reject failed for event {event_id}: {repr(reject_err)}")
 
