@@ -2049,7 +2049,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         ")"
     )
 
-       try:
+    try:
         cmds = airtable_list_filtered(
             COMMANDS_TABLE_NAME,
             formula=formula,
