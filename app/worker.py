@@ -2056,12 +2056,9 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             view_name=view_name,
             sort=[
                 {"field": "Priority", "direction": "desc"},
-                {"field": "Scheduled_At", "direction": "asc"},
-                {"field": "Next_Retry_At", "direction": "asc"},
             ],
             max_records=max_cmds,
         )
-        print("DEBUG_FORMULA_MODE_OK")
         selection_mode = "scheduler"
         view = f"scheduler_formula+view:{view_name}"
 
