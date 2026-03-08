@@ -2080,16 +2080,18 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
     for c in cmds:
         cid = c.get("id")
         fields = c.get("fields", {}) or {}
+        print("DEBUG_COMMAND_STATUS:", cid, fields.get("Status_select"))
         if not cid:
             continue
 
         processed_ids.append(cid)
 
-        status = _read_command_status(fields)
-        if status and status not in ("Queued", "QUEUE", "Queue", "Retry"):
+        status = _read_command_status(fields).lower()
+        print("DEBUG_COMMAND_STATUS_NORMALIZED:", cid, status)
+        
+        if status not in ("queued", "queue", "retry"):
             blocked += 1
             continue
-
         capability = str(fields.get("Capability", "")).strip()
         if not capability:
             failed += 1
