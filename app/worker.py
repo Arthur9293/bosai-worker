@@ -2043,12 +2043,11 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
 
     formula = (
         "OR("
-        "AND({Status_select}='Queued',OR(IS_BLANK({Scheduled_At}),IS_BEFORE({Scheduled_At},NOW()),{Scheduled_At}=NOW())),"
+        "AND({Status_select}='Queued',OR({Scheduled_At}=BLANK(),IS_BEFORE({Scheduled_At},NOW()),{Scheduled_At}=NOW())),"
         "AND({Status_select}='Retry',{Next_Retry_At}!=BLANK(),OR(IS_BEFORE({Next_Retry_At},NOW()),{Next_Retry_At}=NOW())),"
         "{Is_Lock_Stale}=1"
         ")"
     )
-
     try:
         cmds = airtable_list_filtered(
             COMMANDS_TABLE_NAME,
