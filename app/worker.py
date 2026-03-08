@@ -2062,14 +2062,12 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         view = f"scheduler_formula+view:{view_name}"
 
     except Exception as e:
-        print("DEBUG_FORMULA_MODE_FAILED:", repr(e))
+        
         selection_mode = "view_fallback"
         view = view_name
         cmds = airtable_list_view(COMMANDS_TABLE_NAME, view, max_records=max_cmds)
 
-    print("DEBUG_SELECTION_MODE:", selection_mode)
-    print("DEBUG_VIEW_USED:", view)
-    print("DEBUG_SCANNED_COUNT:", len(cmds))
+  
 
     executed = 0
     succeeded = 0
@@ -2083,14 +2081,13 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
     for c in cmds:
         cid = c.get("id")
         fields = c.get("fields", {}) or {}
-        print("DEBUG_COMMAND_STATUS:", cid, fields.get("Status_select"))
+       
         if not cid:
             continue
 
         processed_ids.append(cid)
 
         status = _read_command_status(fields).lower()
-        print("DEBUG_COMMAND_STATUS_NORMALIZED:", cid, status)
         
         if status not in ("queued", "queue", "retry"):
             blocked += 1
