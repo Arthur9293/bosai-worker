@@ -2061,12 +2061,18 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             ],
             max_records=max_cmds,
         )
+        print("DEBUG_FORMULA_MODE_OK")
         selection_mode = "scheduler"
         view = f"scheduler_formula+view:{view_name}"
-    except Exception:
-        selection_mode = "view_fallback"
-        view = view_name
-        cmds = airtable_list_view(COMMANDS_TABLE_NAME, view, max_records=max_cmds)
+except Exception as e:
+    print("DEBUG_FORMULA_MODE_FAILED:", repr(e))
+    selection_mode = "view_fallback"
+    view = view_name
+    cmds = airtable_list_view(COMMANDS_TABLE_NAME, view, max_records=max_cmds)
+
+print("DEBUG_SELECTION_MODE:", selection_mode)
+print("DEBUG_VIEW_USED:", view)
+print("DEBUG_SCANNED_COUNT:", len(cmds))
 
     executed = 0
     succeeded = 0
