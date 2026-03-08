@@ -322,7 +322,7 @@ def fetch_pending_events() -> List[Dict[str, Any]]:
     query = {
         "select": "*",
         "event_status": "eq.pending",
-        "dead_lettered": "eq.false",
+        #"dead_lettered": "eq.false",
         "order": "created_at.asc",
         "limit": str(DISPATCH_LIMIT),
     }
