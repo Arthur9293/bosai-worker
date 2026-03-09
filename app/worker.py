@@ -2690,6 +2690,61 @@ def get_events(limit: int = 30) -> Dict[str, Any]:
         "events": events,
         "ts": utc_now_iso(),
     }
+    class EventCreate(BaseModel):
+    event_type: str
+    source: Optional[str] = "api"
+    payload: Optional[Dict[str, Any]] = None
+    command_capability: Optional[str] = None
+    command_input: Optional[Dict[str, Any]] = None
+    idempotency_key: Optional[str] = None
+    workspace_id: Optional[str] = "production"
+
+
+@app.post("/events")
+def create_event(evt: EventCreate) -> Dict[str, Any]:
+    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+        raise HTTPException(status_code=500, detail="airtable not configured")
+
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{EVENTS_TABLE_NAME}"
+
+    payload_json = evt.payload or {}
+    command_input_json = evt.command_input or {}
+
+    fields = {
+        "Event_Type": evt.event_type,
+        "Status_select": "New",
+        "Source": evt.source,
+        "Workspace_ID": evt.workspace_id,
+        "Payload_JSON": json.dumps(payload_json, ensure_ascii=False),
+        "Mapped_Capability": evt.command_capability,
+        "Command_Input_JSON": json.dumps(command_input_json, ensure_ascii=False),
+        "Idempotency_Key": evt.idempotency_key,
+        "Command_Created": False,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    response = requests.post(
+        url,
+        headers=headers,
+        json={"fields": fields},
+        timeout=20,
+    )
+
+    if response.status_code >= 300:
+        raise HTTPException(status_code=500, detail=response.text)
+
+    data = response.json()
+
+    return {
+        "ok": True,
+        "event_id": data.get("id"),
+        "status": "New",
+        "ts": utc_now_iso(),
+    }
 
 
 @app.post("/run", response_model=RunResponse)
