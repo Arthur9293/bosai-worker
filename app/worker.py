@@ -1107,14 +1107,17 @@ def _create_command_from_event(
 
     res = _airtable_create_best_effort(COMMANDS_TABLE_NAME, candidates)
 
-    if not res.get("ok"):
-        raise HTTPException(
-            status_code=500,
-            detail=f"command_create_failed:{res.get('error')}",
-        )
+   res = _airtable_create_best_effort(COMMANDS_TABLE_NAME, candidates)
 
-    return {"id": res.get("record_id")}
+   if not res.get("ok"):
+       error_detail = res.get("error")
+       print("COMMAND_CREATE_ERROR:", error_detail)
+       raise HTTPException(
+           status_code=500,
+           detail=f"command_create_failed:{error_detail}",
+       )
 
+   return {"id": res.get("record_id")}
 
 # ============================================================
 # Capabilities
