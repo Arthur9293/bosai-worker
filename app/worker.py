@@ -1117,7 +1117,7 @@ def _create_command_from_event(
            detail=f"command_create_failed:{error_detail}",
        )
 
-   return {"id": res.get("record_id")}
+    return {"id": res.get("record_id")}
 
 # ============================================================
 # Capabilities
