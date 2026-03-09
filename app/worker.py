@@ -2782,7 +2782,7 @@ def get_incidents():
                     "other": 0,
                 },
                 "incidents": [],
-                "ts": now_iso(),
+                "ts": datetime.now(timezone.utc).isoformat(),
             }
 
         url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{quote(LOGS_ERRORS_TABLE_NAME)}"
