@@ -2764,29 +2764,114 @@ async def run(request: Request, response: Response) -> RunResponse:
 
 @app.get("/incidents")
 def get_incidents():
-    records = airtable_get_records(
-        table=LOGS_ERRORS_TABLE_NAME,
-        view="Active",
-        max_records=50
-    )
+    try:
+        if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+            return {
+                "ok": True,
+                "source": {
+                    "ok": False,
+                    "reason": "missing_airtable_env",
+                },
+                "count": 0,
+                "stats": {
+                    "open": 0,
+                    "critical": 0,
+                    "warning": 0,
+                    "resolved": 0,
+                    "other": 0,
+                },
+                "incidents": [],
+                "ts": now_iso(),
+            }
 
-    incidents = []
+        url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{quote(LOGS_ERRORS_TABLE_NAME)}"
 
-    for r in records:
-        f = r.get("fields", {})
+        headers = {
+            "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+            "Accept": "application/json",
+        }
 
-        incidents.append({
-            "id": r.get("id"),
-            "title": f.get("Error_Message"),
-            "status": f.get("Statut incident"),
-            "severity": f.get("Urgence IA"),
-            "sla_status": f.get("SLA_Status"),
-            "created": f.get("Created time"),
-            "worker": f.get("Worker"),
-        })
+        params = {
+            "view": "Active",
+            "maxRecords": 50,
+        }
 
-    return {
-        "ok": True,
-        "count": len(incidents),
-        "incidents": incidents
-    }
+        response = requests.get(url, headers=headers, params=params, timeout=20)
+        response.raise_for_status()
+
+        payload = response.json()
+        records = payload.get("records", [])
+
+        incidents = []
+        stats = {
+            "open": 0,
+            "critical": 0,
+            "warning": 0,
+            "resolved": 0,
+            "other": 0,
+        }
+
+        for r in records:
+            f = r.get("fields", {})
+
+            status = str(f.get("Statut incident") or "").strip()
+            severity = str(f.get("Urgence IA") or "").strip()
+
+            incidents.append({
+                "id": r.get("id"),
+                "title": f.get("Error_Message") or "Untitled incident",
+                "status": status,
+                "severity": severity,
+                "sla_status": f.get("SLA_Status"),
+                "created_at": f.get("Created time"),
+                "source": "Logs_Erreurs",
+                "worker": f.get("Worker"),
+            })
+
+            normalized_status = status.lower()
+            normalized_severity = severity.lower()
+
+            if normalized_status in ("open", "opened", "new", "en cours"):
+                stats["open"] += 1
+            elif normalized_status in ("resolved", "closed", "done", "résolu"):
+                stats["resolved"] += 1
+            elif normalized_severity in ("critical", "critique", "high"):
+                stats["critical"] += 1
+            elif normalized_severity in ("warning", "warn", "medium", "surveillance"):
+                stats["warning"] += 1
+            else:
+                stats["other"] += 1
+
+        return {
+            "ok": True,
+            "source": {
+                "ok": True,
+                "table": LOGS_ERRORS_TABLE_NAME,
+                "view": "Active",
+            },
+            "count": len(incidents),
+            "stats": stats,
+            "incidents": incidents,
+            "ts": now_iso(),
+        }
+
+    except requests.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.response.text
+        except Exception:
+            detail = str(exc)
+
+        raise HTTPException(
+            status_code=502,
+            detail=f"Airtable incidents request failed: {detail}",
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "detail": "Internal error",
+                "error": repr(exc),
+            },
+        )
