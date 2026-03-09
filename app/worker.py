@@ -1078,28 +1078,42 @@ def _create_command_from_event(
     if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
         raise HTTPException(status_code=500, detail="airtable not configured")
 
-    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{COMMANDS_TABLE_NAME}"
+    input_json = json.dumps(command_input or {}, ensure_ascii=False)
 
-    fields = {
-        "Capability": capability,
-        "Status": "Queue",
-        "Input_JSON": json.dumps(command_input or {}, ensure_ascii=False),
-    }
+    candidates: List[Dict[str, Any]] = [
+        {
+            "Capability": capability,
+            "Status_select": "Queue",
+            "Input_JSON": input_json,
+        },
+        {
+            "Capability": capability,
+            "Status_select": "Queued",
+            "Input_JSON": input_json,
+        },
+        {
+            "Capability": capability,
+            "Status_select": "Queue",
+        },
+        {
+            "Capability": capability,
+            "Status_select": "Queued",
+        },
+    ]
 
     if idempotency_key:
-        fields["Idempotency_Key"] = idempotency_key
+        for c in candidates:
+            c["Idempotency_Key"] = idempotency_key
 
-    response = requests.post(
-        url,
-        headers=_airtable_headers_json(),
-        json={"fields": fields},
-        timeout=20,
-    )
+    res = _airtable_create_best_effort(COMMANDS_TABLE_NAME, candidates)
 
-    if response.status_code >= 300:
-        raise HTTPException(status_code=500, detail=response.text)
+    if not res.get("ok"):
+        raise HTTPException(
+            status_code=500,
+            detail=f"command_create_failed:{res.get('error')}",
+        )
 
-    return response.json()
+    return {"id": res.get("record_id")}
 
 
 # ============================================================
