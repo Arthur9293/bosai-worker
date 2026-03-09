@@ -2853,7 +2853,7 @@ def get_incidents():
             "count": len(incidents),
             "stats": stats,
             "incidents": incidents,
-            "ts": now_iso(),
+            "ts": datetime.now(timezone.utc).isoformat(),
         }
 
     except requests.HTTPError as exc:
