@@ -2761,3 +2761,32 @@ async def run(request: Request, response: Response) -> RunResponse:
     except Exception as e:
         fail_system_run(run_record_id, repr(e))
         raise HTTPException(status_code=500, detail="Internal error.")
+
+@app.get("/incidents")
+def get_incidents():
+    records = airtable_get_records(
+        table=LOGS_ERRORS_TABLE_NAME,
+        view="Active",
+        max_records=50
+    )
+
+    incidents = []
+
+    for r in records:
+        f = r.get("fields", {})
+
+        incidents.append({
+            "id": r.get("id"),
+            "title": f.get("Error_Message"),
+            "status": f.get("Statut incident"),
+            "severity": f.get("Urgence IA"),
+            "sla_status": f.get("SLA_Status"),
+            "created": f.get("Created time"),
+            "worker": f.get("Worker"),
+        })
+
+    return {
+        "ok": True,
+        "count": len(incidents),
+        "incidents": incidents
+    }
