@@ -2690,7 +2690,7 @@ def get_events(limit: int = 30) -> Dict[str, Any]:
         "events": events,
         "ts": utc_now_iso(),
     }
-    class EventCreate(BaseModel):
+class EventCreate(BaseModel):
     event_type: str
     source: Optional[str] = "api"
     payload: Optional[Dict[str, Any]] = None
