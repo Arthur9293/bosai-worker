@@ -1023,6 +1023,83 @@ def _mark_event_error_best_effort(event_id: str, error_message: str) -> Dict[str
             },
         ],
     )
+def _json_loads_safe(value: Any, default: Any) -> Any:
+    if value is None:
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    if not isinstance(value, str):
+        return default
+
+    text = value.strip()
+    if not text:
+        return default
+
+    try:
+        return json.loads(text)
+    except Exception:
+        return default
+
+
+def _airtable_headers_json() -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+
+def _airtable_headers_auth() -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+    }
+
+
+def _airtable_update_record(table_name: str, record_id: str, fields: Dict[str, Any]) -> Dict[str, Any]:
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_name}/{record_id}"
+
+    response = requests.patch(
+        url,
+        headers=_airtable_headers_json(),
+        json={"fields": fields},
+        timeout=20,
+    )
+
+    if response.status_code >= 300:
+        raise HTTPException(status_code=500, detail=response.text)
+
+    return response.json()
+
+
+def _create_command_from_event(
+    capability: str,
+    command_input: Dict[str, Any],
+    idempotency_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+        raise HTTPException(status_code=500, detail="airtable not configured")
+
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{COMMANDS_TABLE_NAME}"
+
+    fields = {
+        "Capability": capability,
+        "Status": "Queue",
+        "Input_JSON": json.dumps(command_input or {}, ensure_ascii=False),
+    }
+
+    if idempotency_key:
+        fields["Idempotency_Key"] = idempotency_key
+
+    response = requests.post(
+        url,
+        headers=_airtable_headers_json(),
+        json={"fields": fields},
+        timeout=20,
+    )
+
+    if response.status_code >= 300:
+        raise HTTPException(status_code=500, detail=response.text)
+
+    return response.json()
 
 
 # ============================================================
@@ -2743,6 +2820,104 @@ def create_event(evt: EventCreate) -> Dict[str, Any]:
         "ok": True,
         "event_id": data.get("id"),
         "status": "New",
+        "ts": utc_now_iso(),
+    }
+
+@app.post("/events/process")
+def process_events(limit: int = 10) -> Dict[str, Any]:
+    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+        raise HTTPException(status_code=500, detail="airtable not configured")
+
+    limit = _safe_limit(limit, default=10, minimum=1, maximum=50)
+
+    records, meta = _safe_records_from_view(EVENTS_TABLE_NAME, EVENTS_VIEW_NAME, limit)
+
+    processed = 0
+    skipped = 0
+    errored = 0
+    created_commands: List[Dict[str, Any]] = []
+
+    for r in records:
+        record_id = r.get("id")
+        f = r.get("fields", {}) or {}
+
+        status = str(f.get("Status_select", f.get("Status", "")) or "").strip().lower()
+
+        if status != "new":
+            skipped += 1
+            continue
+
+        mapped_capability = str(f.get("Mapped_Capability") or "").strip()
+        command_input = _json_loads_safe(f.get("Command_Input_JSON"), {})
+        payload_json = _json_loads_safe(f.get("Payload_JSON"), {})
+        idempotency_key = f.get("Idempotency_Key")
+
+        if not mapped_capability:
+            _airtable_update_record(
+                EVENTS_TABLE_NAME,
+                record_id,
+                {
+                    "Status_select": "Error",
+                    "Error_Message": "Missing Mapped_Capability",
+                    "Processed_At": utc_now_iso(),
+                },
+            )
+            errored += 1
+            continue
+
+        try:
+            command_input_final = command_input if isinstance(command_input, dict) else {}
+            if not command_input_final and isinstance(payload_json, dict):
+                command_input_final = payload_json
+
+            command_record = _create_command_from_event(
+                capability=mapped_capability,
+                command_input=command_input_final,
+                idempotency_key=idempotency_key,
+            )
+
+            command_record_id = command_record.get("id")
+
+            _airtable_update_record(
+                EVENTS_TABLE_NAME,
+                record_id,
+                {
+                    "Status_select": "Processed",
+                    "Command_Created": True,
+                    "Command_Record_ID": command_record_id,
+                    "Processed_At": utc_now_iso(),
+                    "Error_Message": "",
+                },
+            )
+
+            processed += 1
+            created_commands.append(
+                {
+                    "event_id": record_id,
+                    "command_record_id": command_record_id,
+                    "capability": mapped_capability,
+                }
+            )
+
+        except Exception as exc:
+            _airtable_update_record(
+                EVENTS_TABLE_NAME,
+                record_id,
+                {
+                    "Status_select": "Error",
+                    "Error_Message": repr(exc),
+                    "Processed_At": utc_now_iso(),
+                },
+            )
+            errored += 1
+
+    return {
+        "ok": True,
+        "source": meta,
+        "processed": processed,
+        "skipped": skipped,
+        "errored": errored,
+        "commands": created_commands,
         "ts": utc_now_iso(),
     }
 
