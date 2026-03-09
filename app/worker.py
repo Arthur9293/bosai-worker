@@ -822,6 +822,7 @@ EVENT_TYPE_TO_CAPABILITY: Dict[str, str] = {
     "command.stale_lock": "lock_recovery",
     "system.health.check": "health_tick",
     "http.call.requested": "http_exec",
+    "manual.health.check": "health_tick",
 }
 
 def _event_target_capability(event_type: str) -> Optional[str]:
