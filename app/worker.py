@@ -824,7 +824,6 @@ EVENT_TYPE_TO_CAPABILITY: Dict[str, str] = {
     "http.call.requested": "http_exec",
 }
 
-
 def _event_target_capability(event_type: str) -> Optional[str]:
     return EVENT_TYPE_TO_CAPABILITY.get(str(event_type or "").strip())
 
