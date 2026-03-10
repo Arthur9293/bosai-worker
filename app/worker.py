@@ -1609,189 +1609,53 @@ def capability_lock_recovery(req: RunRequest, run_record_id: str) -> Dict[str, A
 # Event Engine v1 (SAFE, best-effort)
 # ============================================================
 
-def capability_event_engine(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    """
-    Event Engine v1:
-    - Read Events view Queue
-    - If Status=Queued and no command already created:
-      -> map Event_Type deterministically to target capability
-      -> create one Command
-      -> mark Event Processed + Command_Created + Linked_Command
-    - Unknown Event_Type -> Ignored
-    - Error -> Error
-    Guardrails:
-    - anti-duplicate via deterministic command idempotency key
-    - Payload_JSON may be empty
-    - best-effort updates
-    - no crash if fields absent
-    """
-    inp = req.input or {}
-    limit = int(inp.get("limit", 50) or 50)
-    if limit <= 0:
-        limit = 50
-    if limit > 200:
-        limit = 200
+@app.post("/events/process")
+def process_events(limit: int = 10) -> Dict[str, Any]:
+    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+        raise HTTPException(status_code=500, detail="airtable not configured")
 
-    view_name = (req.view or EVENTS_VIEW_NAME or "Queue").strip()
+    req = RunRequest.from_payload(
+        {
+            "worker": WORKER_NAME,
+            "capability": "event_engine",
+            "idempotency_key": f"events-process-{uuid.uuid4().hex}",
+            "priority": 1,
+            "input": {
+                "limit": _safe_limit(limit, default=10, minimum=1, maximum=50),
+                "view": "ALL",
+            },
+            "dry_run": False,
+        }
+    )
+
+    run_record_id, run_uuid = create_system_run(req)
 
     try:
-        events = airtable_list_view(EVENTS_TABLE_NAME, view_name, max_records=limit)
-        selection_mode = "view"
-    except Exception as e:
+        result_obj = capability_event_engine(req, run_record_id)
+
+        if isinstance(result_obj, dict) and "run_record_id" not in result_obj:
+            result_obj["run_record_id"] = run_record_id
+
+        finish_system_run(run_record_id, "Done", result_obj)
+
         return {
             "ok": True,
-            "view": view_name,
-            "selection_mode": "view_error",
-            "scanned": 0,
-            "created": 0,
-            "processed": 0,
-            "ignored": 0,
-            "errors_count": 1,
-            "errors": [repr(e)],
-            "run_record_id": run_record_id,
+            "run_id": run_uuid,
+            "airtable_record_id": run_record_id,
+            "result": result_obj,
             "ts": utc_now_iso(),
         }
 
-    scanned = 0
-    created = 0
-    processed = 0
-    ignored = 0
-    skipped = 0
-    errored = 0
+    except HTTPException as e:
+        fail_system_run(run_record_id, str(e.detail))
+        raise
 
-    commands_record_ids: List[str] = []
-    processed_event_ids: List[str] = []
-    ignored_event_ids: List[str] = []
-    skipped_event_ids: List[str] = []
-    error_event_ids: List[str] = []
-    errors: List[str] = []
-
-    for ev in events:
-        event_id = ev.get("id")
-        if not event_id:
-            continue
-
-        scanned += 1
-        fields = ev.get("fields", {}) or {}
-
-        status = _event_status(fields)
-        command_created = _is_truthy(fields.get("Command_Created"))
-        has_linked_command = _event_has_linked_command(fields)
-
-        normalized_status = status.strip().lower()
-
-        if normalized_status not in ("queued", "queue", "new"):
-            skipped += 1
-            skipped_event_ids.append(event_id)
-            continue
-
-        if command_created or has_linked_command:
-            skipped += 1
-            skipped_event_ids.append(event_id)
-            continue
-
-        event_type = str(fields.get("Event_Type", "") or "").strip()
-        target_capability = _event_target_capability(event_type)
-
-        if not target_capability:
-            res = _mark_event_ignored_best_effort(event_id, "Unknown Event_Type", event_type)
-            if not res.get("ok"):
-                errors.append(f"{event_id}: ignored_update_failed:{res.get('error')}")
-                errored += 1
-                error_event_ids.append(event_id)
-            else:
-                ignored += 1
-                ignored_event_ids.append(event_id)
-            continue
-
-        idem_key = _event_command_idem(event_id, target_capability)
-
-        existing_cmd = find_command_by_idem(idem_key)
-        if existing_cmd:
-            existing_cmd_id = existing_cmd.get("id")
-            if existing_cmd_id:
-                res = _mark_event_processed_best_effort(event_id, existing_cmd_id, target_capability)
-                if res.get("ok"):
-                    processed += 1
-                    processed_event_ids.append(event_id)
-                    commands_record_ids.append(existing_cmd_id)
-                else:
-                    errored += 1
-                    error_event_ids.append(event_id)
-                    errors.append(f"{event_id}: processed_update_failed:{res.get('error')}")
-            else:
-                err = "existing_command_without_id"
-                _mark_event_error_best_effort(event_id, err)
-                errored += 1
-                error_event_ids.append(event_id)
-                errors.append(f"{event_id}: {err}")
-            continue
-
-        payload = _event_payload(fields)
-        if not isinstance(payload, dict):
-            payload = {}
-
-        create_res = _airtable_create_best_effort(
-            COMMANDS_TABLE_NAME,
-            _build_command_fields_candidates(
-                capability=target_capability,
-                idem_key=idem_key,
-                input_obj=payload,
-                run_record_id=run_record_id,
-                event_id=event_id,
-                event_type=event_type,
-            ),
+    except Exception as e:
+        fail_system_run(run_record_id, repr(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"events_process_failed: {repr(e)}",
         )
-
-        if not create_res.get("ok"):
-            err = f"command_create_failed:{create_res.get('error')}"
-            _mark_event_error_best_effort(event_id, err)
-            errored += 1
-            error_event_ids.append(event_id)
-            errors.append(f"{event_id}: {err}")
-            continue
-
-        command_record_id = str(create_res.get("record_id") or "").strip()
-        if not command_record_id:
-            err = "command_created_but_missing_record_id"
-            _mark_event_error_best_effort(event_id, err)
-            errored += 1
-            error_event_ids.append(event_id)
-            errors.append(f"{event_id}: {err}")
-            continue
-
-        created += 1
-        commands_record_ids.append(command_record_id)
-
-        mark_res = _mark_event_processed_best_effort(event_id, command_record_id, target_capability)
-        if mark_res.get("ok"):
-            processed += 1
-            processed_event_ids.append(event_id)
-        else:
-            errored += 1
-            error_event_ids.append(event_id)
-            errors.append(f"{event_id}: processed_update_failed:{mark_res.get('error')}")
-
-    return {
-        "ok": True,
-        "view": view_name,
-        "selection_mode": selection_mode,
-        "scanned": scanned,
-        "created": created,
-        "processed": processed,
-        "ignored": ignored,
-        "skipped": skipped,
-        "errored": errored,
-        "commands_record_ids": commands_record_ids,
-        "processed_event_ids": processed_event_ids,
-        "ignored_event_ids": ignored_event_ids,
-        "skipped_event_ids": skipped_event_ids,
-        "error_event_ids": error_event_ids,
-        "errors_count": len(errors),
-        "errors": errors[:10],
-        "run_record_id": run_record_id,
-        "ts": utc_now_iso(),
-    }
 def _extract_http_status_from_result(result_obj: Dict[str, Any]) -> Optional[int]:
     if not isinstance(result_obj, dict):
         return None
