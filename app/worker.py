@@ -1102,20 +1102,18 @@ def _create_command_from_event(
     ]
 
     if idempotency_key:
-        for c in candidates:
-            c["Idempotency_Key"] = idempotency_key
+        for candidate in candidates:
+            candidate["Idempotency_Key"] = idempotency_key
 
     res = _airtable_create_best_effort(COMMANDS_TABLE_NAME, candidates)
 
-   res = _airtable_create_best_effort(COMMANDS_TABLE_NAME, candidates)
-
-   if not res.get("ok"):
-       error_detail = res.get("error")
-       print("COMMAND_CREATE_ERROR:", error_detail)
-       raise HTTPException(
-           status_code=500,
-           detail=f"command_create_failed:{error_detail}",
-       )
+    if not res.get("ok"):
+        error_detail = res.get("error")
+        print("COMMAND_CREATE_ERROR:", error_detail)
+        raise HTTPException(
+            status_code=500,
+            detail=f"command_create_failed:{error_detail}",
+        )
 
     return {"id": res.get("record_id")}
 
