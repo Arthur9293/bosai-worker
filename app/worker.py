@@ -912,43 +912,55 @@ def _mark_event_processed_best_effort(event_id: str, command_record_id: str, cap
         [
             {
                 "Status": "Processed",
+                "Status_select": "Processed",
                 "Command_Created": True,
                 "Linked_Command": [command_record_id],
+                "Command_Record_ID": command_record_id,
+                "Processed_At": now,
+                "Mapped_Capability": capability,
+                "Error_Message": "",
+            },
+            {
+                "Status_select": "Processed",
+                "Command_Created": True,
+                "Linked_Command": [command_record_id],
+                "Command_Record_ID": command_record_id,
+                "Processed_At": now,
+                "Mapped_Capability": capability,
+                "Error_Message": "",
+            },
+            {
+                "Status": "Processed",
+                "Command_Created": True,
+                "Linked_Command": [command_record_id],
+                "Command_Record_ID": command_record_id,
                 "Processed_At": now,
                 "Mapped_Capability": capability,
             },
             {
                 "Status_select": "Processed",
                 "Command_Created": True,
-                "Linked_Command": [command_record_id],
+                "Command_Record_ID": command_record_id,
                 "Processed_At": now,
                 "Mapped_Capability": capability,
             },
             {
                 "Status": "Processed",
                 "Command_Created": True,
-                "Linked_Command": [command_record_id],
+                "Command_Record_ID": command_record_id,
             },
             {
                 "Status_select": "Processed",
                 "Command_Created": True,
-                "Linked_Command": [command_record_id],
-            },
-            {
-                "Status": "Processed",
-                "Command_Created": True,
-            },
-            {
-                "Status_select": "Processed",
-                "Command_Created": True,
+                "Command_Record_ID": command_record_id,
             },
             {
                 "Command_Created": True,
                 "Linked_Command": [command_record_id],
+                "Command_Record_ID": command_record_id,
             },
         ],
     )
-
 
 def _mark_event_ignored_best_effort(event_id: str, reason: str, event_type: str) -> Dict[str, Any]:
     now = utc_now_iso()
