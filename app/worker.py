@@ -3152,3 +3152,40 @@ def get_event_mappings(limit: int = 50) -> Dict[str, Any]:
         "mappings": mappings,
         "ts": utc_now_iso(),
     }
+
+@app.get("/event-command-graph")
+def get_event_command_graph(limit: int = 50):
+    limit = _safe_limit(limit, default=50, minimum=1, maximum=200)
+
+    events = airtable_get_records("Events", limit=limit)
+
+    result = []
+
+    for e in events:
+        command_id = e.get("Command_Record_ID")
+        command = None
+        run = None
+
+        if command_id:
+            command = airtable_get_record("Commands", command_id)
+
+        if command:
+            run_id = command.get("Run_Record_ID")
+            if run_id:
+                run = airtable_get_record("System_Runs", run_id)
+
+        result.append({
+            "event_id": e.get("Event_ID"),
+            "event_type": e.get("Event_Type"),
+            "capability": e.get("Mapped_Capability"),
+            "command_id": command_id,
+            "run_id": run.get("Run_ID") if run else None,
+            "run_status": run.get("Status_select") if run else None,
+        })
+
+    return {
+        "ok": True,
+        "count": len(result),
+        "graph": result,
+        "ts": utc_now_iso(),
+    }
