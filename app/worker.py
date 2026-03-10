@@ -965,72 +965,98 @@ def _mark_event_processed_best_effort(event_id: str, command_record_id: str, cap
 def _mark_event_ignored_best_effort(event_id: str, reason: str, event_type: str) -> Dict[str, Any]:
     now = utc_now_iso()
     payload = json.dumps({"reason": reason, "event_type": event_type}, ensure_ascii=False)
+
     return _airtable_update_best_effort(
         EVENTS_TABLE_NAME,
         event_id,
         [
             {
                 "Status": "Ignored",
+                "Status_select": "Ignored",
+                "Command_Created": False,
+                "Command_Record_ID": "",
                 "Processed_At": now,
                 "Error_Message": reason,
                 "Result_JSON": payload,
             },
             {
                 "Status_select": "Ignored",
+                "Command_Created": False,
+                "Command_Record_ID": "",
                 "Processed_At": now,
                 "Error_Message": reason,
                 "Result_JSON": payload,
             },
             {
                 "Status": "Ignored",
+                "Command_Created": False,
+                "Processed_At": now,
                 "Error_Message": reason,
+                "Result_JSON": payload,
             },
             {
                 "Status_select": "Ignored",
+                "Command_Created": False,
+                "Processed_At": now,
                 "Error_Message": reason,
             },
             {
                 "Status": "Ignored",
+                "Command_Created": False,
+                "Error_Message": reason,
             },
             {
                 "Status_select": "Ignored",
+                "Command_Created": False,
             },
         ],
     )
-
-
 def _mark_event_error_best_effort(event_id: str, error_message: str) -> Dict[str, Any]:
     now = utc_now_iso()
     payload = json.dumps({"error": error_message}, ensure_ascii=False)
+
     return _airtable_update_best_effort(
         EVENTS_TABLE_NAME,
         event_id,
         [
             {
                 "Status": "Error",
+                "Status_select": "Error",
+                "Command_Created": False,
+                "Command_Record_ID": "",
                 "Processed_At": now,
                 "Error_Message": error_message,
                 "Result_JSON": payload,
             },
             {
                 "Status_select": "Error",
+                "Command_Created": False,
+                "Command_Record_ID": "",
                 "Processed_At": now,
                 "Error_Message": error_message,
                 "Result_JSON": payload,
             },
             {
                 "Status": "Error",
+                "Command_Created": False,
+                "Processed_At": now,
                 "Error_Message": error_message,
+                "Result_JSON": payload,
             },
             {
                 "Status_select": "Error",
+                "Command_Created": False,
+                "Processed_At": now,
                 "Error_Message": error_message,
             },
             {
                 "Status": "Error",
+                "Command_Created": False,
+                "Error_Message": error_message,
             },
             {
                 "Status_select": "Error",
+                "Command_Created": False,
             },
         ],
     )
