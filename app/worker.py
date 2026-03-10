@@ -850,8 +850,7 @@ def _event_payload(fields: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _event_status(fields: Dict[str, Any]) -> str:
-    return str(fields.get("Status", fields.get("Status_select", "")) or "").strip()
-
+    return str(fields.get("Status_select", fields.get("Status", "")) or "").strip()
 
 def _build_command_fields_candidates(
     capability: str,
@@ -1070,53 +1069,52 @@ def _airtable_update_record(table_name: str, record_id: str, fields: Dict[str, A
     return response.json()
 
 
-def _create_command_from_event(
-    capability: str,
-    command_input: Dict[str, Any],
-    idempotency_key: Optional[str] = None,
-) -> Dict[str, Any]:
+@app.post("/events/process")
+def process_events(limit: int = 10) -> Dict[str, Any]:
     if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
         raise HTTPException(status_code=500, detail="airtable not configured")
 
-    input_json = json.dumps(command_input or {}, ensure_ascii=False)
-
-    candidates: List[Dict[str, Any]] = [
+    req = RunRequest.from_payload(
         {
-            "Capability": capability,
-            "Status_select": "Queue",
-            "Input_JSON": input_json,
-        },
-        {
-            "Capability": capability,
-            "Status_select": "Queued",
-            "Input_JSON": input_json,
-        },
-        {
-            "Capability": capability,
-            "Status_select": "Queue",
-        },
-        {
-            "Capability": capability,
-            "Status_select": "Queued",
-        },
-    ]
+            "worker": WORKER_NAME,
+            "capability": "event_engine",
+            "idempotency_key": f"events-process-{uuid.uuid4().hex}",
+            "priority": 1,
+            "input": {
+                "limit": _safe_limit(limit, default=10, minimum=1, maximum=50),
+            },
+            "dry_run": False,
+        }
+    )
 
-    if idempotency_key:
-        for candidate in candidates:
-            candidate["Idempotency_Key"] = idempotency_key
+    run_record_id, run_uuid = create_system_run(req)
 
-    res = _airtable_create_best_effort(COMMANDS_TABLE_NAME, candidates)
+    try:
+        result_obj = capability_event_engine(req, run_record_id)
 
-    if not res.get("ok"):
-        error_detail = res.get("error")
-        print("COMMAND_CREATE_ERROR:", error_detail)
+        if isinstance(result_obj, dict) and "run_record_id" not in result_obj:
+            result_obj["run_record_id"] = run_record_id
+
+        finish_system_run(run_record_id, "Done", result_obj)
+
+        return {
+            "ok": True,
+            "run_id": run_uuid,
+            "airtable_record_id": run_record_id,
+            "result": result_obj,
+            "ts": utc_now_iso(),
+        }
+
+    except HTTPException as e:
+        fail_system_run(run_record_id, str(e.detail))
+        raise
+
+    except Exception as e:
+        fail_system_run(run_record_id, repr(e))
         raise HTTPException(
             status_code=500,
-            detail=f"command_create_failed:{error_detail}",
+            detail=f"events_process_failed: {repr(e)}",
         )
-
-    return {"id": res.get("record_id")}
-
 # ============================================================
 # Capabilities
 # ============================================================
@@ -1680,7 +1678,9 @@ def capability_event_engine(req: RunRequest, run_record_id: str) -> Dict[str, An
         command_created = _is_truthy(fields.get("Command_Created"))
         has_linked_command = _event_has_linked_command(fields)
 
-        if status != "Queued":
+        normalized_status = status.strip().lower()
+
+        if normalized_status not in ("queued", "queue", "new"):
             skipped += 1
             skipped_event_ids.append(event_id)
             continue
