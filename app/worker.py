@@ -1069,52 +1069,6 @@ def _airtable_update_record(table_name: str, record_id: str, fields: Dict[str, A
     return response.json()
 
 
-@app.post("/events/process")
-def process_events(limit: int = 10) -> Dict[str, Any]:
-    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
-        raise HTTPException(status_code=500, detail="airtable not configured")
-
-    req = RunRequest.from_payload(
-        {
-            "worker": WORKER_NAME,
-            "capability": "event_engine",
-            "idempotency_key": f"events-process-{uuid.uuid4().hex}",
-            "priority": 1,
-            "input": {
-                "limit": _safe_limit(limit, default=10, minimum=1, maximum=50),
-            },
-            "dry_run": False,
-        }
-    )
-
-    run_record_id, run_uuid = create_system_run(req)
-
-    try:
-        result_obj = capability_event_engine(req, run_record_id)
-
-        if isinstance(result_obj, dict) and "run_record_id" not in result_obj:
-            result_obj["run_record_id"] = run_record_id
-
-        finish_system_run(run_record_id, "Done", result_obj)
-
-        return {
-            "ok": True,
-            "run_id": run_uuid,
-            "airtable_record_id": run_record_id,
-            "result": result_obj,
-            "ts": utc_now_iso(),
-        }
-
-    except HTTPException as e:
-        fail_system_run(run_record_id, str(e.detail))
-        raise
-
-    except Exception as e:
-        fail_system_run(run_record_id, repr(e))
-        raise HTTPException(
-            status_code=500,
-            detail=f"events_process_failed: {repr(e)}",
-        )
 # ============================================================
 # Capabilities
 # ============================================================
@@ -1423,7 +1377,97 @@ def capability_lock_release(req: RunRequest, run_record_id: str) -> Dict[str, An
 def _read_command_status(fields: Dict[str, Any]) -> str:
     return str(fields.get("Status_select", fields.get("Status", fields.get("Status_raw", ""))) or "").strip()
 
+def capability_event_engine(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    inp = req.input or {}
+    limit = _safe_limit(int(inp.get("limit", 10) or 10), default=10, minimum=1, maximum=50)
+    view_name = str(inp.get("view") or EVENTS_VIEW_NAME or "Queue").strip()
 
+    try:
+        records = airtable_list_view(EVENTS_TABLE_NAME, view_name, max_records=limit)
+        source = {"ok": True, "table": EVENTS_TABLE_NAME, "view": view_name}
+    except Exception as e:
+        return {
+            "ok": True,
+            "source": {"ok": False, "table": EVENTS_TABLE_NAME, "view": view_name, "error": repr(e)},
+            "processed": 0,
+            "skipped": 0,
+            "errored": 0,
+            "commands": [],
+            "run_record_id": run_record_id,
+            "ts": utc_now_iso(),
+        }
+
+    processed = 0
+    skipped = 0
+    errored = 0
+    commands: List[Dict[str, Any]] = []
+
+    for r in records:
+        event_id = r.get("id")
+        fields = r.get("fields", {}) or {}
+
+        if not event_id:
+            skipped += 1
+            continue
+
+        status = _event_status(fields).lower()
+        if status not in ("new", "queued", "queue"):
+            skipped += 1
+            continue
+
+        if _event_has_linked_command(fields):
+            skipped += 1
+            continue
+
+        event_type = str(fields.get("Event_Type") or "").strip()
+        mapped_capability = str(fields.get("Mapped_Capability") or "").strip() or _event_target_capability(event_type)
+
+        if not mapped_capability:
+            _mark_event_ignored_best_effort(event_id, "no_capability_mapping", event_type)
+            skipped += 1
+            continue
+
+        payload_json = _json_loads_safe(fields.get("Payload_JSON"), {})
+        command_input = _json_loads_safe(fields.get("Command_Input_JSON"), {})
+        command_input_final = command_input if isinstance(command_input, dict) and command_input else payload_json
+        idem = str(fields.get("Idempotency_Key") or "").strip() or _event_command_idem(event_id, mapped_capability)
+
+        try:
+            command_record = _create_command_from_event(
+                capability=mapped_capability,
+                command_input=command_input_final,
+                idempotency_key=idem,
+                run_record_id=run_record_id,
+                event_id=event_id,
+                event_type=event_type,
+            )
+
+            command_record_id = command_record.get("id")
+            _mark_event_processed_best_effort(event_id, command_record_id, mapped_capability)
+
+            processed += 1
+            commands.append(
+                {
+                    "event_id": event_id,
+                    "command_record_id": command_record_id,
+                    "capability": mapped_capability,
+                }
+            )
+
+        except Exception as e:
+            _mark_event_error_best_effort(event_id, repr(e))
+            errored += 1
+
+    return {
+        "ok": True,
+        "source": source,
+        "processed": processed,
+        "skipped": skipped,
+        "errored": errored,
+        "commands": commands,
+        "run_record_id": run_record_id,
+        "ts": utc_now_iso(),
+    }
 # ============================================================
 # Retry Queue (SAFE, best-effort)
 # ============================================================
@@ -1609,53 +1653,7 @@ def capability_lock_recovery(req: RunRequest, run_record_id: str) -> Dict[str, A
 # Event Engine v1 (SAFE, best-effort)
 # ============================================================
 
-@app.post("/events/process")
-def process_events(limit: int = 10) -> Dict[str, Any]:
-    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
-        raise HTTPException(status_code=500, detail="airtable not configured")
 
-    req = RunRequest.from_payload(
-        {
-            "worker": WORKER_NAME,
-            "capability": "event_engine",
-            "idempotency_key": f"events-process-{uuid.uuid4().hex}",
-            "priority": 1,
-            "input": {
-                "limit": _safe_limit(limit, default=10, minimum=1, maximum=50),
-                "view": "ALL",
-            },
-            "dry_run": False,
-        }
-    )
-
-    run_record_id, run_uuid = create_system_run(req)
-
-    try:
-        result_obj = capability_event_engine(req, run_record_id)
-
-        if isinstance(result_obj, dict) and "run_record_id" not in result_obj:
-            result_obj["run_record_id"] = run_record_id
-
-        finish_system_run(run_record_id, "Done", result_obj)
-
-        return {
-            "ok": True,
-            "run_id": run_uuid,
-            "airtable_record_id": run_record_id,
-            "result": result_obj,
-            "ts": utc_now_iso(),
-        }
-
-    except HTTPException as e:
-        fail_system_run(run_record_id, str(e.detail))
-        raise
-
-    except Exception as e:
-        fail_system_run(run_record_id, repr(e))
-        raise HTTPException(
-            status_code=500,
-            detail=f"events_process_failed: {repr(e)}",
-        )
 def _extract_http_status_from_result(result_obj: Dict[str, Any]) -> Optional[int]:
     if not isinstance(result_obj, dict):
         return None
@@ -2333,6 +2331,51 @@ def _resolve_http_exec_url_from_command_input(cmd_input: Dict[str, Any]) -> str:
 
     return ""
 
+def _create_command_from_event(
+    capability: str,
+    command_input: Dict[str, Any],
+    idempotency_key: Optional[str] = None,
+    run_record_id: Optional[str] = None,
+    event_id: Optional[str] = None,
+    event_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    capability = str(capability or "").strip()
+    if not capability:
+        raise HTTPException(status_code=400, detail="Missing capability")
+
+    input_obj = command_input if isinstance(command_input, dict) else {}
+    idem = str(idempotency_key or "").strip()
+
+    if not idem and event_id:
+        idem = _event_command_idem(event_id, capability)
+
+    if not idem:
+        idem = f"cmd:{capability}:{uuid.uuid4().hex}"
+
+    existing = find_command_by_idem(idem)
+    if existing:
+        return existing
+
+    candidates = _build_command_fields_candidates(
+        capability=capability,
+        idem_key=idem,
+        input_obj=input_obj,
+        run_record_id=(run_record_id or ""),
+        event_id=(event_id or ""),
+        event_type=(event_type or ""),
+    )
+
+    create_res = _airtable_create_best_effort(COMMANDS_TABLE_NAME, candidates)
+    if not create_res.get("ok"):
+        raise HTTPException(
+            status_code=500,
+            detail=f"create_command_failed: {create_res.get('error')}",
+        )
+
+    record_id = create_res.get("record_id")
+    return {"id": record_id, "fields": {"Capability": capability, "Idempotency_Key": idem}}
+    
+
 CAPABILITIES = {
     "health_tick": capability_health_tick,
     "commands_tick": capability_commands_tick,
@@ -2416,7 +2459,7 @@ def health_score() -> Dict[str, Any]:
 @app.get("/runs")
 def get_runs(limit: int = 20) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=20, minimum=1, maximum=100)
-    records, meta = _safe_records_from_view(SYSTEM_RUNS_TABLE_NAME, SYSTEM_RUNS_VIEW_NAME, limit)
+    records, meta = _safe_records_from_view(EVENTS_TABLE_NAME, EVENTS_DASHBOARD_VIEW_NAME, limit)
     runs: List[Dict[str, Any]] = []
     stats = {
         "running": 0,
@@ -3033,37 +3076,69 @@ def get_event_mappings(limit: int = 50) -> Dict[str, Any]:
     }
 
 @app.get("/event-command-graph")
-def get_event_command_graph(limit: int = 50):
+def get_event_command_graph(limit: int = 50) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=50, minimum=1, maximum=200)
 
-    events = airtable_get_records("Events", limit=limit)
+    event_records, meta = _safe_records_from_view(EVENTS_TABLE_NAME, EVENTS_DASHBOARD_VIEW_NAME, limit)
+    result: List[Dict[str, Any]] = []
 
-    result = []
+    for r in event_records:
+        f = r.get("fields", {}) or {}
 
-    for e in events:
-        command_id = e.get("Command_Record_ID")
-        command = None
-        run = None
+        linked_command = f.get("Linked_Command")
+        command_record_id = linked_command[0] if isinstance(linked_command, list) and linked_command else f.get("Command_Record_ID")
 
-        if command_id:
-            command = airtable_get_record("Commands", command_id)
+        command_capability = None
+        command_status = None
+        run_id = None
+        run_status = None
 
-        if command:
-            run_id = command.get("Run_Record_ID")
-            if run_id:
-                run = airtable_get_record("System_Runs", run_id)
+        if command_record_id:
+            try:
+                cmd = _HTTP_SESSION.get(
+                    f"{_airtable_url(COMMANDS_TABLE_NAME)}/{command_record_id}",
+                    headers=_airtable_headers(),
+                    timeout=HTTP_TIMEOUT_SECONDS,
+                )
+                if cmd.status_code < 300:
+                    cmd_json = cmd.json()
+                    cmd_fields = cmd_json.get("fields", {}) or {}
+                    command_capability = cmd_fields.get("Capability")
+                    command_status = _read_command_status(cmd_fields)
 
-        result.append({
-            "event_id": e.get("Event_ID"),
-            "event_type": e.get("Event_Type"),
-            "capability": e.get("Mapped_Capability"),
-            "command_id": command_id,
-            "run_id": run.get("Run_ID") if run else None,
-            "run_status": run.get("Status_select") if run else None,
-        })
+                    linked_run = cmd_fields.get("Linked_Run")
+                    run_record_id = linked_run[0] if isinstance(linked_run, list) and linked_run else None
+                    if run_record_id:
+                        run_resp = _HTTP_SESSION.get(
+                            f"{_airtable_url(SYSTEM_RUNS_TABLE_NAME)}/{run_record_id}",
+                            headers=_airtable_headers(),
+                            timeout=HTTP_TIMEOUT_SECONDS,
+                        )
+                        if run_resp.status_code < 300:
+                            run_json = run_resp.json()
+                            run_fields = run_json.get("fields", {}) or {}
+                            run_id = run_fields.get("Run_ID")
+                            run_status = run_fields.get("Status_select")
+            except Exception:
+                pass
+
+        result.append(
+            {
+                "event_id": r.get("id"),
+                "event_type": f.get("Event_Type"),
+                "event_status": _event_status(f),
+                "mapped_capability": f.get("Mapped_Capability"),
+                "command_record_id": command_record_id,
+                "command_capability": command_capability,
+                "command_status": command_status,
+                "run_id": run_id,
+                "run_status": run_status,
+            }
+        )
 
     return {
-        "ok": True,
+        "ok": bool(meta.get("ok")),
+        "source": meta,
         "count": len(result),
         "graph": result,
         "ts": utc_now_iso(),
