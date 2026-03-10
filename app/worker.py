@@ -3121,3 +3121,34 @@ def get_incidents():
                 "error": repr(exc),
             },
         )
+
+@app.get("/event-mappings")
+def get_event_mappings(limit: int = 50) -> Dict[str, Any]:
+    limit = _safe_limit(limit, default=50, minimum=1, maximum=200)
+
+    mappings = []
+    stats = {
+        "enabled": 0,
+        "disabled": 0,
+        "other": 0,
+    }
+
+    for event_type, capability in EVENT_TYPE_TO_CAPABILITY.items():
+        item = {
+            "event_type": event_type,
+            "capability": capability,
+            "enabled": True,
+            "source": "worker_static_mapping",
+        }
+        mappings.append(item)
+        stats["enabled"] += 1
+
+    mappings = mappings[:limit]
+
+    return {
+        "ok": True,
+        "count": len(mappings),
+        "stats": stats,
+        "mappings": mappings,
+        "ts": utc_now_iso(),
+    }
