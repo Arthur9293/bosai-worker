@@ -2845,7 +2845,12 @@ def process_events(limit: int = 10) -> Dict[str, Any]:
 
     limit = _safe_limit(limit, default=10, minimum=1, maximum=50)
 
-    records, meta = _safe_records_from_view(EVENTS_TABLE_NAME, EVENTS_VIEW_NAME, limit)
+    records, meta = _safe_records_from_view(EVENTS_TABLE_NAME, "ALL", limit)
+
+    print("EVENTS_PROCESS_DEBUG", {
+        "count": len(records),
+        "view": "ALL",
+    })
 
     processed = 0
     skipped = 0
@@ -2856,13 +2861,21 @@ def process_events(limit: int = 10) -> Dict[str, Any]:
         record_id = r.get("id")
         f = r.get("fields", {}) or {}
 
-        status = str(f.get("Status_select", f.get("Status", "")) or "").strip().lower()
+        raw_status = f.get("Status_select", f.get("Status", ""))
+        status = str(raw_status or "").strip().lower()
+        mapped_capability = str(f.get("Mapped_Capability") or "").strip()
+
+        print("EVENT_ROW_DEBUG", {
+            "record_id": record_id,
+            "raw_status": raw_status,
+            "status": status,
+            "mapped_capability": mapped_capability,
+        })
 
         if status not in ("new", "queued", "queue"):
             skipped += 1
             continue
 
-        mapped_capability = str(f.get("Mapped_Capability") or "").strip()
         command_input = _json_loads_safe(f.get("Command_Input_JSON"), {})
         payload_json = _json_loads_safe(f.get("Payload_JSON"), {})
         idempotency_key = f.get("Idempotency_Key")
@@ -2915,6 +2928,10 @@ def process_events(limit: int = 10) -> Dict[str, Any]:
             )
 
         except Exception as exc:
+            print("EVENT_PROCESS_ERROR", {
+                "record_id": record_id,
+                "error": repr(exc),
+            })
             _airtable_update_record(
                 EVENTS_TABLE_NAME,
                 record_id,
