@@ -2858,7 +2858,7 @@ def process_events(limit: int = 10) -> Dict[str, Any]:
 
         status = str(f.get("Status_select", f.get("Status", "")) or "").strip().lower()
 
-        if status != "new":
+        if status not in ("new", "queued", "queue"):
             skipped += 1
             continue
 
@@ -2935,8 +2935,6 @@ def process_events(limit: int = 10) -> Dict[str, Any]:
         "commands": created_commands,
         "ts": utc_now_iso(),
     }
-
-
 @app.post("/run", response_model=RunResponse)
 async def run(request: Request, response: Response) -> RunResponse:
     started = time.time()
