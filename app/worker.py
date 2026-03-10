@@ -2459,7 +2459,7 @@ def health_score() -> Dict[str, Any]:
 @app.get("/runs")
 def get_runs(limit: int = 20) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=20, minimum=1, maximum=100)
-    records, meta = _safe_records_from_view(EVENTS_TABLE_NAME, EVENTS_DASHBOARD_VIEW_NAME, limit)
+    records, meta = _safe_records_from_view(SYSTEM_RUNS_TABLE_NAME, SYSTEM_RUNS_VIEW_NAME, limit)
     runs: List[Dict[str, Any]] = []
     stats = {
         "running": 0,
@@ -2635,10 +2635,11 @@ def get_sla(limit: int = 50) -> Dict[str, Any]:
 @app.get("/events")
 def get_events(limit: int = 30) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=30, minimum=1, maximum=100)
-    records, meta = _safe_records_from_view(EVENTS_TABLE_NAME, EVENTS_VIEW_NAME, limit)
+    records, meta = _safe_records_from_view(EVENTS_TABLE_NAME, EVENTS_DASHBOARD_VIEW_NAME, limit)
 
     events: List[Dict[str, Any]] = []
     stats = {
+        "new": 0,
         "queued": 0,
         "processed": 0,
         "ignored": 0,
@@ -2652,7 +2653,9 @@ def get_events(limit: int = 30) -> Dict[str, Any]:
         status = str(f.get("Status", f.get("Status_select", "")) or "").strip()
         key = status.lower()
 
-        if key == "queued":
+        if key == "new":
+            stats["new"] += 1
+        elif key == "queued":
             stats["queued"] += 1
         elif key == "processed":
             stats["processed"] += 1
@@ -2750,115 +2753,48 @@ def process_events(limit: int = 10) -> Dict[str, Any]:
     if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
         raise HTTPException(status_code=500, detail="airtable not configured")
 
-    limit = _safe_limit(limit, default=10, minimum=1, maximum=50)
+    req = RunRequest.from_payload(
+        {
+            "worker": WORKER_NAME,
+            "capability": "event_engine",
+            "idempotency_key": f"events-process-{uuid.uuid4().hex}",
+            "priority": 1,
+            "input": {
+                "limit": _safe_limit(limit, default=10, minimum=1, maximum=50),
+                "view": "ALL",
+            },
+            "dry_run": False,
+        }
+    )
 
-    records, meta = _safe_records_from_view(EVENTS_TABLE_NAME, "ALL", limit)
+    run_record_id, run_uuid = create_system_run(req)
 
-    print("EVENTS_PROCESS_DEBUG", {
-        "count": len(records),
-        "view": "ALL",
-    })
+    try:
+        result_obj = capability_event_engine(req, run_record_id)
 
-    processed = 0
-    skipped = 0
-    errored = 0
-    created_commands: List[Dict[str, Any]] = []
+        if isinstance(result_obj, dict) and "run_record_id" not in result_obj:
+            result_obj["run_record_id"] = run_record_id
 
-    for r in records:
-        record_id = r.get("id")
-        f = r.get("fields", {}) or {}
+        finish_system_run(run_record_id, "Done", result_obj)
 
-        raw_status = f.get("Status_select", f.get("Status", ""))
-        status = str(raw_status or "").strip().lower()
-        mapped_capability = str(f.get("Mapped_Capability") or "").strip()
+        return {
+            "ok": True,
+            "run_id": run_uuid,
+            "airtable_record_id": run_record_id,
+            "result": result_obj,
+            "ts": utc_now_iso(),
+        }
 
-        print("EVENT_ROW_DEBUG", {
-            "record_id": record_id,
-            "raw_status": raw_status,
-            "status": status,
-            "mapped_capability": mapped_capability,
-        })
+    except HTTPException as e:
+        fail_system_run(run_record_id, str(e.detail))
+        raise
 
-        if status not in ("new", "queued", "queue"):
-            skipped += 1
-            continue
-
-        command_input = _json_loads_safe(f.get("Command_Input_JSON"), {})
-        payload_json = _json_loads_safe(f.get("Payload_JSON"), {})
-        idempotency_key = f.get("Idempotency_Key")
-
-        if not mapped_capability:
-            _airtable_update_record(
-                EVENTS_TABLE_NAME,
-                record_id,
-                {
-                    "Status_select": "Error",
-                    "Error_Message": "Missing Mapped_Capability",
-                    "Processed_At": utc_now_iso(),
-                },
-            )
-            errored += 1
-            continue
-
-        try:
-            command_input_final = command_input if isinstance(command_input, dict) else {}
-            if not command_input_final and isinstance(payload_json, dict):
-                command_input_final = payload_json
-
-            command_record = _create_command_from_event(
-                capability=mapped_capability,
-                command_input=command_input_final,
-                idempotency_key=idempotency_key,
-            )
-
-            command_record_id = command_record.get("id")
-
-            _airtable_update_record(
-                EVENTS_TABLE_NAME,
-                record_id,
-                {
-                    "Status_select": "Processed",
-                    "Command_Created": True,
-                    "Command_Record_ID": command_record_id,
-                    "Processed_At": utc_now_iso(),
-                    "Error_Message": "",
-                },
-            )
-
-            processed += 1
-            created_commands.append(
-                {
-                    "event_id": record_id,
-                    "command_record_id": command_record_id,
-                    "capability": mapped_capability,
-                }
-            )
-
-        except Exception as exc:
-            print("EVENT_PROCESS_ERROR", {
-                "record_id": record_id,
-                "error": repr(exc),
-            })
-            _airtable_update_record(
-                EVENTS_TABLE_NAME,
-                record_id,
-                {
-                    "Status_select": "Error",
-                    "Error_Message": repr(exc),
-                    "Processed_At": utc_now_iso(),
-                },
-            )
-            errored += 1
-
-    return {
-        "ok": True,
-        "source": meta,
-        "processed": processed,
-        "skipped": skipped,
-        "errored": errored,
-        "commands": created_commands,
-        "ts": utc_now_iso(),
-    }
+    except Exception as e:
+        fail_system_run(run_record_id, repr(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"events_process_failed: {repr(e)}",
+        )
 @app.post("/run", response_model=RunResponse)
 async def run(request: Request, response: Response) -> RunResponse:
     started = time.time()
