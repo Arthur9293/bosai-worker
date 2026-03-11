@@ -1995,50 +1995,6 @@ def _resolve_http_exec_url_from_command_input(cmd_input: Dict[str, Any]) -> str:
             return value
 
     return ""
-
-def _create_command_from_event(
-    capability: str,
-    command_input: Dict[str, Any],
-    idempotency_key: Optional[str] = None,
-    run_record_id: Optional[str] = None,
-    event_id: Optional[str] = None,
-    event_type: Optional[str] = None,
-) -> Dict[str, Any]:
-    capability = str(capability or "").strip()
-    if not capability:
-        raise HTTPException(status_code=400, detail="Missing capability")
-
-    input_obj = command_input if isinstance(command_input, dict) else {}
-    idem = str(idempotency_key or "").strip()
-
-    if not idem and event_id:
-        idem = _event_command_idem(event_id, capability)
-
-    if not idem:
-        idem = f"cmd:{capability}:{uuid.uuid4().hex}"
-
-    existing = find_command_by_idem(idem)
-    if existing:
-        return existing
-
-    candidates = _build_command_fields_candidates(
-        capability=capability,
-        idem_key=idem,
-        input_obj=input_obj,
-        run_record_id=(run_record_id or ""),
-        event_id=(event_id or ""),
-        event_type=(event_type or ""),
-    )
-
-    create_res = _airtable_create_best_effort(COMMANDS_TABLE_NAME, candidates)
-    if not create_res.get("ok"):
-        raise HTTPException(
-            status_code=500,
-            detail=f"create_command_failed: {create_res.get('error')}",
-        )
-
-    record_id = create_res.get("record_id")
-    return {"id": record_id, "fields": {"Capability": capability, "Idempotency_Key": idem}}
     
 
 CAPABILITIES = {
@@ -2811,50 +2767,3 @@ def get_run_detail(record_id: str) -> Dict[str, Any]:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"run_detail_failed: {repr(e)}")
 
-@app.post("/events/process")
-async def process_events():
-    events = airtable_get_records(
-        EVENTS_TABLE_NAME,
-        view=EVENTS_VIEW_NAME
-    )
-
-    created = 0
-    skipped = 0
-
-    for e in events:
-
-        event_id = e.get("id")
-        fields = e.get("fields", {})
-
-        event_type = fields.get("Event_Type")
-        status = fields.get("Status_select")
-
-        if status not in ["New", "Queued"]:
-            skipped += 1
-            continue
-
-        mapping = find_event_mapping(event_type)
-
-        if not mapping:
-            mark_event_ignored(event_id)
-            skipped += 1
-            continue
-
-        capability = mapping.get("capability")
-
-        cmd_id = create_command_from_event(
-            event_id=event_id,
-            capability=capability,
-            payload=fields.get("Payload_JSON", {})
-        )
-
-        mark_event_processed(event_id, cmd_id)
-
-        created += 1
-
-    return {
-        "ok": True,
-        "events_scanned": len(events),
-        "commands_created": created,
-        "skipped": skipped
-    }
