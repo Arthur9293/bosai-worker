@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.capabilities.commands_tick import run as capability_commands_tick
-from app.capabilities.escalation_dispatch import run as capability_escalation_engine
+from app.capabilities.escalation_dispatch import capability_escalation_dispatch
 from app.capabilities.health_tick import run as capability_health_tick
 from app.capabilities.http_exec import capability_http_exec
 from app.capabilities.sla_machine import run as capability_sla_machine
@@ -1775,7 +1775,19 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
 
     return result
 
-
+def capability_escalation_engine(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    return capability_escalation_dispatch(
+        req,
+        run_record_id,
+        airtable_list_filtered=airtable_list_filtered,
+        airtable_list_view=airtable_list_view,
+        airtable_create=airtable_create,
+        airtable_update=airtable_update,
+        http_timeout_seconds=HTTP_TIMEOUT_SECONDS,
+        logs_errors_table_name=LOGS_ERRORS_TABLE_NAME,
+        logs_errors_view_name=LOGS_ERRORS_VIEW_NAME,
+        commands_table_name=COMMANDS_TABLE_NAME,
+    )
 # ============================================================
 # Capabilities registry
 # ============================================================
