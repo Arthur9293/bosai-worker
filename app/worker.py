@@ -825,6 +825,7 @@ EVENT_TYPE_TO_CAPABILITY: Dict[str, str] = {
     "manual.health.check": "health_tick",
 }
 
+
 def _event_target_capability(event_type: str) -> Optional[str]:
     return EVENT_TYPE_TO_CAPABILITY.get(str(event_type or "").strip())
 
@@ -839,6 +840,14 @@ def _event_has_linked_command(fields: Dict[str, Any]) -> bool:
         return True
     if linked:
         return True
+
+    command_record_id = str(fields.get("Command_Record_ID") or "").strip()
+    if command_record_id:
+        return True
+
+    if _is_truthy(fields.get("Command_Created")):
+        return True
+
     return False
 
 
@@ -851,6 +860,7 @@ def _event_payload(fields: Dict[str, Any]) -> Dict[str, Any]:
 
 def _event_status(fields: Dict[str, Any]) -> str:
     return str(fields.get("Status_select", fields.get("Status", "")) or "").strip()
+
 
 def _build_command_fields_candidates(
     capability: str,
@@ -904,8 +914,64 @@ def _build_command_fields_candidates(
     ]
 
 
-def _mark_event_processed_best_effort(event_id: str, command_record_id: str, capability: str) -> Dict[str, Any]:
+def _create_command_from_event(
+    capability: str,
+    command_input: Dict[str, Any],
+    idempotency_key: Optional[str] = None,
+    run_record_id: Optional[str] = None,
+    event_id: Optional[str] = None,
+    event_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    capability = str(capability or "").strip()
+    if not capability:
+        raise HTTPException(status_code=400, detail="Missing capability")
+
+    input_obj = command_input if isinstance(command_input, dict) else {}
+    idem = str(idempotency_key or "").strip()
+
+    if not idem and event_id:
+        idem = _event_command_idem(event_id, capability)
+
+    if not idem:
+        idem = f"cmd:{capability}:{uuid.uuid4().hex}"
+
+    existing = find_command_by_idem(idem)
+    if existing:
+        return existing
+
+    candidates = _build_command_fields_candidates(
+        capability=capability,
+        idem_key=idem,
+        input_obj=input_obj,
+        run_record_id=(run_record_id or ""),
+        event_id=(event_id or ""),
+        event_type=(event_type or ""),
+    )
+
+    create_res = _airtable_create_best_effort(COMMANDS_TABLE_NAME, candidates)
+    if not create_res.get("ok"):
+        raise HTTPException(
+            status_code=500,
+            detail=f"create_command_failed: {create_res.get('error')}",
+        )
+
+    record_id = create_res.get("record_id")
+    return {
+        "id": record_id,
+        "fields": {
+            "Capability": capability,
+            "Idempotency_Key": idem,
+        },
+    }
+
+
+def _mark_event_processed_best_effort(
+    event_id: str,
+    command_record_id: str,
+    capability: str,
+) -> Dict[str, Any]:
     now = utc_now_iso()
+
     return _airtable_update_best_effort(
         EVENTS_TABLE_NAME,
         event_id,
@@ -962,7 +1028,12 @@ def _mark_event_processed_best_effort(event_id: str, command_record_id: str, cap
         ],
     )
 
-def _mark_event_ignored_best_effort(event_id: str, reason: str, event_type: str) -> Dict[str, Any]:
+
+def _mark_event_ignored_best_effort(
+    event_id: str,
+    reason: str,
+    event_type: str,
+) -> Dict[str, Any]:
     now = utc_now_iso()
     payload = json.dumps({"reason": reason, "event_type": event_type}, ensure_ascii=False)
 
@@ -1011,6 +1082,8 @@ def _mark_event_ignored_best_effort(event_id: str, reason: str, event_type: str)
             },
         ],
     )
+
+
 def _mark_event_error_best_effort(event_id: str, error_message: str) -> Dict[str, Any]:
     now = utc_now_iso()
     payload = json.dumps({"error": error_message}, ensure_ascii=False)
@@ -1060,463 +1133,6 @@ def _mark_event_error_best_effort(event_id: str, error_message: str) -> Dict[str
             },
         ],
     )
-def _json_loads_safe(value: Any, default: Any) -> Any:
-    if value is None:
-        return default
-    if isinstance(value, (dict, list)):
-        return value
-    if not isinstance(value, str):
-        return default
-
-    text = value.strip()
-    if not text:
-        return default
-
-    try:
-        return json.loads(text)
-    except Exception:
-        return default
-
-
-def _airtable_headers_json() -> Dict[str, str]:
-    return {
-        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-
-def _airtable_headers_auth() -> Dict[str, str]:
-    return {
-        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
-    }
-def airtable_get_record(table_name: str, record_id: str) -> Dict[str, Any]:
-    _require_airtable()
-    r = _HTTP_SESSION.get(
-        f"{_airtable_url(table_name)}/{record_id}",
-        headers=_airtable_headers(),
-        timeout=HTTP_TIMEOUT_SECONDS,
-    )
-    if r.status_code == 404:
-        raise HTTPException(status_code=404, detail=f"Record not found: {record_id}")
-    if r.status_code >= 300:
-        raise HTTPException(status_code=500, detail=f"Airtable get record failed: {r.status_code} {r.text}")
-    return r.json()
-
-def _airtable_update_record(table_name: str, record_id: str, fields: Dict[str, Any]) -> Dict[str, Any]:
-    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_name}/{record_id}"
-
-    response = requests.patch(
-        url,
-        headers=_airtable_headers_json(),
-        json={"fields": fields},
-        timeout=20,
-    )
-
-    if response.status_code >= 300:
-        raise HTTPException(status_code=500, detail=response.text)
-
-    return response.json()
-
-
-# ============================================================
-# Capabilities
-# ============================================================
-
-def capability_health_tick(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    return {"ok": True, "probe": "airtable_ok", "ts": utc_now_iso(), "run_record_id": run_record_id}
-
-
-def _sla_status_for_remaining(remaining_min: float) -> str:
-    warning_threshold = POLICY_SLA_WARNING_THRESHOLD_MIN
-    if remaining_min <= 0:
-        return SLA_STATUS_BREACHED
-    if remaining_min <= warning_threshold:
-        return SLA_STATUS_WARNING
-    return SLA_STATUS_OK
-
-
-def capability_sla_machine(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    records = airtable_list_view(LOGS_ERRORS_TABLE_NAME, LOGS_ERRORS_VIEW_NAME, max_records=200)
-
-    updated = 0
-    skipped = 0
-    errors: List[str] = []
-
-    for rec in records:
-        rid = rec.get("id")
-        fields = rec.get("fields", {}) or {}
-
-        remaining = _parse_float(fields.get("SLA_Remaining_Minutes"))
-        if remaining is None:
-            skipped += 1
-            continue
-
-        current_status = str(fields.get("SLA_Status", "")).strip()
-        if current_status == SLA_STATUS_ESCALATED:
-            skipped += 1
-            continue
-
-        new_status = _sla_status_for_remaining(remaining)
-        update_fields: Dict[str, Any] = {}
-
-        if "SLA_Status" in LOGS_ERRORS_FIELDS_ALLOWED:
-            update_fields["SLA_Status"] = new_status
-        if "Last_SLA_Check" in LOGS_ERRORS_FIELDS_ALLOWED:
-            update_fields["Last_SLA_Check"] = utc_now_iso()
-        if "Linked_Run" in LOGS_ERRORS_FIELDS_ALLOWED:
-            update_fields["Linked_Run"] = [run_record_id]
-
-        if not update_fields:
-            skipped += 1
-            continue
-
-        try:
-            airtable_update(LOGS_ERRORS_TABLE_NAME, rid, update_fields)
-            updated += 1
-        except HTTPException as e:
-            errors.append(f"{rid}: {e.detail}")
-
-    return {"ok": True, "updated": updated, "skipped": skipped, "errors_count": len(errors), "errors": errors[:10]}
-
-
-def capability_escalation_engine(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    """
-    SAFE escalation engine:
-    - Scan Logs_Erreurs view Active
-    - If breached (SLA_Status == Breached OR SLA_Remaining_Minutes <= 0)
-      and not Escalated and not Escalation_Queued
-      -> set Escalation_Queued=true (if allowed) + Linked_Run=[run_record_id] (if allowed)
-    """
-    inp = req.input or {}
-    limit = int(inp.get("limit", 200) or 200)
-    if limit <= 0:
-        limit = 200
-    if limit > 500:
-        limit = 500
-
-    only_breached = bool(inp.get("only_breached", True))
-
-    records = airtable_list_view(LOGS_ERRORS_TABLE_NAME, LOGS_ERRORS_VIEW_NAME, max_records=limit)
-
-    queued = 0
-    skipped = 0
-    failed = 0
-    errors: List[str] = []
-    now = utc_now_iso()
-
-    for rec in records:
-        rid = rec.get("id")
-        if not rid:
-            continue
-        fields = rec.get("fields", {}) or {}
-
-        sla_status = str(fields.get("SLA_Status", "") or "").strip()
-        remaining = _parse_float(fields.get("SLA_Remaining_Minutes"))
-
-        breached = False
-        if sla_status == SLA_STATUS_BREACHED:
-            breached = True
-        elif remaining is not None and remaining <= 0:
-            breached = True
-
-        if only_breached and not breached:
-            skipped += 1
-            continue
-
-        if sla_status == SLA_STATUS_ESCALATED:
-            skipped += 1
-            continue
-
-        if _is_truthy(fields.get("Escalation_Queued")):
-            skipped += 1
-            continue
-
-        update_fields: Dict[str, Any] = {}
-
-        if "Escalation_Queued" in LOGS_ERRORS_FIELDS_ALLOWED:
-            update_fields["Escalation_Queued"] = True
-        if "Linked_Run" in LOGS_ERRORS_FIELDS_ALLOWED:
-            update_fields["Linked_Run"] = [run_record_id]
-
-        if not update_fields:
-            skipped += 1
-            continue
-
-        try:
-            airtable_update(LOGS_ERRORS_TABLE_NAME, rid, update_fields)
-            queued += 1
-        except HTTPException as e:
-            failed += 1
-            errors.append(f"{rid}: {e.detail}")
-        except Exception as e:
-            failed += 1
-            errors.append(f"{rid}: {repr(e)}")
-
-    return {
-        "ok": True,
-        "view": LOGS_ERRORS_VIEW_NAME,
-        "scanned": len(records),
-        "queued": queued,
-        "skipped": skipped,
-        "failed": failed,
-        "errors_count": len(errors),
-        "errors": errors[:10],
-        "run_record_id": run_record_id,
-        "ts": now,
-    }
-
-
-def capability_commands_tick(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    inp = req.input or {}
-    limit = int(inp.get("limit", 5) or 5)
-    if limit <= 0:
-        limit = 5
-    if limit > 50:
-        limit = 50
-
-    view = (req.view or COMMANDS_VIEW_NAME or "Queue").strip()
-    cmds = airtable_list_view(COMMANDS_TABLE_NAME, view, max_records=limit)
-
-    now = utc_now_iso()
-    processed: List[str] = []
-    updated = 0
-    update_fail = 0
-    update_errors: List[str] = []
-
-    for c in cmds:
-        cid = c.get("id")
-        if not cid:
-            continue
-
-        processed.append(cid)
-
-        candidates = [
-            {"Is_Locked": True, "Locked_At": now, "Locked_By": req.worker, "Last_Status": "Running", "Last_Error": "", "Linked_Run": [run_record_id]},
-            {"Is_Locked": True, "Locked_At": now, "Locked_By": req.worker, "Last_Status": "Running"},
-            {"Is_Locked": True, "Locked_By": req.worker},
-            {"Status_select": "Running", "Linked_Run": [run_record_id], "Error_Message": ""},
-            {"Status_select": "Running"},
-        ]
-
-        res = _airtable_update_best_effort(COMMANDS_TABLE_NAME, cid, candidates)
-        if res.get("ok"):
-            updated += 1
-        else:
-            update_fail += 1
-            update_errors.append(f"{cid}: {res.get('error')}")
-
-    return {
-        "ok": True,
-        "view": view,
-        "limit": limit,
-        "scanned": len(cmds),
-        "processed": processed,
-        "updated": updated,
-        "update_fail": update_fail,
-        "errors_count": len(update_errors),
-        "errors": update_errors[:10],
-        "run_record_id": run_record_id,
-        "ts": now,
-    }
-
-
-def capability_http_exec(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    return capability_http_exec_impl(req, run_record_id, session=_HTTP_SESSION)
-
-
-def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
-    for key in ("Command_JSON", "Payload_JSON", "Input_JSON"):
-        obj = _json_load_maybe(fields.get(key))
-        if isinstance(obj, dict) and obj:
-            return obj
-
-    built: Dict[str, Any] = {}
-
-    http_target = str(fields.get("http_target", "") or "").strip()
-    if http_target:
-        built["http_target"] = http_target
-
-    url_value = str(fields.get("URL", "") or "").strip()
-    if url_value:
-        built["URL"] = url_value
-
-    url_lower = str(fields.get("url", "") or "").strip()
-    if url_lower:
-        built["url"] = url_lower
-
-    method = str(fields.get("HTTP_Method", "") or "").strip()
-    if method:
-        built["method"] = method
-
-    payload_raw = fields.get("HTTP_Payload_JSON")
-    payload_obj = _json_load_maybe(payload_raw)
-    if payload_obj:
-        built["json"] = payload_obj
-    else:
-        if isinstance(payload_raw, str) and payload_raw.strip():
-            built["data"] = payload_raw.strip()
-
-    tool_key = str(fields.get("Tool_Key", "") or "").strip()
-    if tool_key:
-        built["Tool_Key"] = tool_key
-
-    tool_mode = str(fields.get("Tool_Mode", "") or "").strip()
-    if tool_mode:
-        built["Tool_Mode"] = tool_mode
-
-    tool_intent = str(fields.get("Tool_Intent", "") or "").strip()
-    if tool_intent:
-        built["Tool_Intent"] = tool_intent
-
-    approved = fields.get("Approved")
-    if approved is not None:
-        built["Approved"] = approved
-
-    return built
-
-
-def capability_state_get(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    key = str(req.input.get("key", "")).strip()
-    if not key:
-        raise HTTPException(status_code=400, detail="state_get requires input.key")
-    rec = state_get_record(key)
-    if not rec:
-        return {"ok": True, "found": False, "key": key}
-    fields = rec.get("fields", {}) or {}
-    return {
-        "ok": True,
-        "found": True,
-        "key": key,
-        "record_id": rec.get("id"),
-        "value": _json_load_maybe(fields.get("Value_JSON")),
-        "updated_at": fields.get("Updated_At"),
-        "app_version": fields.get("App_Version"),
-        "lock_status": fields.get("Lock_Status"),
-    }
-
-
-def capability_state_put(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    key = str(req.input.get("key", "")).strip()
-    value = req.input.get("value")
-    if not key:
-        raise HTTPException(status_code=400, detail="state_put requires input.key")
-    if value is None:
-        value = {}
-    if not isinstance(value, dict):
-        raise HTTPException(status_code=400, detail="state_put requires input.value to be an object (dict)")
-    return state_put(key, value)
-
-
-def capability_lock_acquire(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    key = str(req.input.get("key", "")).strip()
-    holder = str(req.input.get("holder", req.worker)).strip()
-    if not key:
-        raise HTTPException(status_code=400, detail="lock_acquire requires input.key")
-    return lock_acquire(key, holder)
-
-
-def capability_lock_release(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    key = str(req.input.get("key", "")).strip()
-    holder = str(req.input.get("holder", req.worker)).strip()
-    if not key:
-        raise HTTPException(status_code=400, detail="lock_release requires input.key")
-    return lock_release(key, holder)
-
-
-def _read_command_status(fields: Dict[str, Any]) -> str:
-    return str(fields.get("Status_select", fields.get("Status", fields.get("Status_raw", ""))) or "").strip()
-
-def capability_event_engine(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    inp = req.input or {}
-    limit = _safe_limit(int(inp.get("limit", 10) or 10), default=10, minimum=1, maximum=50)
-    view_name = str(inp.get("view") or EVENTS_VIEW_NAME or "Queue").strip()
-
-    try:
-        records = airtable_list_view(EVENTS_TABLE_NAME, view_name, max_records=limit)
-        source = {"ok": True, "table": EVENTS_TABLE_NAME, "view": view_name}
-    except Exception as e:
-        return {
-            "ok": True,
-            "source": {"ok": False, "table": EVENTS_TABLE_NAME, "view": view_name, "error": repr(e)},
-            "processed": 0,
-            "skipped": 0,
-            "errored": 0,
-            "commands": [],
-            "run_record_id": run_record_id,
-            "ts": utc_now_iso(),
-        }
-
-    processed = 0
-    skipped = 0
-    errored = 0
-    commands: List[Dict[str, Any]] = []
-
-    for r in records:
-        event_id = r.get("id")
-        fields = r.get("fields", {}) or {}
-
-        if not event_id:
-            skipped += 1
-            continue
-
-        status = _event_status(fields).lower()
-        if status not in ("new", "queued", "queue"):
-            skipped += 1
-            continue
-
-        if _event_has_linked_command(fields):
-            skipped += 1
-            continue
-
-        event_type = str(fields.get("Event_Type") or "").strip()
-        mapped_capability = str(fields.get("Mapped_Capability") or "").strip() or _event_target_capability(event_type)
-
-        if not mapped_capability:
-            _mark_event_ignored_best_effort(event_id, "no_capability_mapping", event_type)
-            skipped += 1
-            continue
-
-        payload_json = _json_loads_safe(fields.get("Payload_JSON"), {})
-        command_input = _json_loads_safe(fields.get("Command_Input_JSON"), {})
-        command_input_final = command_input if isinstance(command_input, dict) and command_input else payload_json
-        idem = str(fields.get("Idempotency_Key") or "").strip() or _event_command_idem(event_id, mapped_capability)
-
-        try:
-            command_record = _create_command_from_event(
-                capability=mapped_capability,
-                command_input=command_input_final,
-                idempotency_key=idem,
-                run_record_id=run_record_id,
-                event_id=event_id,
-                event_type=event_type,
-            )
-
-            command_record_id = command_record.get("id")
-            _mark_event_processed_best_effort(event_id, command_record_id, mapped_capability)
-
-            processed += 1
-            commands.append(
-                {
-                    "event_id": event_id,
-                    "command_record_id": command_record_id,
-                    "capability": mapped_capability,
-                }
-            )
-
-        except Exception as e:
-            _mark_event_error_best_effort(event_id, repr(e))
-            errored += 1
-
-    return {
-        "ok": True,
-        "source": source,
-        "processed": processed,
-        "skipped": skipped,
-        "errored": errored,
-        "commands": commands,
-        "run_record_id": run_record_id,
-        "ts": utc_now_iso(),
-    }
 # ============================================================
 # Retry Queue (SAFE, best-effort)
 # ============================================================
