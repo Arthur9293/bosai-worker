@@ -34,7 +34,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from app.capabilities.http_exec import capability_http_exec
-from app.capabilities.sla_machine import capability_sla_machine
+from app.capabilities.sla_machine import run as capability_sla_machine
 from app.capabilities.escalation_dispatch import capability_escalation_engine
 from app.policies import get_policies
 # ============================================================
