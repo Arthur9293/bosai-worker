@@ -835,12 +835,6 @@ def _event_command_idem(event_id: str, target_capability: str) -> str:
 
 
 def _event_has_linked_command(fields: Dict[str, Any]) -> bool:
-    linked = fields.get("Linked_Command")
-    if isinstance(linked, list) and len(linked) > 0:
-        return True
-    if linked:
-        return True
-
     command_id = str(fields.get("Command_ID") or "").strip()
     if command_id:
         return True
@@ -849,8 +843,6 @@ def _event_has_linked_command(fields: Dict[str, Any]) -> bool:
         return True
 
     return False
-
-
 def _event_payload(fields: Dict[str, Any]) -> Dict[str, Any]:
     payload = _json_load_maybe(fields.get("Payload_JSON"))
     if isinstance(payload, dict):
@@ -982,6 +974,20 @@ def _mark_event_processed_best_effort(
                 "Command_ID": command_record_id,
                 "Processed_At": now,
                 "Mapped_Capability": capability,
+                "Error_Message": "",
+            },
+            {
+                "Status_select": "Processed",
+                "Command_Created": True,
+                "Command_ID": command_record_id,
+                "Processed_At": now,
+                "Mapped_Capability": capability,
+            },
+            {
+                "Status_select": "Processed",
+                "Command_Created": True,
+                "Command_ID": command_record_id,
+                "Processed_At": now,
             },
             {
                 "Status_select": "Processed",
@@ -1023,6 +1029,13 @@ def _mark_event_ignored_best_effort(
                 "Command_Created": False,
                 "Processed_At": now,
                 "Error_Message": reason,
+                "Result_JSON": payload,
+            },
+            {
+                "Status_select": "Ignored",
+                "Command_Created": False,
+                "Processed_At": now,
+                "Error_Message": reason,
             },
             {
                 "Status_select": "Ignored",
@@ -1033,7 +1046,6 @@ def _mark_event_ignored_best_effort(
             },
         ],
     )
-
 
 def _mark_event_error_best_effort(event_id: str, error_message: str) -> Dict[str, Any]:
     now = utc_now_iso()
@@ -1047,6 +1059,13 @@ def _mark_event_error_best_effort(event_id: str, error_message: str) -> Dict[str
                 "Status_select": "Error",
                 "Command_Created": False,
                 "Command_ID": "",
+                "Processed_At": now,
+                "Error_Message": error_message,
+                "Result_JSON": payload,
+            },
+            {
+                "Status_select": "Error",
+                "Command_Created": False,
                 "Processed_At": now,
                 "Error_Message": error_message,
                 "Result_JSON": payload,
@@ -2576,7 +2595,7 @@ def get_event_command_graph(limit: int = 50) -> Dict[str, Any]:
         f = r.get("fields", {}) or {}
 
         linked_command = f.get("Linked_Command")
-        command_record_id = linked_command[0] if isinstance(linked_command, list) and linked_command else f.get("Command_Record_ID")
+        command_record_id = str(f.get("Command_ID") or "").strip() or None
 
         command_capability = None
         command_status = None
