@@ -841,8 +841,8 @@ def _event_has_linked_command(fields: Dict[str, Any]) -> bool:
     if linked:
         return True
 
-    command_record_id = str(fields.get("Command_Record_ID") or "").strip()
-    if command_record_id:
+    command_id = str(fields.get("Command_ID") or "").strip()
+    if command_id:
         return True
 
     if _is_truthy(fields.get("Command_Created")):
@@ -980,38 +980,8 @@ def _mark_event_processed_best_effort(
                 "Status_select": "Processed",
                 "Command_Created": True,
                 "Command_ID": command_record_id,
-                "Linked_Command": [command_record_id],
                 "Processed_At": now,
                 "Mapped_Capability": capability,
-                "Error_Message": "",
-            },
-            {
-                "Status_select": "Processed",
-                "Command_Created": True,
-                "Command_ID": command_record_id,
-                "Processed_At": now,
-                "Mapped_Capability": capability,
-                "Error_Message": "",
-            },
-            {
-                "Status_select": "Processed",
-                "Command_Created": True,
-                "Linked_Command": [command_record_id],
-                "Processed_At": now,
-                "Mapped_Capability": capability,
-                "Error_Message": "",
-            },
-            {
-                "Status_select": "Processed",
-                "Command_Created": True,
-                "Command_ID": command_record_id,
-                "Processed_At": now,
-            },
-            {
-                "Status_select": "Processed",
-                "Command_Created": True,
-                "Linked_Command": [command_record_id],
-                "Processed_At": now,
             },
             {
                 "Status_select": "Processed",
@@ -1021,11 +991,9 @@ def _mark_event_processed_best_effort(
             {
                 "Status_select": "Processed",
                 "Command_Created": True,
-                "Linked_Command": [command_record_id],
             },
             {
                 "Status_select": "Processed",
-                "Command_Created": True,
             },
         ],
     )
@@ -1043,25 +1011,9 @@ def _mark_event_ignored_best_effort(
         event_id,
         [
             {
-                "Status": "Ignored",
                 "Status_select": "Ignored",
                 "Command_Created": False,
-                "Command_Record_ID": "",
-                "Processed_At": now,
-                "Error_Message": reason,
-                "Result_JSON": payload,
-            },
-            {
-                "Status_select": "Ignored",
-                "Command_Created": False,
-                "Command_Record_ID": "",
-                "Processed_At": now,
-                "Error_Message": reason,
-                "Result_JSON": payload,
-            },
-            {
-                "Status": "Ignored",
-                "Command_Created": False,
+                "Command_ID": "",
                 "Processed_At": now,
                 "Error_Message": reason,
                 "Result_JSON": payload,
@@ -1073,13 +1025,11 @@ def _mark_event_ignored_best_effort(
                 "Error_Message": reason,
             },
             {
-                "Status": "Ignored",
+                "Status_select": "Ignored",
                 "Command_Created": False,
-                "Error_Message": reason,
             },
             {
                 "Status_select": "Ignored",
-                "Command_Created": False,
             },
         ],
     )
@@ -1094,25 +1044,9 @@ def _mark_event_error_best_effort(event_id: str, error_message: str) -> Dict[str
         event_id,
         [
             {
-                "Status": "Error",
                 "Status_select": "Error",
                 "Command_Created": False,
-                "Command_Record_ID": "",
-                "Processed_At": now,
-                "Error_Message": error_message,
-                "Result_JSON": payload,
-            },
-            {
-                "Status_select": "Error",
-                "Command_Created": False,
-                "Command_Record_ID": "",
-                "Processed_At": now,
-                "Error_Message": error_message,
-                "Result_JSON": payload,
-            },
-            {
-                "Status": "Error",
-                "Command_Created": False,
+                "Command_ID": "",
                 "Processed_At": now,
                 "Error_Message": error_message,
                 "Result_JSON": payload,
@@ -1124,13 +1058,11 @@ def _mark_event_error_best_effort(event_id: str, error_message: str) -> Dict[str
                 "Error_Message": error_message,
             },
             {
-                "Status": "Error",
+                "Status_select": "Error",
                 "Command_Created": False,
-                "Error_Message": error_message,
             },
             {
                 "Status_select": "Error",
-                "Command_Created": False,
             },
         ],
     )
