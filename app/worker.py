@@ -1,40 +1,30 @@
-# app/worker.py — BOSAI Worker (v2.5.5)
-# SAFE PATCH over your v2.5.4:
-# - Keeps existing behavior intact (auth/idempotency/locks/retry/CORS unchanged)
-# - Keeps existing /run and command_orchestrator behavior intact
-# - Keeps READ-ONLY dashboard endpoints intact:
-#   * GET /runs
-#   * GET /commands
-#   * GET /sla
-# - Adds Event Engine v1:
-#   * new Airtable table: Events
-#   * new env vars: EVENTS_TABLE_NAME, EVENTS_VIEW_NAME
-#   * new capability: event_engine
-# - Event Engine guardrails:
-#   * no crash if Airtable env missing
-#   * no crash if fields absent / payload empty / view missing
-#   * best-effort create/update
-#   * anti-duplicate via deterministic command idempotency key per event
+# app/worker.py — BOSAI Worker rebuilt bootstrap
+from __future__ import annotations
 
-import os
-import json
-import time
-import uuid
-import hmac
 import hashlib
+import hmac
+import json
+import os
+import time
 import traceback
-from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, Optional, List, Tuple
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import requests
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from app.capabilities.http_exec import capability_http_exec as capability_http_exec_impl
+from app.capabilities.commands_tick import run as capability_commands_tick
+from app.capabilities.escalation_dispatch import run as capability_escalation_engine
+from app.capabilities.health_tick import run as capability_health_tick
+from app.capabilities.http_exec import capability_http_exec
+from app.capabilities.sla_machine import run as capability_sla_machine
 from app.policies import get_policies
+
 
 # ============================================================
 # Env / settings
@@ -48,7 +38,6 @@ COMMANDS_TABLE_NAME = os.getenv("COMMANDS_TABLE_NAME", "Commands").strip()
 LOGS_ERRORS_TABLE_NAME = os.getenv("LOGS_ERRORS_TABLE_NAME", "Logs_Erreurs").strip()
 STATE_TABLE_NAME = os.getenv("STATE_TABLE_NAME", "State").strip()
 TOOLCATALOG_TABLE_NAME = os.getenv("TOOLCATALOG_TABLE_NAME", "ToolCatalog").strip()
-
 EVENTS_TABLE_NAME = os.getenv("EVENTS_TABLE_NAME", "Events").strip()
 
 LOGS_ERRORS_VIEW_NAME = os.getenv("LOGS_ERRORS_VIEW_NAME", "Active").strip()
@@ -56,21 +45,17 @@ COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 EVENTS_VIEW_NAME = os.getenv("EVENTS_VIEW_NAME", "Queue").strip()
 EVENTS_DASHBOARD_VIEW_NAME = os.getenv("EVENTS_DASHBOARD_VIEW_NAME", EVENTS_VIEW_NAME or "Grid view").strip()
 
-
-# SAFE read-only dashboard view settings
 SYSTEM_RUNS_VIEW_NAME = os.getenv("SYSTEM_RUNS_VIEW_NAME", "Grid view").strip()
 COMMANDS_DASHBOARD_VIEW_NAME = os.getenv("COMMANDS_DASHBOARD_VIEW_NAME", COMMANDS_VIEW_NAME or "Queue").strip()
 SLA_DASHBOARD_VIEW_NAME = os.getenv("SLA_DASHBOARD_VIEW_NAME", LOGS_ERRORS_VIEW_NAME or "Active").strip()
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.5.5").strip()
+APP_VERSION = os.getenv("APP_VERSION", "2.5.5-rebuild").strip()
 
 RUN_MAX_SECONDS = float((os.getenv("RUN_MAX_SECONDS", "30") or "30").strip())
 HTTP_TIMEOUT_SECONDS = float((os.getenv("HTTP_TIMEOUT_SECONDS", "20") or "20").strip())
 RUN_LOCK_TTL_SECONDS = int((os.getenv("RUN_LOCK_TTL_SECONDS", "600") or "600").strip())
-
-# Commands lock TTL (minutes) — SAFE default 10
 COMMAND_LOCK_TTL_MIN = int((os.getenv("COMMAND_LOCK_TTL_MIN", "10") or "10").strip())
 
 RUN_SHARED_SECRET = os.getenv("RUN_SHARED_SECRET", "").strip()
@@ -102,15 +87,18 @@ HTTP_EXEC_ALLOWLIST_RAW = os.getenv("HTTP_EXEC_ALLOWLIST", "").strip()
 HTTP_EXEC_TARGETS_JSON = os.getenv("HTTP_EXEC_TARGETS_JSON", "").strip()
 TOOLCATALOG_ENFORCE_HTTP_EXEC = (os.getenv("TOOLCATALOG_ENFORCE_HTTP_EXEC", "1").strip() != "0")
 
+
 # ============================================================
-# CORS (SAFE)
+# CORS
 # ============================================================
 
 CORS_ALLOW_ORIGINS_RAW = os.getenv("CORS_ALLOW_ORIGINS", "*").strip()
 CORS_ALLOW_METHODS_RAW = os.getenv("CORS_ALLOW_METHODS", "*").strip()
 CORS_ALLOW_HEADERS_RAW = os.getenv("CORS_ALLOW_HEADERS", "*").strip()
 CORS_EXPOSE_HEADERS_RAW = os.getenv("CORS_EXPOSE_HEADERS", "X-Run-Record-Id,X-Run-Id").strip()
-CORS_ALLOW_CREDENTIALS = (os.getenv("CORS_ALLOW_CREDENTIALS", "0").strip().lower() in ("1", "true", "yes", "on"))
+CORS_ALLOW_CREDENTIALS = (
+    os.getenv("CORS_ALLOW_CREDENTIALS", "0").strip().lower() in ("1", "true", "yes", "on")
+)
 
 
 def _csv_env_list(raw: str, default: List[str]) -> List[str]:
@@ -123,13 +111,12 @@ CORS_ALLOW_METHODS = _csv_env_list(CORS_ALLOW_METHODS_RAW, ["*"])
 CORS_ALLOW_HEADERS = _csv_env_list(CORS_ALLOW_HEADERS_RAW, ["*"])
 CORS_EXPOSE_HEADERS = _csv_env_list(CORS_EXPOSE_HEADERS_RAW, ["X-Run-Record-Id", "X-Run-Id"])
 
-# Starlette/FastAPI rule:
-# allow_credentials=True cannot be combined with wildcard "*" safely for origins.
 if CORS_ALLOW_CREDENTIALS and "*" in CORS_ALLOW_ORIGINS:
     CORS_ALLOW_CREDENTIALS = False
 
+
 # ============================================================
-# Policies (SAFE, defaults-first)
+# Policies
 # ============================================================
 
 POLICIES = get_policies() or {}
@@ -174,10 +161,12 @@ def _policy_get_float(name: str, default: float) -> float:
 POLICY_MAX_TOOL_CALLS = _policy_get_int("MAX_TOOL_CALLS", 0)
 POLICY_RETRY_LIMIT = _policy_get_int("RETRY_LIMIT", 0)
 POLICY_LOCK_TTL_MINUTES = _policy_get_int("LOCK_TTL_MINUTES", 0)
-POLICY_SLA_WARNING_THRESHOLD_MIN = _policy_get_float("SLA_WARNING_THRESHOLD_MIN", SLA_WARNING_THRESHOLD_MIN)
+POLICY_SLA_WARNING_THRESHOLD_MIN = _policy_get_float(
+    "SLA_WARNING_THRESHOLD_MIN",
+    SLA_WARNING_THRESHOLD_MIN,
+)
 POLICY_APPROVAL_REQUIRED_FOR_WRITE = _policy_get_bool("APPROVAL_REQUIRED_FOR_WRITE", False)
-POLICY_REDACT_SECRETS_IN_LOGS = _policy_get_bool("REDACT_SECRETS_IN_LOGS", True)
-POLICY_STORE_TOOL_TRACE = _policy_get_bool("STORE_TOOL_TRACE", False)
+
 
 # ============================================================
 # FastAPI
@@ -202,11 +191,14 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     tb = traceback.format_exc()
     print("UNHANDLED_EXCEPTION:", repr(exc))
     print(tb)
-    return JSONResponse(status_code=500, content={"detail": "Internal error", "error": repr(exc)})
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal error", "error": repr(exc)},
+    )
 
 
 # ============================================================
-# Pydantic models (COMPAT)
+# Models
 # ============================================================
 
 class RunRequest(BaseModel):
@@ -247,7 +239,7 @@ class RunRequest(BaseModel):
         try:
             mv = getattr(cls, "model_validate", None)
             if callable(mv):
-                return mv(p)  # type: ignore
+                return mv(p)  # type: ignore[attr-defined]
         except Exception:
             pass
 
@@ -267,8 +259,18 @@ class RunResponse(BaseModel):
         extra = "forbid"
 
 
+class EventCreate(BaseModel):
+    event_type: str
+    source: Optional[str] = "api"
+    payload: Optional[Dict[str, Any]] = None
+    command_capability: Optional[str] = None
+    command_input: Optional[Dict[str, Any]] = None
+    idempotency_key: Optional[str] = None
+    workspace_id: Optional[str] = "production"
+
+
 # ============================================================
-# Utilities
+# Utils
 # ============================================================
 
 def utc_now_iso() -> str:
@@ -277,15 +279,21 @@ def utc_now_iso() -> str:
 
 def _require_airtable() -> None:
     if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
-        raise HTTPException(status_code=500, detail="Airtable env not configured (AIRTABLE_API_KEY / AIRTABLE_BASE_ID).")
+        raise HTTPException(
+            status_code=500,
+            detail="Airtable env not configured (AIRTABLE_API_KEY / AIRTABLE_BASE_ID).",
+        )
 
 
 def _airtable_url(table_name: str) -> str:
-    return f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_name}"
+    return f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{quote(table_name)}"
 
 
 def _airtable_headers() -> Dict[str, str]:
-    return {"Authorization": f"Bearer {AIRTABLE_API_KEY}", "Content-Type": "application/json"}
+    return {
+        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+        "Content-Type": "application/json",
+    }
 
 
 def airtable_create(table_name: str, fields: Dict[str, Any]) -> str:
@@ -311,6 +319,18 @@ def airtable_update(table_name: str, record_id: str, fields: Dict[str, Any]) -> 
     )
     if r.status_code >= 300:
         raise HTTPException(status_code=500, detail=f"Airtable update failed: {r.status_code} {r.text}")
+
+
+def airtable_get_record(table_name: str, record_id: str) -> Dict[str, Any]:
+    _require_airtable()
+    r = _HTTP_SESSION.get(
+        f"{_airtable_url(table_name)}/{record_id}",
+        headers=_airtable_headers(),
+        timeout=HTTP_TIMEOUT_SECONDS,
+    )
+    if r.status_code >= 300:
+        raise HTTPException(status_code=500, detail=f"Airtable get failed: {r.status_code} {r.text}")
+    return r.json()
 
 
 def airtable_find_first(table_name: str, formula: str, max_records: int = 1) -> Optional[Dict[str, Any]]:
@@ -348,7 +368,10 @@ def airtable_list_filtered(
     max_records: int = 100,
 ) -> List[Dict[str, Any]]:
     _require_airtable()
-    params: Dict[str, Any] = {"filterByFormula": formula, "maxRecords": str(max_records)}
+    params: Dict[str, Any] = {
+        "filterByFormula": formula,
+        "maxRecords": str(max_records),
+    }
 
     if view_name:
         params["view"] = view_name
@@ -357,10 +380,9 @@ def airtable_list_filtered(
         for i, s in enumerate(sort):
             field = (s.get("field") or "").strip()
             direction = (s.get("direction") or "asc").strip()
-            if not field:
-                continue
-            params[f"sort[{i}][field]"] = field
-            params[f"sort[{i}][direction]"] = direction
+            if field:
+                params[f"sort[{i}][field]"] = field
+                params[f"sort[{i}][direction]"] = direction
 
     r = _HTTP_SESSION.get(
         _airtable_url(table_name),
@@ -382,9 +404,69 @@ def _json_load_maybe(val: Any) -> Dict[str, Any]:
         s = str(val).strip()
         if not s:
             return {}
-        return json.loads(s)
+        parsed = json.loads(s)
+        return parsed if isinstance(parsed, dict) else {}
     except Exception:
         return {}
+
+
+def _parse_float(val: Any) -> Optional[float]:
+    if val is None:
+        return None
+    try:
+        if isinstance(val, (int, float)):
+            return float(val)
+        return float(str(val).strip().replace(",", "."))
+    except Exception:
+        return None
+
+
+def _is_truthy(v: Any) -> bool:
+    if v is True:
+        return True
+    if v is None:
+        return False
+    return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _safe_limit(raw_limit: int, default: int, minimum: int = 1, maximum: int = 200) -> int:
+    try:
+        value = int(raw_limit)
+    except Exception:
+        value = default
+    if value < minimum:
+        return default
+    if value > maximum:
+        return maximum
+    return value
+
+
+def _safe_records_from_view(table_name: str, view_name: str, limit: int) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+        return [], {"ok": False, "reason": "airtable_env_missing", "table": table_name, "view": view_name}
+    try:
+        records = airtable_list_view(table_name, view_name, max_records=limit)
+        return records, {"ok": True, "table": table_name, "view": view_name}
+    except HTTPException as e:
+        return [], {"ok": False, "reason": "airtable_read_failed", "detail": str(e.detail), "table": table_name, "view": view_name}
+    except Exception as e:
+        return [], {"ok": False, "reason": "exception", "detail": repr(e), "table": table_name, "view": view_name}
+
+
+def _read_command_status(fields: Dict[str, Any]) -> str:
+    return str(fields.get("Status_select", fields.get("Status", "")) or "").strip()
+
+
+def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
+    base = _json_load_maybe(fields.get("Input_JSON"))
+    if not isinstance(base, dict):
+        base = {}
+
+    for direct_key in ("url", "http_target", "URL", "method", "headers", "body", "timeout"):
+        if direct_key in fields and fields.get(direct_key) is not None and direct_key not in base:
+            base[direct_key] = fields.get(direct_key)
+
+    return base
 
 
 def _verify_hmac_signature(raw_body: bytes, signature_header: Optional[str]) -> bool:
@@ -407,13 +489,6 @@ def _verify_scheduler_secret(headers: Dict[str, str]) -> bool:
 
 
 def verify_request_auth_or_401(raw_body: bytes, headers: Dict[str, str]) -> None:
-    """
-    Auth policy (SAFE):
-    - If either secret exists, require at least one valid auth method.
-      * scheduler secret via x-scheduler-secret
-      * OR HMAC signature via x-run-signature
-    - If no secrets configured: dev mode (no auth).
-    """
     if not SCHEDULER_SECRET and not RUN_SHARED_SECRET:
         return
 
@@ -426,59 +501,8 @@ def verify_request_auth_or_401(raw_body: bytes, headers: Dict[str, str]) -> None
     raise HTTPException(status_code=401, detail="Unauthorized (missing/invalid scheduler secret or run signature)")
 
 
-def _parse_float(val: Any) -> Optional[float]:
-    if val is None:
-        return None
-    try:
-        if isinstance(val, (int, float)):
-            return float(val)
-        s = str(val).strip().replace(",", ".")
-        return float(s)
-    except Exception:
-        return None
-
-
-def _is_truthy(v: Any) -> bool:
-    if v is True:
-        return True
-    if v is None:
-        return False
-    s = str(v).strip().lower()
-    return s in ("1", "true", "yes", "y", "on")
-
-
-def _safe_limit(raw_limit: int, default: int, minimum: int = 1, maximum: int = 200) -> int:
-    try:
-        v = int(raw_limit)
-    except Exception:
-        v = default
-    if v < minimum:
-        return default
-    if v > maximum:
-        return maximum
-    return v
-
-
-def _safe_records_from_view(table_name: str, view_name: str, limit: int) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """
-    SAFE read helper:
-    - never crashes the endpoint
-    - returns [] + diagnostic metadata on failure
-    """
-    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
-        return [], {"ok": False, "reason": "airtable_env_missing", "table": table_name, "view": view_name}
-
-    try:
-        records = airtable_list_view(table_name, view_name, max_records=limit)
-        return records, {"ok": True, "table": table_name, "view": view_name}
-    except HTTPException as e:
-        return [], {"ok": False, "reason": "airtable_read_failed", "detail": str(e.detail), "table": table_name, "view": view_name}
-    except Exception as e:
-        return [], {"ok": False, "reason": "exception", "detail": repr(e), "table": table_name, "view": view_name}
-
-
 # ============================================================
-# Commands idempotency protection (SAFE)
+# Idempotency
 # ============================================================
 
 def _at_escape(s: str) -> str:
@@ -486,16 +510,11 @@ def _at_escape(s: str) -> str:
 
 
 def find_done_command_by_idem(idem_key: str, exclude_record_id: str) -> Optional[Dict[str, Any]]:
-    """
-    If another command exists with same Idempotency_Key and Status_select='Done', return it.
-    SAFE: returns None on any Airtable error; does not break execution.
-    """
     try:
         idem = _at_escape(idem_key)
         excl = _at_escape(exclude_record_id)
         if not idem:
             return None
-
         formula = (
             "AND("
             f"{{Idempotency_Key}}='{idem}',"
@@ -509,69 +528,18 @@ def find_done_command_by_idem(idem_key: str, exclude_record_id: str) -> Optional
 
 
 def find_command_by_idem(idem_key: str) -> Optional[Dict[str, Any]]:
-    """
-    Find any existing command by deterministic idempotency key.
-    SAFE: returns None on any Airtable error.
-    """
     try:
         idem = _at_escape(idem_key)
         if not idem:
             return None
-        formula = f"{{Idempotency_Key}}='{idem}'"
-        return airtable_find_first(COMMANDS_TABLE_NAME, formula=formula, max_records=1)
+        return airtable_find_first(COMMANDS_TABLE_NAME, formula=f"{{Idempotency_Key}}='{idem}'", max_records=1)
     except Exception:
         return None
 
 
 # ============================================================
-# Commands Lock / Retry helpers (SAFE, best-effort)
+# Best-effort Airtable helpers
 # ============================================================
-
-def _new_lock_token() -> str:
-    return uuid.uuid4().hex
-
-
-def _command_lock_ttl_min() -> int:
-    try:
-        if POLICY_LOCK_TTL_MINUTES and POLICY_LOCK_TTL_MINUTES > 0:
-            return POLICY_LOCK_TTL_MINUTES
-        v = int(COMMAND_LOCK_TTL_MIN or 10)
-        return v if v > 0 else 10
-    except Exception:
-        return 10
-
-
-def _utc_plus_minutes_iso(minutes: int) -> str:
-    return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
-
-
-def _compute_next_retry_at(fields: Dict[str, Any]) -> str:
-    """
-    Exponential backoff capped (SAFE):
-    - base from Retry_Backoff_Sec (default 60)
-    - count from Retry_Count (default 0)
-    - delay = min(3600, base * 2^count)
-    """
-    try:
-        base = int(fields.get("Retry_Backoff_Sec", 60) or 60)
-    except Exception:
-        base = 60
-    try:
-        count = int(fields.get("Retry_Count", 0) or 0)
-    except Exception:
-        count = 0
-
-    if POLICY_RETRY_LIMIT > 0 and count > POLICY_RETRY_LIMIT:
-        count = POLICY_RETRY_LIMIT
-
-    if base <= 0:
-        base = 60
-    if count < 0:
-        count = 0
-
-    delay = min(3600, base * (2 ** count))
-    return (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
-
 
 def _airtable_update_best_effort(table_name: str, record_id: str, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
     last_err: Optional[str] = None
@@ -583,10 +551,8 @@ def _airtable_update_best_effort(table_name: str, record_id: str, candidates: Li
             return {"ok": True, "applied_fields": list(fields.keys())}
         except HTTPException as e:
             last_err = str(e.detail)
-            continue
         except Exception as e:
             last_err = repr(e)
-            continue
     return {"ok": False, "error": last_err or "update_failed"}
 
 
@@ -600,77 +566,13 @@ def _airtable_create_best_effort(table_name: str, candidates: List[Dict[str, Any
             return {"ok": True, "record_id": record_id, "applied_fields": list(fields.keys())}
         except HTTPException as e:
             last_err = str(e.detail)
-            continue
         except Exception as e:
             last_err = repr(e)
-            continue
     return {"ok": False, "error": last_err or "create_failed"}
 
 
-def _release_command_lock_best_effort(command_id: str) -> None:
-    now = utc_now_iso()
-    _airtable_update_best_effort(
-        COMMANDS_TABLE_NAME,
-        command_id,
-        [
-            {"Is_Locked": False, "Lock_Expires_At": None, "Lock_Token": "", "Last_Heartbeat_At": now},
-            {"Is_Locked": False, "Lock_Expires_At": None, "Lock_Token": ""},
-            {"Is_Locked": False},
-        ],
-    )
-
-
 # ============================================================
-# No-Chaos: stale Running TTL cleanup (System_Runs)
-# ============================================================
-
-def cleanup_stale_runs() -> Dict[str, Any]:
-    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
-        return {"ok": True, "noop": True, "reason": "airtable_env_missing"}
-
-    ttl = int(RUN_LOCK_TTL_SECONDS or 600)
-    formula = "AND({Status_select}='Running',DATETIME_DIFF(NOW(), {Started_At}, 'seconds') > " + str(ttl) + ")"
-
-    try:
-        r = _HTTP_SESSION.get(
-            _airtable_url(SYSTEM_RUNS_TABLE_NAME),
-            headers=_airtable_headers(),
-            params={"filterByFormula": formula, "maxRecords": "10"},
-            timeout=HTTP_TIMEOUT_SECONDS,
-        )
-        if r.status_code >= 300:
-            if "INVALID_FILTER_BY_FORMULA" in r.text:
-                return {"ok": True, "noop": True, "reason": "invalid_filter_formula"}
-            return {"ok": False, "error": f"airtable_list_failed:{r.status_code}"}
-
-        records = r.json().get("records", []) or []
-        cleaned = 0
-
-        for rec in records:
-            rid = rec.get("id")
-            if not rid:
-                continue
-            try:
-                airtable_update(
-                    SYSTEM_RUNS_TABLE_NAME,
-                    rid,
-                    {
-                        "Status_select": "Error",
-                        "Finished_At": utc_now_iso(),
-                        "Result_JSON": json.dumps({"error": "lock_ttl_expired"}, ensure_ascii=False),
-                    },
-                )
-                cleaned += 1
-            except Exception:
-                continue
-
-        return {"ok": True, "ttl_seconds": ttl, "found": len(records), "cleaned": cleaned}
-    except Exception as e:
-        return {"ok": True, "noop": True, "reason": "exception", "detail": repr(e)}
-
-
-# ============================================================
-# System_Runs helpers
+# System runs
 # ============================================================
 
 def create_system_run(req: RunRequest) -> Tuple[str, str]:
@@ -717,7 +619,10 @@ def fail_system_run(record_id: str, error_message: str) -> None:
 
 
 def idempotency_lookup(req: RunRequest) -> Optional[Dict[str, Any]]:
-    formula = f"AND({{Idempotency_Key}}='{req.idempotency_key}',OR({{Status_select}}='Done',{{Status_select}}='Error'))"
+    formula = (
+        f"AND({{Idempotency_Key}}='{req.idempotency_key}',"
+        "OR({Status_select}='Done',{Status_select}='Error'))"
+    )
     try:
         return airtable_find_first(SYSTEM_RUNS_TABLE_NAME, formula=formula, max_records=1)
     except HTTPException as e:
@@ -726,8 +631,55 @@ def idempotency_lookup(req: RunRequest) -> Optional[Dict[str, Any]]:
         raise
 
 
+def cleanup_stale_runs() -> Dict[str, Any]:
+    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+        return {"ok": True, "noop": True, "reason": "airtable_env_missing"}
+
+    ttl = int(RUN_LOCK_TTL_SECONDS or 600)
+    formula = (
+        "AND("
+        "{Status_select}='Running',"
+        f"DATETIME_DIFF(NOW(), {{Started_At}}, 'seconds') > {ttl}"
+        ")"
+    )
+
+    try:
+        r = _HTTP_SESSION.get(
+            _airtable_url(SYSTEM_RUNS_TABLE_NAME),
+            headers=_airtable_headers(),
+            params={"filterByFormula": formula, "maxRecords": "10"},
+            timeout=HTTP_TIMEOUT_SECONDS,
+        )
+        if r.status_code >= 300:
+            return {"ok": False, "error": f"airtable_list_failed:{r.status_code}"}
+
+        records = r.json().get("records", []) or []
+        cleaned = 0
+        for rec in records:
+            rid = rec.get("id")
+            if not rid:
+                continue
+            try:
+                airtable_update(
+                    SYSTEM_RUNS_TABLE_NAME,
+                    rid,
+                    {
+                        "Status_select": "Error",
+                        "Finished_At": utc_now_iso(),
+                        "Result_JSON": json.dumps({"error": "lock_ttl_expired"}, ensure_ascii=False),
+                    },
+                )
+                cleaned += 1
+            except Exception:
+                continue
+
+        return {"ok": True, "ttl_seconds": ttl, "found": len(records), "cleaned": cleaned}
+    except Exception as e:
+        return {"ok": True, "noop": True, "reason": "exception", "detail": repr(e)}
+
+
 # ============================================================
-# State table helpers (KV + Locks)
+# State helpers
 # ============================================================
 
 def state_get_record(app_key: str) -> Optional[Dict[str, Any]]:
@@ -747,6 +699,37 @@ def state_put(app_key: str, value_obj: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": True, "mode": "update", "record_id": existing["id"]}
     rid = airtable_create(STATE_TABLE_NAME, fields)
     return {"ok": True, "mode": "create", "record_id": rid}
+
+
+def capability_state_get(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    key = str((req.input or {}).get("app_key") or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="state_get missing app_key")
+    rec = state_get_record(key)
+    if not rec:
+        return {"ok": True, "found": False, "app_key": key, "run_record_id": run_record_id}
+    fields = rec.get("fields", {}) or {}
+    return {
+        "ok": True,
+        "found": True,
+        "app_key": key,
+        "record_id": rec.get("id"),
+        "value": _json_load_maybe(fields.get("Value_JSON")),
+        "run_record_id": run_record_id,
+    }
+
+
+def capability_state_put(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    payload = req.input or {}
+    app_key = str(payload.get("app_key") or "").strip()
+    value = payload.get("value") or {}
+    if not app_key:
+        raise HTTPException(status_code=400, detail="state_put missing app_key")
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=400, detail="state_put value must be an object")
+    res = state_put(app_key, value)
+    res["run_record_id"] = run_record_id
+    return res
 
 
 def lock_acquire(lock_key: str, holder: str) -> Dict[str, Any]:
@@ -813,8 +796,30 @@ def lock_release(lock_key: str, holder: str) -> Dict[str, Any]:
     return {"ok": True, "released": True, "record_id": rec["id"]}
 
 
+def capability_lock_acquire(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    payload = req.input or {}
+    lock_key = str(payload.get("lock_key") or "").strip()
+    holder = str(payload.get("holder") or req.worker).strip()
+    if not lock_key:
+        raise HTTPException(status_code=400, detail="lock_acquire missing lock_key")
+    res = lock_acquire(lock_key, holder)
+    res["run_record_id"] = run_record_id
+    return res
+
+
+def capability_lock_release(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    payload = req.input or {}
+    lock_key = str(payload.get("lock_key") or "").strip()
+    holder = str(payload.get("holder") or req.worker).strip()
+    if not lock_key:
+        raise HTTPException(status_code=400, detail="lock_release missing lock_key")
+    res = lock_release(lock_key, holder)
+    res["run_record_id"] = run_record_id
+    return res
+
+
 # ============================================================
-# Event Engine helpers (SAFE, deterministic)
+# Event engine helpers
 # ============================================================
 
 EVENT_TYPE_TO_CAPABILITY: Dict[str, str] = {
@@ -836,26 +841,18 @@ def _event_command_idem(event_id: str, target_capability: str) -> str:
 
 def _event_has_linked_command(fields: Dict[str, Any]) -> bool:
     linked = fields.get("Linked_Command")
-    if isinstance(linked, list) and len(linked) > 0:
+    if isinstance(linked, list) and linked:
         return True
     if linked:
         return True
-
     command_record_id = str(fields.get("Command_Record_ID") or "").strip()
     if command_record_id:
         return True
-
-    if _is_truthy(fields.get("Command_Created")):
-        return True
-
-    return False
+    return _is_truthy(fields.get("Command_Created"))
 
 
 def _event_payload(fields: Dict[str, Any]) -> Dict[str, Any]:
-    payload = _json_load_maybe(fields.get("Payload_JSON"))
-    if isinstance(payload, dict):
-        return payload
-    return {}
+    return _json_load_maybe(fields.get("Payload_JSON"))
 
 
 def _event_status(fields: Dict[str, Any]) -> str:
@@ -883,15 +880,6 @@ def _build_command_fields_candidates(
             "Source_Event_ID": event_id,
             "Event_Type": event_type,
             "Scheduled_At": now,
-        },
-        {
-            "Capability": capability,
-            "Status_select": "Queued",
-            "Idempotency_Key": idem_key,
-            "Input_JSON": input_json,
-            "Linked_Run": [run_record_id],
-            "Source_Event_ID": event_id,
-            "Event_Type": event_type,
         },
         {
             "Capability": capability,
@@ -931,7 +919,6 @@ def _create_command_from_event(
 
     if not idem and event_id:
         idem = _event_command_idem(event_id, capability)
-
     if not idem:
         idem = f"cmd:{capability}:{uuid.uuid4().hex}"
 
@@ -950,10 +937,7 @@ def _create_command_from_event(
 
     create_res = _airtable_create_best_effort(COMMANDS_TABLE_NAME, candidates)
     if not create_res.get("ok"):
-        raise HTTPException(
-            status_code=500,
-            detail=f"create_command_failed: {create_res.get('error')}",
-        )
+        raise HTTPException(status_code=500, detail=f"create_command_failed: {create_res.get('error')}")
 
     record_id = create_res.get("record_id")
     return {
@@ -965,13 +949,8 @@ def _create_command_from_event(
     }
 
 
-def _mark_event_processed_best_effort(
-    event_id: str,
-    command_record_id: str,
-    capability: str,
-) -> Dict[str, Any]:
+def _mark_event_processed_best_effort(event_id: str, command_record_id: str, capability: str) -> Dict[str, Any]:
     now = utc_now_iso()
-
     return _airtable_update_best_effort(
         EVENTS_TABLE_NAME,
         event_id,
@@ -989,54 +968,21 @@ def _mark_event_processed_best_effort(
             {
                 "Status_select": "Processed",
                 "Command_Created": True,
-                "Linked_Command": [command_record_id],
-                "Command_Record_ID": command_record_id,
-                "Processed_At": now,
-                "Mapped_Capability": capability,
-                "Error_Message": "",
-            },
-            {
-                "Status": "Processed",
-                "Command_Created": True,
-                "Linked_Command": [command_record_id],
                 "Command_Record_ID": command_record_id,
                 "Processed_At": now,
                 "Mapped_Capability": capability,
             },
             {
-                "Status_select": "Processed",
                 "Command_Created": True,
-                "Command_Record_ID": command_record_id,
-                "Processed_At": now,
-                "Mapped_Capability": capability,
-            },
-            {
-                "Status": "Processed",
-                "Command_Created": True,
-                "Command_Record_ID": command_record_id,
-            },
-            {
-                "Status_select": "Processed",
-                "Command_Created": True,
-                "Command_Record_ID": command_record_id,
-            },
-            {
-                "Command_Created": True,
-                "Linked_Command": [command_record_id],
                 "Command_Record_ID": command_record_id,
             },
         ],
     )
 
 
-def _mark_event_ignored_best_effort(
-    event_id: str,
-    reason: str,
-    event_type: str,
-) -> Dict[str, Any]:
+def _mark_event_ignored_best_effort(event_id: str, reason: str, event_type: str) -> Dict[str, Any]:
     now = utc_now_iso()
     payload = json.dumps({"reason": reason, "event_type": event_type}, ensure_ascii=False)
-
     return _airtable_update_best_effort(
         EVENTS_TABLE_NAME,
         event_id,
@@ -1053,32 +999,8 @@ def _mark_event_ignored_best_effort(
             {
                 "Status_select": "Ignored",
                 "Command_Created": False,
-                "Command_Record_ID": "",
                 "Processed_At": now,
                 "Error_Message": reason,
-                "Result_JSON": payload,
-            },
-            {
-                "Status": "Ignored",
-                "Command_Created": False,
-                "Processed_At": now,
-                "Error_Message": reason,
-                "Result_JSON": payload,
-            },
-            {
-                "Status_select": "Ignored",
-                "Command_Created": False,
-                "Processed_At": now,
-                "Error_Message": reason,
-            },
-            {
-                "Status": "Ignored",
-                "Command_Created": False,
-                "Error_Message": reason,
-            },
-            {
-                "Status_select": "Ignored",
-                "Command_Created": False,
             },
         ],
     )
@@ -1087,7 +1009,6 @@ def _mark_event_ignored_best_effort(
 def _mark_event_error_best_effort(event_id: str, error_message: str) -> Dict[str, Any]:
     now = utc_now_iso()
     payload = json.dumps({"error": error_message}, ensure_ascii=False)
-
     return _airtable_update_best_effort(
         EVENTS_TABLE_NAME,
         event_id,
@@ -1104,219 +1025,143 @@ def _mark_event_error_best_effort(event_id: str, error_message: str) -> Dict[str
             {
                 "Status_select": "Error",
                 "Command_Created": False,
-                "Command_Record_ID": "",
                 "Processed_At": now,
                 "Error_Message": error_message,
-                "Result_JSON": payload,
-            },
-            {
-                "Status": "Error",
-                "Command_Created": False,
-                "Processed_At": now,
-                "Error_Message": error_message,
-                "Result_JSON": payload,
-            },
-            {
-                "Status_select": "Error",
-                "Command_Created": False,
-                "Processed_At": now,
-                "Error_Message": error_message,
-            },
-            {
-                "Status": "Error",
-                "Command_Created": False,
-                "Error_Message": error_message,
-            },
-            {
-                "Status_select": "Error",
-                "Command_Created": False,
             },
         ],
     )
-# ============================================================
-# Retry Queue (SAFE, best-effort)
-# ============================================================
 
-def capability_retry_queue(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    """
-    Promote due Retry commands back to Queued so the view-based fallback also works.
-    SAFE:
-    - If formulas/fields missing, it no-ops without crashing.
-    """
-    inp = req.input or {}
-    limit = int(inp.get("limit", 50) or 50)
-    if limit <= 0:
-        limit = 50
-    if limit > 200:
-        limit = 200
 
-    formula = (
-        "AND("
-        "{Status_select}='Retry',"
-        "{Next_Retry_At}!=BLANK(),"
-        "OR(IS_BEFORE({Next_Retry_At},NOW()),{Next_Retry_At}=NOW())"
-        ")"
-    )
+def capability_event_engine(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    payload = req.input or {}
+    limit = _safe_limit(int(payload.get("limit", 10) or 10), default=10, minimum=1, maximum=50)
+    view_name = str(payload.get("view") or EVENTS_VIEW_NAME or "Queue").strip()
 
     try:
-        recs = airtable_list_filtered(
-            COMMANDS_TABLE_NAME,
-            formula=formula,
-            view_name=(req.view or COMMANDS_VIEW_NAME or "Queue").strip(),
-            sort=[{"field": "Next_Retry_At", "direction": "asc"}],
-            max_records=limit,
-        )
-        mode = "formula"
+        records = airtable_list_view(EVENTS_TABLE_NAME, view_name, max_records=limit)
+        mode = "view"
     except Exception:
-        recs = airtable_list_view(
-            COMMANDS_TABLE_NAME,
-            (req.view or COMMANDS_VIEW_NAME or "Queue").strip(),
-            max_records=limit,
-        )
-        mode = "view_fallback"
+        records = airtable_list_view(EVENTS_TABLE_NAME, EVENTS_VIEW_NAME or "Queue", max_records=limit)
+        mode = "fallback_view"
 
-    promoted = 0
-    failed = 0
+    scanned = 0
+    created = 0
+    ignored = 0
+    errors_count = 0
+    processed_ids: List[str] = []
     errors: List[str] = []
 
-    for r in recs:
-        cid = r.get("id")
-        if not cid:
-            continue
-        fields = r.get("fields", {}) or {}
-        if _read_command_status(fields) != "Retry":
-            continue
-
-        res = _airtable_update_best_effort(
-            COMMANDS_TABLE_NAME,
-            cid,
-            [
-                {"Status_select": "Queued", "Next_Retry_At": None, "Linked_Run": [run_record_id]},
-                {"Status_select": "Queued", "Linked_Run": [run_record_id]},
-                {"Status_select": "Queued"},
-            ],
-        )
-        if res.get("ok"):
-            promoted += 1
-        else:
-            failed += 1
-            errors.append(f"{cid}: {res.get('error')}")
-
-    return {"ok": True, "mode": mode, "scanned": len(recs), "promoted": promoted, "failed": failed, "errors": errors[:10]}
-
-
-# ============================================================
-# Lock Recovery (SAFE, best-effort)
-# ============================================================
-
-def capability_lock_recovery(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    """
-    Recover stale locks by moving stuck Running commands back to Retry (or Queued),
-    and clearing lock fields best-effort.
-    """
-    inp = req.input or {}
-    limit = int(inp.get("limit", 50) or 50)
-    if limit <= 0:
-        limit = 50
-    if limit > 200:
-        limit = 200
-
-    view_name = (req.view or COMMANDS_VIEW_NAME or "Queue").strip()
-
-    formula = (
-        "OR("
-        "{Is_Lock_Stale}=1,"
-        "AND({Status_select}='Running',{Is_Locked}=1,{Lock_Expires_At}!=BLANK(),IS_BEFORE({Lock_Expires_At},NOW()))"
-        ")"
-    )
-
-    try:
-        recs = airtable_list_filtered(
-            COMMANDS_TABLE_NAME,
-            formula=formula,
-            view_name=view_name,
-            sort=[{"field": "Lock_Expires_At", "direction": "asc"}],
-            max_records=limit,
-        )
-        mode = "formula"
-    except Exception:
-        recs = airtable_list_view(COMMANDS_TABLE_NAME, view_name, max_records=limit)
-        mode = "view_fallback"
-
-    recovered = 0
-    skipped = 0
-    failed = 0
-    errors: List[str] = []
-
-    now = utc_now_iso()
-
-    for r in recs:
-        cid = r.get("id")
-        if not cid:
-            continue
-        fields = r.get("fields", {}) or {}
-        status = _read_command_status(fields)
-
-        if status not in ("Running", "Queued", "Retry"):
-            skipped += 1
+    for record in records:
+        scanned += 1
+        event_id = record.get("id")
+        fields = record.get("fields", {}) or {}
+        if not event_id:
             continue
 
-        is_locked = fields.get("Is_Locked")
-        if status == "Running" and is_locked is not True:
-            skipped += 1
+        status = _event_status(fields)
+        if status not in ("New", "Queued", ""):
             continue
 
-        note = {"note": "lock_recovered", "at": now}
+        if _event_has_linked_command(fields):
+            ignored += 1
+            continue
 
-        res = _airtable_update_best_effort(
-            COMMANDS_TABLE_NAME,
-            cid,
-            [
-                {
-                    "Status_select": "Retry",
-                    "Next_Retry_At": now,
-                    "Last_Error": json.dumps(note, ensure_ascii=False),
-                    "Error_Message": "",
-                    "Is_Locked": False,
-                    "Lock_Expires_At": None,
-                    "Lock_Token": "",
-                    "Last_Heartbeat_At": now,
-                    "Linked_Run": [run_record_id],
-                },
-                {
-                    "Status_select": "Retry",
-                    "Next_Retry_At": now,
-                    "Is_Locked": False,
-                    "Lock_Expires_At": None,
-                    "Lock_Token": "",
-                    "Linked_Run": [run_record_id],
-                },
-                {"Status_select": "Retry", "Next_Retry_At": now, "Linked_Run": [run_record_id]},
-            ],
-        )
+        event_type = str(fields.get("Event_Type") or "").strip()
+        mapped_capability = str(fields.get("Mapped_Capability") or "").strip()
+        command_input = _json_load_maybe(fields.get("Command_Input_JSON"))
+        idem = str(fields.get("Idempotency_Key") or "").strip()
 
-        if res.get("ok"):
-            recovered += 1
-        else:
-            failed += 1
-            errors.append(f"{cid}: {res.get('error')}")
+        target_capability = mapped_capability or _event_target_capability(event_type)
+        if not target_capability:
+            _mark_event_ignored_best_effort(event_id, "no_capability_mapping", event_type)
+            ignored += 1
+            continue
 
-        _release_command_lock_best_effort(cid)
+        try:
+            cmd = _create_command_from_event(
+                capability=target_capability,
+                command_input=command_input,
+                idempotency_key=idem,
+                run_record_id=run_record_id,
+                event_id=event_id,
+                event_type=event_type,
+            )
+            command_record_id = str(cmd.get("id") or "").strip()
+            _mark_event_processed_best_effort(event_id, command_record_id, target_capability)
+            created += 1
+            processed_ids.append(event_id)
+        except Exception as exc:
+            errors_count += 1
+            errors.append(f"{event_id}: {repr(exc)}")
+            _mark_event_error_best_effort(event_id, repr(exc))
 
     return {
         "ok": True,
         "mode": mode,
-        "scanned": len(recs),
-        "recovered": recovered,
-        "skipped": skipped,
-        "failed": failed,
+        "scanned": scanned,
+        "created": created,
+        "ignored": ignored,
+        "errors_count": errors_count,
+        "processed_event_ids": processed_ids,
         "errors": errors[:10],
+        "run_record_id": run_record_id,
     }
 
 
 # ============================================================
-# Event Engine v1 (SAFE, best-effort)
+# Command queue helpers
 # ============================================================
+
+def _new_lock_token() -> str:
+    return uuid.uuid4().hex
+
+
+def _command_lock_ttl_min() -> int:
+    try:
+        if POLICY_LOCK_TTL_MINUTES and POLICY_LOCK_TTL_MINUTES > 0:
+            return POLICY_LOCK_TTL_MINUTES
+        v = int(COMMAND_LOCK_TTL_MIN or 10)
+        return v if v > 0 else 10
+    except Exception:
+        return 10
+
+
+def _utc_plus_minutes_iso(minutes: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
+
+
+def _compute_next_retry_at(fields: Dict[str, Any]) -> str:
+    try:
+        base = int(fields.get("Retry_Backoff_Sec", 60) or 60)
+    except Exception:
+        base = 60
+    try:
+        count = int(fields.get("Retry_Count", 0) or 0)
+    except Exception:
+        count = 0
+
+    if POLICY_RETRY_LIMIT > 0 and count > POLICY_RETRY_LIMIT:
+        count = POLICY_RETRY_LIMIT
+    if base <= 0:
+        base = 60
+    if count < 0:
+        count = 0
+
+    delay = min(3600, base * (2 ** count))
+    return (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
+
+
+def _release_command_lock_best_effort(command_id: str) -> None:
+    now = utc_now_iso()
+    _airtable_update_best_effort(
+        COMMANDS_TABLE_NAME,
+        command_id,
+        [
+            {"Is_Locked": False, "Lock_Expires_At": None, "Lock_Token": "", "Last_Heartbeat_At": now},
+            {"Is_Locked": False, "Lock_Expires_At": None, "Lock_Token": ""},
+            {"Is_Locked": False},
+        ],
+    )
 
 
 def _extract_http_status_from_result(result_obj: Dict[str, Any]) -> Optional[int]:
@@ -1326,11 +1171,10 @@ def _extract_http_status_from_result(result_obj: Dict[str, Any]) -> Optional[int
     for key in ("status_code", "http_status", "status"):
         value = result_obj.get(key)
         try:
-            if value is None:
-                continue
-            n = int(value)
-            if 100 <= n <= 599:
-                return n
+            if value is not None:
+                n = int(value)
+                if 100 <= n <= 599:
+                    return n
         except Exception:
             pass
 
@@ -1339,11 +1183,10 @@ def _extract_http_status_from_result(result_obj: Dict[str, Any]) -> Optional[int
         for key in ("status_code", "http_status", "status"):
             value = response_obj.get(key)
             try:
-                if value is None:
-                    continue
-                n = int(value)
-                if 100 <= n <= 599:
-                    return n
+                if value is not None:
+                    n = int(value)
+                    if 100 <= n <= 599:
+                        return n
             except Exception:
                 pass
 
@@ -1380,103 +1223,49 @@ def _command_mark_running_best_effort(command_id: str, run_record_id: str, worke
                 "Idempotency_Key": idem,
                 "Linked_Run": [run_record_id],
                 "Started_At": now,
-                "Error_Message": "",
-                "Last_Error": "",
-                "Is_Locked": True,
-                "Locked_At": now,
-                "Locked_By": worker_name,
-            },
-            {
-                "Status_select": "Running",
-                "Idempotency_Key": idem,
-                "Linked_Run": [run_record_id],
-                "Started_At": now,
-                "Error_Message": "",
-                "Last_Error": "",
-            },
-            {
-                "Status_select": "Running",
-                "Linked_Run": [run_record_id],
-                "Started_At": now,
-                "Error_Message": "",
-            },
-            {
-                "Status_select": "Running",
-                "Started_At": now,
-            },
-            {
-                "Status_select": "Running",
             },
         ],
     )
 
 
-def _command_mark_done_best_effort(
-    command_id: str,
-    run_record_id: str,
-    result_obj: Dict[str, Any],
-) -> Dict[str, Any]:
+def _command_mark_done_best_effort(command_id: str, run_record_id: str, result_obj: Dict[str, Any]) -> Dict[str, Any]:
     now = utc_now_iso()
     result_json = json.dumps(result_obj, ensure_ascii=False)
     http_status = _extract_http_status_from_result(result_obj)
 
-    candidates: List[Dict[str, Any]] = [
-        {
-            "Status_select": "Done",
-            "Finished_At": now,
-            "Result_JSON": result_json,
-            "Last_Error": "",
-            "Error_Message": "",
-            "Linked_Run": [run_record_id],
-            "Is_Locked": False,
-            "Lock_Expires_At": None,
-            "Lock_Token": "",
-            "Last_Heartbeat_At": now,
-            "Last_HTTP_Status": http_status,
-        },
-        {
-            "Status_select": "Done",
-            "Finished_At": now,
-            "Result_JSON": result_json,
-            "Last_Error": "",
-            "Error_Message": "",
-            "Linked_Run": [run_record_id],
-            "Is_Locked": False,
-            "Lock_Expires_At": None,
-            "Lock_Token": "",
-            "Last_Heartbeat_At": now,
-        },
-        {
-            "Status_select": "Done",
-            "Finished_At": now,
-            "Result_JSON": result_json,
-            "Linked_Run": [run_record_id],
-        },
-        {
-            "Status_select": "Done",
-            "Result_JSON": result_json,
-            "Linked_Run": [run_record_id],
-        },
-        {
-            "Status_select": "Done",
-            "Linked_Run": [run_record_id],
-        },
-        {
-            "Status_select": "Done",
-        },
-    ]
-
-    return _airtable_update_best_effort(COMMANDS_TABLE_NAME, command_id, candidates)
+    return _airtable_update_best_effort(
+        COMMANDS_TABLE_NAME,
+        command_id,
+        [
+            {
+                "Status_select": "Done",
+                "Finished_At": now,
+                "Result_JSON": result_json,
+                "Last_Error": "",
+                "Error_Message": "",
+                "Linked_Run": [run_record_id],
+                "Is_Locked": False,
+                "Lock_Expires_At": None,
+                "Lock_Token": "",
+                "Last_Heartbeat_At": now,
+                "Last_HTTP_Status": http_status,
+            },
+            {
+                "Status_select": "Done",
+                "Finished_At": now,
+                "Result_JSON": result_json,
+                "Linked_Run": [run_record_id],
+            },
+            {
+                "Status_select": "Done",
+            },
+        ],
+    )
 
 
-def _command_mark_blocked_duplicate_best_effort(
-    command_id: str,
-    run_record_id: str,
-    note: Dict[str, Any],
-) -> Dict[str, Any]:
+def _command_mark_blocked_duplicate_best_effort(command_id: str, run_record_id: str, note: Dict[str, Any]) -> Dict[str, Any]:
     now = utc_now_iso()
     payload = json.dumps(note, ensure_ascii=False)
-
     return _airtable_update_best_effort(
         COMMANDS_TABLE_NAME,
         command_id,
@@ -1486,18 +1275,10 @@ def _command_mark_blocked_duplicate_best_effort(
                 "Finished_At": now,
                 "Result_JSON": payload,
                 "Last_Error": payload,
-                "Error_Message": "",
                 "Linked_Run": [run_record_id],
                 "Is_Locked": False,
                 "Lock_Expires_At": None,
                 "Lock_Token": "",
-                "Last_Heartbeat_At": now,
-            },
-            {
-                "Status_select": "Blocked",
-                "Finished_At": now,
-                "Result_JSON": payload,
-                "Linked_Run": [run_record_id],
             },
             {
                 "Status_select": "Blocked",
@@ -1510,14 +1291,9 @@ def _command_mark_blocked_duplicate_best_effort(
     )
 
 
-def _command_mark_unsupported_best_effort(
-    command_id: str,
-    run_record_id: str,
-    message: str,
-) -> Dict[str, Any]:
+def _command_mark_unsupported_best_effort(command_id: str, run_record_id: str, message: str) -> Dict[str, Any]:
     now = utc_now_iso()
     payload = json.dumps({"error": message}, ensure_ascii=False)
-
     return _airtable_update_best_effort(
         COMMANDS_TABLE_NAME,
         command_id,
@@ -1535,14 +1311,6 @@ def _command_mark_unsupported_best_effort(
             },
             {
                 "Status_select": "Unsupported",
-                "Finished_At": now,
-                "Error_Message": message,
-                "Result_JSON": payload,
-                "Linked_Run": [run_record_id],
-            },
-            {
-                "Status_select": "Unsupported",
-                "Error_Message": message,
                 "Linked_Run": [run_record_id],
             },
             {
@@ -1552,12 +1320,7 @@ def _command_mark_unsupported_best_effort(
     )
 
 
-def _command_mark_retry_or_dead_best_effort(
-    command_id: str,
-    run_record_id: str,
-    fields: Dict[str, Any],
-    message: str,
-) -> Dict[str, Any]:
+def _command_mark_retry_or_dead_best_effort(command_id: str, run_record_id: str, fields: Dict[str, Any], message: str) -> Dict[str, Any]:
     now = utc_now_iso()
     payload = json.dumps({"error": message}, ensure_ascii=False)
 
@@ -1600,20 +1363,10 @@ def _command_mark_retry_or_dead_best_effort(
                     "Status_select": "Retry",
                     "Retry_Count": retry_count + 1,
                     "Next_Retry_At": next_at,
-                    "Finished_At": now,
-                    "Last_Error": message,
-                    "Error_Message": message,
                     "Linked_Run": [run_record_id],
                 },
                 {
                     "Status_select": "Retry",
-                    "Retry_Count": retry_count + 1,
-                    "Next_Retry_At": next_at,
-                    "Linked_Run": [run_record_id],
-                },
-                {
-                    "Status_select": "Retry",
-                    "Linked_Run": [run_record_id],
                 },
             ],
         )
@@ -1636,23 +1389,185 @@ def _command_mark_retry_or_dead_best_effort(
             },
             {
                 "Status_select": "Dead",
-                "Finished_At": now,
-                "Last_Error": message,
-                "Error_Message": message,
-                "Linked_Run": [run_record_id],
-            },
-            {
-                "Status_select": "Dead",
                 "Linked_Run": [run_record_id],
             },
             {
                 "Status_select": "Error",
-                "Finished_At": now,
-                "Error_Message": message,
                 "Linked_Run": [run_record_id],
             },
         ],
-    )    
+    )
+
+
+def capability_retry_queue(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    inp = req.input or {}
+    limit = int(inp.get("limit", 50) or 50)
+    if limit <= 0:
+        limit = 50
+    if limit > 200:
+        limit = 200
+
+    formula = (
+        "AND("
+        "{Status_select}='Retry',"
+        "{Next_Retry_At}!=BLANK(),"
+        "OR(IS_BEFORE({Next_Retry_At},NOW()),{Next_Retry_At}=NOW())"
+        ")"
+    )
+
+    try:
+        recs = airtable_list_filtered(
+            COMMANDS_TABLE_NAME,
+            formula=formula,
+            view_name=(req.view or COMMANDS_VIEW_NAME or "Queue").strip(),
+            sort=[{"field": "Next_Retry_At", "direction": "asc"}],
+            max_records=limit,
+        )
+        mode = "formula"
+    except Exception:
+        recs = airtable_list_view(COMMANDS_TABLE_NAME, (req.view or COMMANDS_VIEW_NAME or "Queue").strip(), max_records=limit)
+        mode = "view_fallback"
+
+    promoted = 0
+    failed = 0
+    errors: List[str] = []
+
+    for r in recs:
+        cid = r.get("id")
+        if not cid:
+            continue
+        fields = r.get("fields", {}) or {}
+        if _read_command_status(fields) != "Retry":
+            continue
+
+        res = _airtable_update_best_effort(
+            COMMANDS_TABLE_NAME,
+            cid,
+            [
+                {"Status_select": "Queued", "Next_Retry_At": None, "Linked_Run": [run_record_id]},
+                {"Status_select": "Queued", "Linked_Run": [run_record_id]},
+                {"Status_select": "Queued"},
+            ],
+        )
+        if res.get("ok"):
+            promoted += 1
+        else:
+            failed += 1
+            errors.append(f"{cid}: {res.get('error')}")
+
+    return {
+        "ok": True,
+        "mode": mode,
+        "scanned": len(recs),
+        "promoted": promoted,
+        "failed": failed,
+        "errors": errors[:10],
+    }
+
+
+def capability_lock_recovery(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    inp = req.input or {}
+    limit = int(inp.get("limit", 50) or 50)
+    if limit <= 0:
+        limit = 50
+    if limit > 200:
+        limit = 200
+
+    view_name = (req.view or COMMANDS_VIEW_NAME or "Queue").strip()
+
+    formula = (
+        "OR("
+        "{Is_Lock_Stale}=1,"
+        "AND({Status_select}='Running',{Is_Locked}=1,{Lock_Expires_At}!=BLANK(),IS_BEFORE({Lock_Expires_At},NOW()))"
+        ")"
+    )
+
+    try:
+        recs = airtable_list_filtered(
+            COMMANDS_TABLE_NAME,
+            formula=formula,
+            view_name=view_name,
+            sort=[{"field": "Lock_Expires_At", "direction": "asc"}],
+            max_records=limit,
+        )
+        mode = "formula"
+    except Exception:
+        recs = airtable_list_view(COMMANDS_TABLE_NAME, view_name, max_records=limit)
+        mode = "view_fallback"
+
+    recovered = 0
+    skipped = 0
+    failed = 0
+    errors: List[str] = []
+    now = utc_now_iso()
+
+    for r in recs:
+        cid = r.get("id")
+        if not cid:
+            continue
+
+        fields = r.get("fields", {}) or {}
+        status = _read_command_status(fields)
+
+        if status not in ("Running", "Queued", "Retry"):
+            skipped += 1
+            continue
+
+        if status == "Running" and fields.get("Is_Locked") is not True:
+            skipped += 1
+            continue
+
+        res = _airtable_update_best_effort(
+            COMMANDS_TABLE_NAME,
+            cid,
+            [
+                {
+                    "Status_select": "Retry",
+                    "Next_Retry_At": now,
+                    "Is_Locked": False,
+                    "Lock_Expires_At": None,
+                    "Lock_Token": "",
+                    "Last_Heartbeat_At": now,
+                    "Linked_Run": [run_record_id],
+                },
+                {
+                    "Status_select": "Retry",
+                    "Linked_Run": [run_record_id],
+                },
+                {
+                    "Status_select": "Retry",
+                },
+            ],
+        )
+
+        if res.get("ok"):
+            recovered += 1
+        else:
+            failed += 1
+            errors.append(f"{cid}: {res.get('error')}")
+
+        _release_command_lock_best_effort(cid)
+
+    return {
+        "ok": True,
+        "mode": mode,
+        "scanned": len(recs),
+        "recovered": recovered,
+        "skipped": skipped,
+        "failed": failed,
+        "errors": errors[:10],
+    }
+
+
+def _resolve_http_exec_url_from_command_input(cmd_input: Dict[str, Any]) -> str:
+    if not isinstance(cmd_input, dict):
+        return ""
+    for key in ("url", "http_target", "URL"):
+        value = str(cmd_input.get(key, "") or "").strip()
+        if value:
+            return value
+    return ""
+
 
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     max_cmds = int(req.max_commands or 0) or 5
@@ -1668,70 +1583,54 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         "{Is_Lock_Stale}=1"
         ")"
     )
+
     try:
         cmds = airtable_list_filtered(
             COMMANDS_TABLE_NAME,
             formula=formula,
             view_name=view_name,
-            sort=[
-                {"field": "Priority", "direction": "desc"},
-            ],
+            sort=[{"field": "Priority", "direction": "desc"}],
             max_records=max_cmds,
         )
         selection_mode = "scheduler"
         view = f"scheduler_formula+view:{view_name}"
-
-    except Exception as e:
-        
+    except Exception:
         selection_mode = "view_fallback"
         view = view_name
         cmds = airtable_list_view(COMMANDS_TABLE_NAME, view, max_records=max_cmds)
-
-  
 
     executed = 0
     succeeded = 0
     failed = 0
     blocked = 0
     unsupported = 0
-
     processed_ids: List[str] = []
     errors: List[str] = []
 
     for c in cmds:
         cid = c.get("id")
         fields = c.get("fields", {}) or {}
-       
         if not cid:
             continue
 
         processed_ids.append(cid)
 
         status = _read_command_status(fields).lower()
-        
         if status not in ("queued", "queue", "retry"):
             blocked += 1
             continue
+
         capability = str(fields.get("Capability", "")).strip()
         if not capability:
             failed += 1
-            _command_mark_retry_or_dead_best_effort(
-                command_id=cid,
-                run_record_id=run_record_id,
-                fields=fields,
-                message="Missing Capability",
-            )
+            _command_mark_retry_or_dead_best_effort(cid, run_record_id, fields, "Missing Capability")
             _release_command_lock_best_effort(cid)
             continue
 
         fn = CAPABILITIES.get(capability)
         if not fn:
             unsupported += 1
-            _command_mark_unsupported_best_effort(
-                command_id=cid,
-                run_record_id=run_record_id,
-                message=f"Unsupported capability: {capability}",
-            )
+            _command_mark_unsupported_best_effort(cid, run_record_id, f"Unsupported capability: {capability}")
             _release_command_lock_best_effort(cid)
             continue
 
@@ -1739,12 +1638,6 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             approved = fields.get("Approved")
             if not _is_truthy(approved):
                 blocked += 1
-                approval_payload = {
-                    "error": "Approval required by policy",
-                    "capability": capability,
-                    "approved_raw": approved,
-                    "policy": "APPROVAL_REQUIRED_FOR_WRITE",
-                }
                 _airtable_update_best_effort(
                     COMMANDS_TABLE_NAME,
                     cid,
@@ -1753,18 +1646,10 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                             "Status_select": "Blocked",
                             "Finished_At": utc_now_iso(),
                             "Error_Message": "Approval required by policy",
-                            "Last_Error": "Approval required by policy",
-                            "Result_JSON": json.dumps(approval_payload, ensure_ascii=False),
                             "Linked_Run": [run_record_id],
                             "Is_Locked": False,
                             "Lock_Expires_At": None,
                             "Lock_Token": "",
-                        },
-                        {
-                            "Status_select": "Blocked",
-                            "Error_Message": "Approval required by policy",
-                            "Result_JSON": json.dumps(approval_payload, ensure_ascii=False),
-                            "Linked_Run": [run_record_id],
                         },
                         {"Status_select": "Blocked"},
                     ],
@@ -1777,28 +1662,22 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
 
         dup_done = find_done_command_by_idem(idem, exclude_record_id=cid)
         if dup_done:
-            note = {
-                "ok": True,
-                "skipped": True,
-                "reason": "idempotent_duplicate_done_exists",
-                "idempotency_key": idem,
-                "matched_done_record_id": dup_done.get("id"),
-            }
             _command_mark_blocked_duplicate_best_effort(
-                command_id=cid,
-                run_record_id=run_record_id,
-                note=note,
+                cid,
+                run_record_id,
+                {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": "idempotent_duplicate_done_exists",
+                    "idempotency_key": idem,
+                    "matched_done_record_id": dup_done.get("id"),
+                },
             )
             _release_command_lock_best_effort(cid)
             blocked += 1
             continue
 
-        lock_res = _command_mark_running_best_effort(
-            command_id=cid,
-            run_record_id=run_record_id,
-            worker_name=req.worker,
-            idem=idem,
-        )
+        lock_res = _command_mark_running_best_effort(cid, run_record_id, req.worker, idem)
         if not lock_res.get("ok"):
             blocked += 1
             errors.append(f"{cid}: failed_to_mark_running:{lock_res.get('error')}")
@@ -1809,77 +1688,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             if not resolved_url:
                 msg = "HTTP_EXEC missing url (Input_JSON.url / http_target / URL)"
                 failed += 1
-
-                try:
-                    retry_count = int(fields.get("Retry_Count", 0) or 0)
-                except Exception:
-                    retry_count = 0
-                try:
-                    retry_max = int(fields.get("Retry_Max", 0) or 0)
-                except Exception:
-                    retry_max = 0
-
-                if POLICY_RETRY_LIMIT > 0:
-                    retry_max = POLICY_RETRY_LIMIT
-                elif retry_max <= 0:
-                    retry_max = 3
-
-                if retry_count < retry_max:
-                    next_at = _compute_next_retry_at(fields)
-                    _airtable_update_best_effort(
-                        COMMANDS_TABLE_NAME,
-                        cid,
-                        [
-                            {
-                                "Status_select": "Retry",
-                                "Retry_Count": retry_count + 1,
-                                "Next_Retry_At": next_at,
-                                "Finished_At": utc_now_iso(),
-                                "Last_Error": msg,
-                                "Error_Message": msg,
-                                "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
-                                "Linked_Run": [run_record_id],
-                                "Is_Locked": False,
-                                "Lock_Expires_At": None,
-                                "Lock_Token": "",
-                            },
-                            {
-                                "Status_select": "Retry",
-                                "Retry_Count": retry_count + 1,
-                                "Next_Retry_At": next_at,
-                                "Last_Error": msg,
-                                "Error_Message": msg,
-                                "Linked_Run": [run_record_id],
-                            },
-                            {
-                                "Status_select": "Error",
-                                "Error_Message": msg,
-                                "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
-                                "Linked_Run": [run_record_id],
-                            },
-                        ],
-                    )
-                else:
-                    _airtable_update_best_effort(
-                        COMMANDS_TABLE_NAME,
-                        cid,
-                        [
-                            {
-                                "Status_select": "Dead",
-                                "Finished_At": utc_now_iso(),
-                                "Last_Error": msg,
-                                "Error_Message": msg,
-                                "Result_JSON": json.dumps({"error": msg}, ensure_ascii=False),
-                                "Linked_Run": [run_record_id],
-                                "Is_Locked": False,
-                                "Lock_Expires_At": None,
-                                "Lock_Token": "",
-                            },
-                            {"Status_select": "Dead", "Last_Error": msg, "Linked_Run": [run_record_id]},
-                            {"Status_select": "Error", "Error_Message": msg, "Linked_Run": [run_record_id]},
-                        ],
-                    )
-
+                _command_mark_retry_or_dead_best_effort(cid, run_record_id, fields, msg)
                 _release_command_lock_best_effort(cid)
                 errors.append(f"{cid}: {msg}")
                 continue
@@ -1902,39 +1711,20 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             if not isinstance(result_obj, dict):
                 result_obj = {"ok": True, "result": result_obj}
 
-            _command_mark_done_best_effort(
-                command_id=cid,
-                run_record_id=run_record_id,
-                result_obj=result_obj,
-            )
-
+            _command_mark_done_best_effort(cid, run_record_id, result_obj)
             succeeded += 1
 
         except HTTPException as e:
             msg = str(e.detail)
             failed += 1
-
-            _command_mark_retry_or_dead_best_effort(
-                command_id=cid,
-                run_record_id=run_record_id,
-                fields=fields,
-                message=msg,
-            )
-
+            _command_mark_retry_or_dead_best_effort(cid, run_record_id, fields, msg)
             _release_command_lock_best_effort(cid)
             errors.append(f"{cid}: {msg}")
 
         except Exception as e:
             msg = repr(e)
             failed += 1
-
-            _command_mark_retry_or_dead_best_effort(
-                command_id=cid,
-                run_record_id=run_record_id,
-                fields=fields,
-                message=msg,
-            )
-
+            _command_mark_retry_or_dead_best_effort(cid, run_record_id, fields, msg)
             _release_command_lock_best_effort(cid)
             errors.append(f"{cid}: {msg}")
 
@@ -1985,17 +1775,10 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
 
     return result
 
-def _resolve_http_exec_url_from_command_input(cmd_input: Dict[str, Any]) -> str:
-    if not isinstance(cmd_input, dict):
-        return ""
 
-    for key in ("url", "http_target", "URL"):
-        value = str(cmd_input.get(key, "") or "").strip()
-        if value:
-            return value
-
-    return ""
-    
+# ============================================================
+# Capabilities registry
+# ============================================================
 
 CAPABILITIES = {
     "health_tick": capability_health_tick,
@@ -2013,6 +1796,10 @@ CAPABILITIES = {
     "command_orchestrator": capability_command_orchestrator,
 }
 
+
+# ============================================================
+# Root / health
+# ============================================================
 
 @app.get("/")
 def root() -> Dict[str, Any]:
@@ -2041,12 +1828,12 @@ def health() -> Dict[str, Any]:
             "expose_headers": CORS_EXPOSE_HEADERS,
             "allow_credentials": CORS_ALLOW_CREDENTIALS,
         },
-       "dashboard_views": {
+        "dashboard_views": {
             "system_runs_view": SYSTEM_RUNS_VIEW_NAME,
             "commands_dashboard_view": COMMANDS_DASHBOARD_VIEW_NAME,
             "sla_dashboard_view": SLA_DASHBOARD_VIEW_NAME,
             "events_dashboard_view": EVENTS_DASHBOARD_VIEW_NAME,
-       },
+        },
         "ts": utc_now_iso(),
     }
 
@@ -2074,21 +1861,16 @@ def health_score() -> Dict[str, Any]:
 
 
 # ============================================================
-# READ-ONLY dashboard endpoints (SAFE)
+# Read-only endpoints
 # ============================================================
 
 @app.get("/runs")
 def get_runs(limit: int = 20) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=20, minimum=1, maximum=100)
     records, meta = _safe_records_from_view(SYSTEM_RUNS_TABLE_NAME, SYSTEM_RUNS_VIEW_NAME, limit)
+
     runs: List[Dict[str, Any]] = []
-    stats = {
-        "running": 0,
-        "done": 0,
-        "error": 0,
-        "unsupported": 0,
-        "other": 0,
-    }
+    stats = {"running": 0, "done": 0, "error": 0, "unsupported": 0, "other": 0}
 
     for r in records:
         f = r.get("fields", {}) or {}
@@ -2150,9 +1932,9 @@ def get_commands(limit: int = 30) -> Dict[str, Any]:
     for r in records:
         f = r.get("fields", {}) or {}
         status = _read_command_status(f)
-
         key = status.lower()
-        if key == "queued" or key == "queue":
+
+        if key in ("queued", "queue"):
             stats["queued"] += 1
         elif key == "running":
             stats["running"] += 1
@@ -2259,18 +2041,10 @@ def get_events(limit: int = 30) -> Dict[str, Any]:
     records, meta = _safe_records_from_view(EVENTS_TABLE_NAME, EVENTS_DASHBOARD_VIEW_NAME, limit)
 
     events: List[Dict[str, Any]] = []
-    stats = {
-        "new": 0,
-        "queued": 0,
-        "processed": 0,
-        "ignored": 0,
-        "error": 0,
-        "other": 0,
-    }
+    stats = {"new": 0, "queued": 0, "processed": 0, "ignored": 0, "error": 0, "other": 0}
 
     for r in records:
         f = r.get("fields", {}) or {}
-
         status = str(f.get("Status", f.get("Status_select", "")) or "").strip()
         key = status.lower()
 
@@ -2313,22 +2087,16 @@ def get_events(limit: int = 30) -> Dict[str, Any]:
         "events": events,
         "ts": utc_now_iso(),
     }
-class EventCreate(BaseModel):
-    event_type: str
-    source: Optional[str] = "api"
-    payload: Optional[Dict[str, Any]] = None
-    command_capability: Optional[str] = None
-    command_input: Optional[Dict[str, Any]] = None
-    idempotency_key: Optional[str] = None
-    workspace_id: Optional[str] = "production"
 
+
+# ============================================================
+# Event endpoints
+# ============================================================
 
 @app.post("/events")
 def create_event(evt: EventCreate) -> Dict[str, Any]:
     if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
         raise HTTPException(status_code=500, detail="airtable not configured")
-
-    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{EVENTS_TABLE_NAME}"
 
     payload_json = evt.payload or {}
     command_input_json = evt.command_input or {}
@@ -2345,29 +2113,15 @@ def create_event(evt: EventCreate) -> Dict[str, Any]:
         "Command_Created": False,
     }
 
-    headers = {
-        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    response = requests.post(
-        url,
-        headers=headers,
-        json={"fields": fields},
-        timeout=20,
-    )
-
-    if response.status_code >= 300:
-        raise HTTPException(status_code=500, detail=response.text)
-
-    data = response.json()
+    event_id = airtable_create(EVENTS_TABLE_NAME, fields)
 
     return {
         "ok": True,
-        "event_id": data.get("id"),
+        "event_id": event_id,
         "status": "New",
         "ts": utc_now_iso(),
     }
+
 
 @app.post("/events/process")
 def process_events(limit: int = 10) -> Dict[str, Any]:
@@ -2382,7 +2136,7 @@ def process_events(limit: int = 10) -> Dict[str, Any]:
             "priority": 1,
             "input": {
                 "limit": _safe_limit(limit, default=10, minimum=1, maximum=50),
-                "view": "ALL",
+                "view": EVENTS_VIEW_NAME or "Queue",
             },
             "dry_run": False,
         }
@@ -2392,12 +2146,9 @@ def process_events(limit: int = 10) -> Dict[str, Any]:
 
     try:
         result_obj = capability_event_engine(req, run_record_id)
-
-        if isinstance(result_obj, dict) and "run_record_id" not in result_obj:
+        if "run_record_id" not in result_obj:
             result_obj["run_record_id"] = run_record_id
-
         finish_system_run(run_record_id, "Done", result_obj)
-
         return {
             "ok": True,
             "run_id": run_uuid,
@@ -2405,17 +2156,18 @@ def process_events(limit: int = 10) -> Dict[str, Any]:
             "result": result_obj,
             "ts": utc_now_iso(),
         }
-
     except HTTPException as e:
         fail_system_run(run_record_id, str(e.detail))
         raise
-
     except Exception as e:
         fail_system_run(run_record_id, repr(e))
-        raise HTTPException(
-            status_code=500,
-            detail=f"events_process_failed: {repr(e)}",
-        )
+        raise HTTPException(status_code=500, detail=f"events_process_failed: {repr(e)}")
+
+
+# ============================================================
+# Run endpoint
+# ============================================================
+
 @app.post("/run", response_model=RunResponse)
 async def run(request: Request, response: Response) -> RunResponse:
     started = time.time()
@@ -2430,7 +2182,6 @@ async def run(request: Request, response: Response) -> RunResponse:
         raise HTTPException(status_code=400, detail="Invalid JSON body.")
 
     req = RunRequest.from_payload(payload)
-
     cleanup_stale_runs()
 
     if (time.time() - started) > RUN_MAX_SECONDS:
@@ -2487,71 +2238,54 @@ async def run(request: Request, response: Response) -> RunResponse:
         fail_system_run(run_record_id, repr(e))
         raise HTTPException(status_code=500, detail="Internal error.")
 
+
+# ============================================================
+# Incidents / graphs / details
+# ============================================================
+
 @app.get("/incidents")
 def get_incidents():
     try:
         if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
             return {
                 "ok": True,
-                "source": {
-                    "ok": False,
-                    "reason": "missing_airtable_env",
-                },
+                "source": {"ok": False, "reason": "missing_airtable_env"},
                 "count": 0,
-                "stats": {
-                    "open": 0,
-                    "critical": 0,
-                    "warning": 0,
-                    "resolved": 0,
-                    "other": 0,
-                },
+                "stats": {"open": 0, "critical": 0, "warning": 0, "resolved": 0, "other": 0},
                 "incidents": [],
                 "ts": datetime.now(timezone.utc).isoformat(),
             }
 
-        url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{quote(LOGS_ERRORS_TABLE_NAME)}"
-
-        headers = {
-            "Authorization": f"Bearer {AIRTABLE_API_KEY}",
-            "Accept": "application/json",
-        }
-
-        params = {
-            "view": "Active",
-            "maxRecords": 50,
-        }
-
-        response = requests.get(url, headers=headers, params=params, timeout=20)
+        response = requests.get(
+            _airtable_url(LOGS_ERRORS_TABLE_NAME),
+            headers={"Authorization": f"Bearer {AIRTABLE_API_KEY}", "Accept": "application/json"},
+            params={"view": LOGS_ERRORS_VIEW_NAME or "Active", "maxRecords": 50},
+            timeout=20,
+        )
         response.raise_for_status()
 
         payload = response.json()
         records = payload.get("records", [])
-
         incidents = []
-        stats = {
-            "open": 0,
-            "critical": 0,
-            "warning": 0,
-            "resolved": 0,
-            "other": 0,
-        }
+        stats = {"open": 0, "critical": 0, "warning": 0, "resolved": 0, "other": 0}
 
         for r in records:
-            f = r.get("fields", {})
-
+            f = r.get("fields", {}) or {}
             status = str(f.get("Statut incident") or "").strip()
             severity = str(f.get("Urgence IA") or "").strip()
 
-            incidents.append({
-                "id": r.get("id"),
-                "title": f.get("Error_Message") or "Untitled incident",
-                "status": status,
-                "severity": severity,
-                "sla_status": f.get("SLA_Status"),
-                "created_at": f.get("Created time"),
-                "source": "Logs_Erreurs",
-                "worker": f.get("Worker"),
-            })
+            incidents.append(
+                {
+                    "id": r.get("id"),
+                    "title": f.get("Error_Message") or "Untitled incident",
+                    "status": status,
+                    "severity": severity,
+                    "sla_status": f.get("SLA_Status"),
+                    "created_at": f.get("Created time"),
+                    "source": "Logs_Erreurs",
+                    "worker": f.get("Worker"),
+                }
+            )
 
             normalized_status = status.lower()
             normalized_severity = severity.lower()
@@ -2569,11 +2303,7 @@ def get_incidents():
 
         return {
             "ok": True,
-            "source": {
-                "ok": True,
-                "table": LOGS_ERRORS_TABLE_NAME,
-                "view": "Active",
-            },
+            "source": {"ok": True, "table": LOGS_ERRORS_TABLE_NAME, "view": LOGS_ERRORS_VIEW_NAME or "Active"},
             "count": len(incidents),
             "stats": stats,
             "incidents": incidents,
@@ -2581,67 +2311,42 @@ def get_incidents():
         }
 
     except requests.HTTPError as exc:
-        detail = ""
-        try:
-            detail = exc.response.text
-        except Exception:
-            detail = str(exc)
-
-        raise HTTPException(
-            status_code=502,
-            detail=f"Airtable incidents request failed: {detail}",
-        )
-
+        detail = exc.response.text if getattr(exc, "response", None) is not None else str(exc)
+        raise HTTPException(status_code=502, detail=f"Airtable incidents request failed: {detail}")
     except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "detail": "Internal error",
-                "error": repr(exc),
-            },
-        )
+        raise HTTPException(status_code=500, detail={"detail": "Internal error", "error": repr(exc)})
+
 
 @app.get("/event-mappings")
 def get_event_mappings(limit: int = 50) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=50, minimum=1, maximum=200)
-
     mappings = []
-    stats = {
-        "enabled": 0,
-        "disabled": 0,
-        "other": 0,
-    }
+    stats = {"enabled": 0, "disabled": 0, "other": 0}
 
     for event_type, capability in EVENT_TYPE_TO_CAPABILITY.items():
-        item = {
-            "event_type": event_type,
-            "capability": capability,
-            "enabled": True,
-            "source": "worker_static_mapping",
-        }
-        mappings.append(item)
+        mappings.append(
+            {
+                "event_type": event_type,
+                "capability": capability,
+                "enabled": True,
+                "source": "worker_static_mapping",
+            }
+        )
         stats["enabled"] += 1
 
     mappings = mappings[:limit]
+    return {"ok": True, "count": len(mappings), "stats": stats, "mappings": mappings, "ts": utc_now_iso()}
 
-    return {
-        "ok": True,
-        "count": len(mappings),
-        "stats": stats,
-        "mappings": mappings,
-        "ts": utc_now_iso(),
-    }
 
 @app.get("/event-command-graph")
 def get_event_command_graph(limit: int = 50) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=50, minimum=1, maximum=200)
-
     event_records, meta = _safe_records_from_view(EVENTS_TABLE_NAME, EVENTS_DASHBOARD_VIEW_NAME, limit)
+
     result: List[Dict[str, Any]] = []
 
     for r in event_records:
         f = r.get("fields", {}) or {}
-
         linked_command = f.get("Linked_Command")
         command_record_id = linked_command[0] if isinstance(linked_command, list) and linked_command else f.get("Command_Record_ID")
 
@@ -2652,30 +2357,18 @@ def get_event_command_graph(limit: int = 50) -> Dict[str, Any]:
 
         if command_record_id:
             try:
-                cmd = _HTTP_SESSION.get(
-                    f"{_airtable_url(COMMANDS_TABLE_NAME)}/{command_record_id}",
-                    headers=_airtable_headers(),
-                    timeout=HTTP_TIMEOUT_SECONDS,
-                )
-                if cmd.status_code < 300:
-                    cmd_json = cmd.json()
-                    cmd_fields = cmd_json.get("fields", {}) or {}
-                    command_capability = cmd_fields.get("Capability")
-                    command_status = _read_command_status(cmd_fields)
+                cmd = airtable_get_record(COMMANDS_TABLE_NAME, command_record_id)
+                cmd_fields = cmd.get("fields", {}) or {}
+                command_capability = cmd_fields.get("Capability")
+                command_status = _read_command_status(cmd_fields)
 
-                    linked_run = cmd_fields.get("Linked_Run")
-                    run_record_id = linked_run[0] if isinstance(linked_run, list) and linked_run else None
-                    if run_record_id:
-                        run_resp = _HTTP_SESSION.get(
-                            f"{_airtable_url(SYSTEM_RUNS_TABLE_NAME)}/{run_record_id}",
-                            headers=_airtable_headers(),
-                            timeout=HTTP_TIMEOUT_SECONDS,
-                        )
-                        if run_resp.status_code < 300:
-                            run_json = run_resp.json()
-                            run_fields = run_json.get("fields", {}) or {}
-                            run_id = run_fields.get("Run_ID")
-                            run_status = run_fields.get("Status_select")
+                linked_run = cmd_fields.get("Linked_Run")
+                run_record_id = linked_run[0] if isinstance(linked_run, list) and linked_run else None
+                if run_record_id:
+                    run_rec = airtable_get_record(SYSTEM_RUNS_TABLE_NAME, run_record_id)
+                    run_fields = run_rec.get("fields", {}) or {}
+                    run_id = run_fields.get("Run_ID")
+                    run_status = run_fields.get("Status_select")
             except Exception:
                 pass
 
@@ -2693,20 +2386,14 @@ def get_event_command_graph(limit: int = 50) -> Dict[str, Any]:
             }
         )
 
-    return {
-        "ok": bool(meta.get("ok")),
-        "source": meta,
-        "count": len(result),
-        "graph": result,
-        "ts": utc_now_iso(),
-    }
+    return {"ok": bool(meta.get("ok")), "source": meta, "count": len(result), "graph": result, "ts": utc_now_iso()}
+
 
 @app.get("/commands/{record_id}")
 def get_command_detail(record_id: str) -> Dict[str, Any]:
     try:
         rec = airtable_get_record(COMMANDS_TABLE_NAME, record_id)
         f = rec.get("fields", {}) or {}
-
         return {
             "ok": True,
             "command": {
@@ -2736,12 +2423,12 @@ def get_command_detail(record_id: str) -> Dict[str, Any]:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"command_detail_failed: {repr(e)}")
 
+
 @app.get("/runs/{record_id}")
 def get_run_detail(record_id: str) -> Dict[str, Any]:
     try:
         rec = airtable_get_record(SYSTEM_RUNS_TABLE_NAME, record_id)
         f = rec.get("fields", {}) or {}
-
         return {
             "ok": True,
             "run": {
