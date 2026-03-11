@@ -33,13 +33,9 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from app.capabilities.http_exec import capability_http_exec as capability_http_exec
+from app.capabilities.http_exec import capability_http_exec as capability_http_exec_impl
 from app.policies import get_policies
 
-from app.capabilities.health_tick import run as capability_health_tick
-from app.capabilities.commands_tick import run as capability_commands_tick
-from app.capabilities.sla_machine import run as capability_sla_machine
-from app.capabilities.escalation_dispatch import run as capability_escalation_engine
 # ============================================================
 # Env / settings
 # ============================================================
@@ -839,14 +835,22 @@ def _event_command_idem(event_id: str, target_capability: str) -> str:
 
 
 def _event_has_linked_command(fields: Dict[str, Any]) -> bool:
-    command_id = str(fields.get("Command_ID") or "").strip()
-    if command_id:
+    linked = fields.get("Linked_Command")
+    if isinstance(linked, list) and len(linked) > 0:
+        return True
+    if linked:
+        return True
+
+    command_record_id = str(fields.get("Command_Record_ID") or "").strip()
+    if command_record_id:
         return True
 
     if _is_truthy(fields.get("Command_Created")):
         return True
 
     return False
+
+
 def _event_payload(fields: Dict[str, Any]) -> Dict[str, Any]:
     payload = _json_load_maybe(fields.get("Payload_JSON"))
     if isinstance(payload, dict):
@@ -973,9 +977,11 @@ def _mark_event_processed_best_effort(
         event_id,
         [
             {
+                "Status": "Processed",
                 "Status_select": "Processed",
                 "Command_Created": True,
-                "Command_ID": command_record_id,
+                "Linked_Command": [command_record_id],
+                "Command_Record_ID": command_record_id,
                 "Processed_At": now,
                 "Mapped_Capability": capability,
                 "Error_Message": "",
@@ -983,30 +989,45 @@ def _mark_event_processed_best_effort(
             {
                 "Status_select": "Processed",
                 "Command_Created": True,
-                "Command_ID": command_record_id,
+                "Linked_Command": [command_record_id],
+                "Command_Record_ID": command_record_id,
+                "Processed_At": now,
+                "Mapped_Capability": capability,
+                "Error_Message": "",
+            },
+            {
+                "Status": "Processed",
+                "Command_Created": True,
+                "Linked_Command": [command_record_id],
+                "Command_Record_ID": command_record_id,
                 "Processed_At": now,
                 "Mapped_Capability": capability,
             },
             {
                 "Status_select": "Processed",
                 "Command_Created": True,
-                "Command_ID": command_record_id,
+                "Command_Record_ID": command_record_id,
                 "Processed_At": now,
+                "Mapped_Capability": capability,
+            },
+            {
+                "Status": "Processed",
+                "Command_Created": True,
+                "Command_Record_ID": command_record_id,
             },
             {
                 "Status_select": "Processed",
                 "Command_Created": True,
-                "Command_ID": command_record_id,
+                "Command_Record_ID": command_record_id,
             },
             {
-                "Status_select": "Processed",
                 "Command_Created": True,
-            },
-            {
-                "Status_select": "Processed",
+                "Linked_Command": [command_record_id],
+                "Command_Record_ID": command_record_id,
             },
         ],
     )
+
 
 def _mark_event_ignored_best_effort(
     event_id: str,
@@ -1021,9 +1042,25 @@ def _mark_event_ignored_best_effort(
         event_id,
         [
             {
+                "Status": "Ignored",
                 "Status_select": "Ignored",
                 "Command_Created": False,
-                "Command_ID": "",
+                "Command_Record_ID": "",
+                "Processed_At": now,
+                "Error_Message": reason,
+                "Result_JSON": payload,
+            },
+            {
+                "Status_select": "Ignored",
+                "Command_Created": False,
+                "Command_Record_ID": "",
+                "Processed_At": now,
+                "Error_Message": reason,
+                "Result_JSON": payload,
+            },
+            {
+                "Status": "Ignored",
+                "Command_Created": False,
                 "Processed_At": now,
                 "Error_Message": reason,
                 "Result_JSON": payload,
@@ -1033,23 +1070,19 @@ def _mark_event_ignored_best_effort(
                 "Command_Created": False,
                 "Processed_At": now,
                 "Error_Message": reason,
-                "Result_JSON": payload,
             },
             {
-                "Status_select": "Ignored",
+                "Status": "Ignored",
                 "Command_Created": False,
-                "Processed_At": now,
                 "Error_Message": reason,
             },
             {
                 "Status_select": "Ignored",
                 "Command_Created": False,
-            },
-            {
-                "Status_select": "Ignored",
             },
         ],
     )
+
 
 def _mark_event_error_best_effort(event_id: str, error_message: str) -> Dict[str, Any]:
     now = utc_now_iso()
@@ -1060,9 +1093,25 @@ def _mark_event_error_best_effort(event_id: str, error_message: str) -> Dict[str
         event_id,
         [
             {
+                "Status": "Error",
                 "Status_select": "Error",
                 "Command_Created": False,
-                "Command_ID": "",
+                "Command_Record_ID": "",
+                "Processed_At": now,
+                "Error_Message": error_message,
+                "Result_JSON": payload,
+            },
+            {
+                "Status_select": "Error",
+                "Command_Created": False,
+                "Command_Record_ID": "",
+                "Processed_At": now,
+                "Error_Message": error_message,
+                "Result_JSON": payload,
+            },
+            {
+                "Status": "Error",
+                "Command_Created": False,
                 "Processed_At": now,
                 "Error_Message": error_message,
                 "Result_JSON": payload,
@@ -1072,20 +1121,15 @@ def _mark_event_error_best_effort(event_id: str, error_message: str) -> Dict[str
                 "Command_Created": False,
                 "Processed_At": now,
                 "Error_Message": error_message,
-                "Result_JSON": payload,
             },
             {
-                "Status_select": "Error",
+                "Status": "Error",
                 "Command_Created": False,
-                "Processed_At": now,
                 "Error_Message": error_message,
             },
             {
                 "Status_select": "Error",
                 "Command_Created": False,
-            },
-            {
-                "Status_select": "Error",
             },
         ],
     )
@@ -1608,39 +1652,8 @@ def _command_mark_retry_or_dead_best_effort(
                 "Linked_Run": [run_record_id],
             },
         ],
-    ) 
-    
-def airtable_get_record(table_name: str, record_id: str) -> Dict[str, Any]:
-    _require_airtable()
-    r = _HTTP_SESSION.get(
-        f"{_airtable_url(table_name)}/{record_id}",
-        headers=_airtable_headers(),
-        timeout=HTTP_TIMEOUT_SECONDS,
-    )
-    if r.status_code >= 300:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Airtable get record failed: {r.status_code} {r.text}",
-        )
-    return r.json()
+    )    
 
-
-def _read_command_status(fields: Dict[str, Any]) -> str:
-    return str(fields.get("Status_select", fields.get("Status", "")) or "").strip()
-
-
-def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
-    input_obj = _json_load_maybe(fields.get("Input_JSON"))
-    if not isinstance(input_obj, dict):
-        input_obj = {}
-
-    for key in ("url", "http_target", "URL"):
-        value = fields.get(key)
-        if value and key not in input_obj:
-            input_obj[key] = value
-
-    return input_obj
-    
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     max_cmds = int(req.max_commands or 0) or 5
     if POLICY_MAX_TOOL_CALLS > 0:
@@ -1985,6 +1998,8 @@ def _resolve_http_exec_url_from_command_input(cmd_input: Dict[str, Any]) -> str:
     
 
 CAPABILITIES = {
+    "health_tick": capability_health_tick,
+    "commands_tick": capability_commands_tick,
     "sla_machine": capability_sla_machine,
     "escalation_engine": capability_escalation_engine,
     "http_exec": capability_http_exec,
@@ -2273,21 +2288,22 @@ def get_events(limit: int = 30) -> Dict[str, Any]:
             stats["other"] += 1
 
         payload = _event_payload(f)
-        
+
         events.append(
-            {       
-                "id": f.get("id"),
+            {
+                "id": r.get("id"),
                 "event_type": f.get("Event_Type"),
                 "status": status,
                 "command_created": _is_truthy(f.get("Command_Created")),
-                "command_id": str(f.get("Command_ID") or "").strip() or None,
+                "linked_command": f.get("Linked_Command"),
                 "mapped_capability": f.get("Mapped_Capability"),
                 "processed_at": f.get("Processed_At"),
                 "source": payload.get("source") if isinstance(payload, dict) else None,
                 "run_id": payload.get("run_id") if isinstance(payload, dict) else None,
+                "command_id": payload.get("command_id") if isinstance(payload, dict) else None,
                 "payload": payload,
-               }    
-          )    
+            }
+        )
 
     return {
         "ok": bool(meta.get("ok")),
@@ -2626,7 +2642,8 @@ def get_event_command_graph(limit: int = 50) -> Dict[str, Any]:
     for r in event_records:
         f = r.get("fields", {}) or {}
 
-        command_record_id = str(f.get("Command_ID") or "").strip() or None
+        linked_command = f.get("Linked_Command")
+        command_record_id = linked_command[0] if isinstance(linked_command, list) and linked_command else f.get("Command_Record_ID")
 
         command_capability = None
         command_status = None
@@ -2749,4 +2766,3 @@ def get_run_detail(record_id: str) -> Dict[str, Any]:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"run_detail_failed: {repr(e)}")
-
