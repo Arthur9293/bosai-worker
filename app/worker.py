@@ -33,17 +33,10 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from app.capabilities.http_exec import capability_http_exec as capability_http_exec
-from app.capabilities.health_tick import capability_health_tick
-from app.capabilities.commands_tick import capability_commands_tick
+from app.capabilities.http_exec import capability_http_exec
 from app.capabilities.sla_machine import capability_sla_machine
-from app.capabilities.escalation_engine import capability_escalation_engine
-from app.capabilities.state_get import capability_state_get
-from app.capabilities.state_put import capability_state_put
-from app.capabilities.lock_acquire import capability_lock_acquire
-from app.capabilities.lock_release import capability_lock_release
-from app.capabilities.event_engine import capability_event_engine
-
+from app.capabilities.escalation_dispatch import capability_escalation_engine
+from app.policies import get_policies
 # ============================================================
 # Env / settings
 # ============================================================
@@ -1989,11 +1982,9 @@ def _resolve_http_exec_url_from_command_input(cmd_input: Dict[str, Any]) -> str:
     
 
 CAPABILITIES = {
-    "health_tick": capability_health_tick,
-    "commands_tick": capability_commands_tick,
     "sla_machine": capability_sla_machine,
     "escalation_engine": capability_escalation_engine,
-    "http_exec": capability_http_exec_impl,
+    "http_exec": capability_http_exec,
     "state_get": capability_state_get,
     "state_put": capability_state_put,
     "lock_acquire": capability_lock_acquire,
