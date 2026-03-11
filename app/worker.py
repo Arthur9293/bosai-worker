@@ -1089,7 +1089,18 @@ def _airtable_headers_auth() -> Dict[str, str]:
     return {
         "Authorization": f"Bearer {AIRTABLE_API_KEY}",
     }
-
+def airtable_get_record(table_name: str, record_id: str) -> Dict[str, Any]:
+    _require_airtable()
+    r = _HTTP_SESSION.get(
+        f"{_airtable_url(table_name)}/{record_id}",
+        headers=_airtable_headers(),
+        timeout=HTTP_TIMEOUT_SECONDS,
+    )
+    if r.status_code == 404:
+        raise HTTPException(status_code=404, detail=f"Record not found: {record_id}")
+    if r.status_code >= 300:
+        raise HTTPException(status_code=500, detail=f"Airtable get record failed: {r.status_code} {r.text}")
+    return r.json()
 
 def _airtable_update_record(table_name: str, record_id: str, fields: Dict[str, Any]) -> Dict[str, Any]:
     url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_name}/{record_id}"
@@ -3117,3 +3128,69 @@ def get_event_command_graph(limit: int = 50) -> Dict[str, Any]:
         "graph": result,
         "ts": utc_now_iso(),
     }
+
+@app.get("/commands/{record_id}")
+def get_command_detail(record_id: str) -> Dict[str, Any]:
+    try:
+        rec = airtable_get_record(COMMANDS_TABLE_NAME, record_id)
+        f = rec.get("fields", {}) or {}
+
+        return {
+            "ok": True,
+            "command": {
+                "id": rec.get("id"),
+                "capability": f.get("Capability"),
+                "status": _read_command_status(f),
+                "priority": f.get("Priority"),
+                "retry_count": f.get("Retry_Count"),
+                "retry_max": f.get("Retry_Max"),
+                "scheduled_at": f.get("Scheduled_At"),
+                "next_retry_at": f.get("Next_Retry_At"),
+                "is_locked": f.get("Is_Locked"),
+                "locked_by": f.get("Locked_By"),
+                "idempotency_key": f.get("Idempotency_Key"),
+                "linked_run": f.get("Linked_Run"),
+                "input_json": f.get("Input_JSON"),
+                "result_json": f.get("Result_JSON"),
+                "error_message": f.get("Error_Message"),
+                "last_error": f.get("Last_Error"),
+                "started_at": f.get("Started_At"),
+                "finished_at": f.get("Finished_At"),
+            },
+            "ts": utc_now_iso(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"command_detail_failed: {repr(e)}")
+
+@app.get("/runs/{record_id}")
+def get_run_detail(record_id: str) -> Dict[str, Any]:
+    try:
+        rec = airtable_get_record(SYSTEM_RUNS_TABLE_NAME, record_id)
+        f = rec.get("fields", {}) or {}
+
+        return {
+            "ok": True,
+            "run": {
+                "id": rec.get("id"),
+                "run_id": f.get("Run_ID"),
+                "worker": f.get("Worker"),
+                "capability": f.get("Capability"),
+                "status": f.get("Status_select"),
+                "priority": f.get("Priority"),
+                "dry_run": f.get("Dry_Run"),
+                "started_at": f.get("Started_At"),
+                "finished_at": f.get("Finished_At"),
+                "idempotency_key": f.get("Idempotency_Key"),
+                "input_json": f.get("Input_JSON"),
+                "result_json": f.get("Result_JSON"),
+                "app_name": f.get("App_Name"),
+                "app_version": f.get("App_Version"),
+            },
+            "ts": utc_now_iso(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"run_detail_failed: {repr(e)}")
