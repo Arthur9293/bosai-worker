@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-def run(payload: Dict[str, Any]) -> Dict[str, Any]:
-    # Placeholder industrial: on garde simple, stable
-    # Plus tard: lecture Commands + SLA policies + actions Make
+
+def run(req: Any, run_record_id: str) -> Dict[str, Any]:
+    payload = getattr(req, "input", {}) or {}
+
     return {
+        "ok": True,
         "message": "SLA processing triggered",
         "payload_echo": payload,
+        "run_record_id": run_record_id,
     }
