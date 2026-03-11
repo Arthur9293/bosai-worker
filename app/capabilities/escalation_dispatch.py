@@ -194,3 +194,28 @@ def capability_escalation_dispatch(
         "run_record_id": run_record_id,
         "ts": utc_now_iso(),
     }
+def run(
+    req,
+    run_record_id: str,
+    *,
+    airtable_list_filtered,
+    airtable_list_view,
+    airtable_create,
+    airtable_update,
+    http_timeout_seconds: float,
+    logs_errors_table_name: str,
+    logs_errors_view_name: str,
+    commands_table_name: str,
+) -> Dict[str, Any]:
+    return capability_escalation_dispatch(
+        req,
+        run_record_id,
+        airtable_list_filtered=airtable_list_filtered,
+        airtable_list_view=airtable_list_view,
+        airtable_create=airtable_create,
+        airtable_update=airtable_update,
+        http_timeout_seconds=http_timeout_seconds,
+        logs_errors_table_name=logs_errors_table_name,
+        logs_errors_view_name=logs_errors_view_name,
+        commands_table_name=commands_table_name,
+    )
