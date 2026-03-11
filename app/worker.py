@@ -3194,3 +3194,51 @@ def get_run_detail(record_id: str) -> Dict[str, Any]:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"run_detail_failed: {repr(e)}")
+
+@app.post("/events/process")
+async def process_events():
+    events = airtable_get_records(
+        EVENTS_TABLE_NAME,
+        view=EVENTS_VIEW_NAME
+    )
+
+    created = 0
+    skipped = 0
+
+    for e in events:
+
+        event_id = e.get("id")
+        fields = e.get("fields", {})
+
+        event_type = fields.get("Event_Type")
+        status = fields.get("Status_select")
+
+        if status not in ["New", "Queued"]:
+            skipped += 1
+            continue
+
+        mapping = find_event_mapping(event_type)
+
+        if not mapping:
+            mark_event_ignored(event_id)
+            skipped += 1
+            continue
+
+        capability = mapping.get("capability")
+
+        cmd_id = create_command_from_event(
+            event_id=event_id,
+            capability=capability,
+            payload=fields.get("Payload_JSON", {})
+        )
+
+        mark_event_processed(event_id, cmd_id)
+
+        created += 1
+
+    return {
+        "ok": True,
+        "events_scanned": len(events),
+        "commands_created": created,
+        "skipped": skipped
+    }
