@@ -2280,20 +2280,22 @@ def get_events(limit: int = 30) -> Dict[str, Any]:
 
         payload = _event_payload(f)
 
-               events.append(
-            {
-                "id": r.get("id"),
-                "event_type": f.get("Event_Type"),
-                "status": status,
-                "command_created": _is_truthy(f.get("Command_Created")),
-                "command_id": str(f.get("Command_ID") or "").strip() or None,
-                "mapped_capability": f.get("Mapped_Capability"),
-                "processed_at": f.get("Processed_At"),
-                "source": payload.get("source") if isinstance(payload, dict) else None,
-                "run_id": payload.get("run_id") if isinstance(payload, dict) else None,
-                "payload": payload,
-            }
-        )
+            payload = _event_payload(f)
+
+                   events.append(
+               {
+                    "id": f.get("id"),
+                    "event_type": f.get("Event_Type"),
+                    "status": status,
+                    "command_created": _is_truthy(f.get("Command_Created")),
+                    "command_id": str(f.get("Command_ID") or "").strip() or None,
+                    "mapped_capability": f.get("Mapped_Capability"),
+                    "processed_at": f.get("Processed_At"),
+                    "source": payload.get("source") if isinstance(payload, dict) else None,
+                    "run_id": payload.get("run_id") if isinstance(payload, dict) else None,
+                    "payload": payload,
+               }    
+          )    
 
     return {
         "ok": bool(meta.get("ok")),
