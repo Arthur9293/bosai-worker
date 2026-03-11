@@ -33,8 +33,16 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from app.capabilities.http_exec import capability_http_exec as capability_http_exec_impl
-from app.policies import get_policies
+from app.capabilities.http_exec import capability_http_exec as capability_http_exec
+from app.capabilities.health_tick import capability_health_tick
+from app.capabilities.commands_tick import capability_commands_tick
+from app.capabilities.sla_machine import capability_sla_machine
+from app.capabilities.escalation_engine import capability_escalation_engine
+from app.capabilities.state_get import capability_state_get
+from app.capabilities.state_put import capability_state_put
+from app.capabilities.lock_acquire import capability_lock_acquire
+from app.capabilities.lock_release import capability_lock_release
+from app.capabilities.event_engine import capability_event_engine
 
 # ============================================================
 # Env / settings
@@ -1604,8 +1612,39 @@ def _command_mark_retry_or_dead_best_effort(
                 "Linked_Run": [run_record_id],
             },
         ],
-    )    
+    ) 
+    
+def airtable_get_record(table_name: str, record_id: str) -> Dict[str, Any]:
+    _require_airtable()
+    r = _HTTP_SESSION.get(
+        f"{_airtable_url(table_name)}/{record_id}",
+        headers=_airtable_headers(),
+        timeout=HTTP_TIMEOUT_SECONDS,
+    )
+    if r.status_code >= 300:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Airtable get record failed: {r.status_code} {r.text}",
+        )
+    return r.json()
 
+
+def _read_command_status(fields: Dict[str, Any]) -> str:
+    return str(fields.get("Status_select", fields.get("Status", "")) or "").strip()
+
+
+def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
+    input_obj = _json_load_maybe(fields.get("Input_JSON"))
+    if not isinstance(input_obj, dict):
+        input_obj = {}
+
+    for key in ("url", "http_target", "URL"):
+        value = fields.get(key)
+        if value and key not in input_obj:
+            input_obj[key] = value
+
+    return input_obj
+    
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     max_cmds = int(req.max_commands or 0) or 5
     if POLICY_MAX_TOOL_CALLS > 0:
@@ -1954,7 +1993,7 @@ CAPABILITIES = {
     "commands_tick": capability_commands_tick,
     "sla_machine": capability_sla_machine,
     "escalation_engine": capability_escalation_engine,
-    "http_exec": capability_http_exec,
+    "http_exec": capability_http_exec_impl,
     "state_get": capability_state_get,
     "state_put": capability_state_put,
     "lock_acquire": capability_lock_acquire,
@@ -2241,18 +2280,17 @@ def get_events(limit: int = 30) -> Dict[str, Any]:
 
         payload = _event_payload(f)
 
-        events.append(
+               events.append(
             {
                 "id": r.get("id"),
                 "event_type": f.get("Event_Type"),
                 "status": status,
                 "command_created": _is_truthy(f.get("Command_Created")),
-                "linked_command": f.get("Linked_Command"),
+                "command_id": str(f.get("Command_ID") or "").strip() or None,
                 "mapped_capability": f.get("Mapped_Capability"),
                 "processed_at": f.get("Processed_At"),
                 "source": payload.get("source") if isinstance(payload, dict) else None,
                 "run_id": payload.get("run_id") if isinstance(payload, dict) else None,
-                "command_id": payload.get("command_id") if isinstance(payload, dict) else None,
                 "payload": payload,
             }
         )
@@ -2594,7 +2632,6 @@ def get_event_command_graph(limit: int = 50) -> Dict[str, Any]:
     for r in event_records:
         f = r.get("fields", {}) or {}
 
-        linked_command = f.get("Linked_Command")
         command_record_id = str(f.get("Command_ID") or "").strip() or None
 
         command_capability = None
