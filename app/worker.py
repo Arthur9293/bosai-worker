@@ -705,21 +705,38 @@ def cleanup_stale_runs() -> Dict[str, Any]:
 def state_get_record(app_key: str) -> Optional[Dict[str, Any]]:
     return airtable_find_first(STATE_TABLE_NAME, formula=f"{{App_Key}}='{app_key}'", max_records=1)
 
+def state_put(app_key: str, value_obj: Dict[str, Any], workspace_id: str = "production") -> Dict[str, Any]:
+    existing = airtable_find_first(
+        STATE_TABLE_NAME,
+        formula=f"AND({{App_Key}}='{app_key}',{{Workspace_ID}}='{workspace_id}')",
+        max_records=1,
+    )
 
-def capability_state_put(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    payload = req.input or {}
-    app_key = str(payload.get("app_key") or "").strip()
-    value = payload.get("value") or {}
-    workspace_id = _resolve_workspace_id(req=req)
+    fields = {
+        "App_Key": app_key,
+        "Value_JSON": json.dumps(value_obj, ensure_ascii=False),
+        "Updated_At": utc_now_iso(),
+        "App_Version": APP_VERSION,
+        "Workspace_ID": workspace_id,
+    }
 
-    if not app_key:
-        raise HTTPException(status_code=400, detail="state_put missing app_key")
-    if not isinstance(value, dict):
-        raise HTTPException(status_code=400, detail="state_put value must be an object")
+    if existing:
+        airtable_update(STATE_TABLE_NAME, existing["id"], fields)
+        return {
+            "ok": True,
+            "mode": "update",
+            "record_id": existing["id"],
+            "workspace_id": workspace_id,
+        }
 
-    res = state_put(app_key, value, workspace_id=workspace_id)
-    res["run_record_id"] = run_record_id
-    return res
+    rid = airtable_create(STATE_TABLE_NAME, fields)
+    return {
+        "ok": True,
+        "mode": "create",
+        "record_id": rid,
+        "workspace_id": workspace_id,
+    }
+
 def capability_state_get(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     key = str((req.input or {}).get("app_key") or "").strip()
     workspace_id = _resolve_workspace_id(req=req)
@@ -758,14 +775,16 @@ def capability_state_put(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = req.input or {}
     app_key = str(payload.get("app_key") or "").strip()
     value = payload.get("value") or {}
+    workspace_id = _resolve_workspace_id(req=req)
+
     if not app_key:
         raise HTTPException(status_code=400, detail="state_put missing app_key")
     if not isinstance(value, dict):
         raise HTTPException(status_code=400, detail="state_put value must be an object")
-    res = state_put(app_key, value)
+
+    res = state_put(app_key, value, workspace_id=workspace_id)
     res["run_record_id"] = run_record_id
     return res
-
 
 def lock_acquire(lock_key: str, holder: str) -> Dict[str, Any]:
     app_key = f"lock:{lock_key}"
@@ -1513,7 +1532,12 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             post_ops["event_engine"] = {
                 "ok": False,
                 "error": "event_engine temporarily disabled in worker bootstrap",
-    }
+            }    
+
+         if post_ops:
+             result["post_ops"] = post_ops
+
+         return result
 
 def capability_escalation_engine(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     return capability_escalation_dispatch(
@@ -2032,78 +2056,6 @@ def get_incidents():
         raise HTTPException(status_code=502, detail=f"Airtable incidents request failed: {detail}")
     except Exception as exc:
         raise HTTPException(status_code=500, detail={"detail": "Internal error", "error": repr(exc)})
-
-
-@app.get("/event-mappings")
-def get_event_mappings(limit: int = 50) -> Dict[str, Any]:
-    limit = _safe_limit(limit, default=50, minimum=1, maximum=200)
-    mappings = []
-    stats = {"enabled": 0, "disabled": 0, "other": 0}
-
-    for event_type, capability in EVENT_TYPE_TO_CAPABILITY.items():
-        mappings.append(
-            {
-                "event_type": event_type,
-                "capability": capability,
-                "enabled": True,
-                "source": "worker_static_mapping",
-            }
-        )
-        stats["enabled"] += 1
-
-    mappings = mappings[:limit]
-    return {"ok": True, "count": len(mappings), "stats": stats, "mappings": mappings, "ts": utc_now_iso()}
-
-
-@app.get("/event-command-graph")
-def get_event_command_graph(limit: int = 50) -> Dict[str, Any]:
-    limit = _safe_limit(limit, default=50, minimum=1, maximum=200)
-    event_records, meta = _safe_records_from_view(EVENTS_TABLE_NAME, EVENTS_DASHBOARD_VIEW_NAME, limit)
-
-    result: List[Dict[str, Any]] = []
-
-    for r in event_records:
-        f = r.get("fields", {}) or {}
-        linked_command = f.get("Linked_Command")
-        command_record_id = linked_command[0] if isinstance(linked_command, list) and linked_command else f.get("Command_Record_ID")
-
-        command_capability = None
-        command_status = None
-        run_id = None
-        run_status = None
-
-        if command_record_id:
-            try:
-                cmd = airtable_get_record(COMMANDS_TABLE_NAME, command_record_id)
-                cmd_fields = cmd.get("fields", {}) or {}
-                command_capability = cmd_fields.get("Capability")
-                command_status = _read_command_status(cmd_fields)
-
-                linked_run = cmd_fields.get("Linked_Run")
-                run_record_id = linked_run[0] if isinstance(linked_run, list) and linked_run else None
-                if run_record_id:
-                    run_rec = airtable_get_record(SYSTEM_RUNS_TABLE_NAME, run_record_id)
-                    run_fields = run_rec.get("fields", {}) or {}
-                    run_id = run_fields.get("Run_ID")
-                    run_status = run_fields.get("Status_select")
-            except Exception:
-                pass
-
-        result.append(
-            {
-                "event_id": r.get("id"),
-                "event_type": f.get("Event_Type"),
-                "event_status": _event_status(f),
-                "mapped_capability": f.get("Mapped_Capability"),
-                "command_record_id": command_record_id,
-                "command_capability": command_capability,
-                "command_status": command_status,
-                "run_id": run_id,
-                "run_status": run_status,
-            }
-        )
-
-    return {"ok": bool(meta.get("ok")), "source": meta, "count": len(result), "graph": result, "ts": utc_now_iso()}
 
 
 @app.get("/commands/{record_id}")
