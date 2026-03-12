@@ -1509,7 +1509,6 @@ CAPABILITIES = {
     "lock_release": capability_lock_release,
     "retry_queue": capability_retry_queue,
     "lock_recovery": capability_lock_recovery,
-    "event_engine": capability_event_engine,
     "command_orchestrator": capability_command_orchestrator,
 }
 
