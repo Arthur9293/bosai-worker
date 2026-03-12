@@ -1853,44 +1853,10 @@ def create_event(evt: EventCreate) -> Dict[str, Any]:
 
 @app.post("/events/process")
 def process_events(limit: int = 10) -> Dict[str, Any]:
-    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
-        raise HTTPException(status_code=500, detail="airtable not configured")
-
-    req = RunRequest.from_payload(
-        {
-            "worker": WORKER_NAME,
-            "capability": "event_engine",
-            "idempotency_key": f"events-process-{uuid.uuid4().hex}",
-            "priority": 1,
-            "input": {
-                "limit": _safe_limit(limit, default=10, minimum=1, maximum=50),
-                "view": EVENTS_VIEW_NAME or "Queue",
-            },
-            "dry_run": False,
-        }
+    raise HTTPException(
+        status_code=501,
+        detail="event_engine temporarily disabled in worker bootstrap",
     )
-
-    run_record_id, run_uuid = create_system_run(req)
-
-    try:
-        result_obj = capability_event_engine(req, run_record_id)
-        if "run_record_id" not in result_obj:
-            result_obj["run_record_id"] = run_record_id
-        finish_system_run(run_record_id, "Done", result_obj)
-        return {
-            "ok": True,
-            "run_id": run_uuid,
-            "airtable_record_id": run_record_id,
-            "result": result_obj,
-            "ts": utc_now_iso(),
-        }
-    except HTTPException as e:
-        fail_system_run(run_record_id, str(e.detail))
-        raise
-    except Exception as e:
-        fail_system_run(run_record_id, repr(e))
-        raise HTTPException(status_code=500, detail=f"events_process_failed: {repr(e)}")
-
 
 # ============================================================
 # Run endpoint
