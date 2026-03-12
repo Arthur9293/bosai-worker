@@ -1529,15 +1529,15 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             post_ops["escalation_engine"] = {"ok": False, "error": repr(e)}
 
     if bool(inp2.get("run_event_engine")):
-            post_ops["event_engine"] = {
-                "ok": False,
-                "error": "event_engine temporarily disabled in worker bootstrap",
-            }    
+        post_ops["event_engine"] = {
+            "ok": False,
+            "error": "event_engine temporarily disabled in worker bootstrap",
+        }
 
-         if post_ops:
-             result["post_ops"] = post_ops
+    if post_ops:
+        result["post_ops"] = post_ops
 
-         return result
+    return result
 
 def capability_escalation_engine(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     return capability_escalation_dispatch(
