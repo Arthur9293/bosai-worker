@@ -1627,12 +1627,26 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
     if not mapped_capability:
         return {"ok": False, "error": "missing_mapped_capability"}
 
+    if mapped_capability not in CAPABILITIES:
+        return {
+            "ok": False,
+            "error": f"unsupported_mapped_capability:{mapped_capability}",
+        }
+
     workspace_id = str(fields.get("Workspace_ID") or "production").strip() or "production"
     idempotency_key = str(fields.get("Idempotency_Key") or "").strip()
 
     command_input = _json_load_maybe(fields.get("Command_Input_JSON"))
     if not isinstance(command_input, dict):
         command_input = {}
+
+    http_target = str(fields.get("http_target") or fields.get("URL") or "").strip()
+    if http_target and "url" not in command_input:
+        command_input["url"] = http_target
+
+    http_method = str(fields.get("HTTP_Method") or "").strip()
+    if http_method and "method" not in command_input:
+        command_input["method"] = http_method
 
     existing = None
     if idempotency_key:
@@ -1664,6 +1678,54 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
             "command_record_id": existing_id,
             "capability": mapped_capability,
         }
+
+    candidates = _build_command_fields_candidates(
+        capability=mapped_capability,
+        command_input=command_input,
+        workspace_id=workspace_id,
+        event_record_id=event_record_id,
+        idempotency_key=idempotency_key or f"evt:{event_record_id}:{mapped_capability}",
+        priority=1,
+    )
+
+    create_res = _airtable_create_best_effort(COMMANDS_TABLE_NAME, candidates)
+    if not create_res.get("ok"):
+        return {
+            "ok": False,
+            "error": f"command_create_failed:{create_res.get('error')}",
+            "event_id": event_record_id,
+        }
+
+    command_record_id = str(create_res.get("record_id") or "").strip()
+
+    _airtable_update_best_effort(
+        EVENTS_TABLE_NAME,
+        event_record_id,
+        [
+            {
+                "Status_select": "Queued",
+                "Command_Created": True,
+                "Linked_Command": [command_record_id] if command_record_id else [],
+                "Processed_At": utc_now_iso(),
+                "Mapped_Capability": mapped_capability,
+            },
+            {
+                "Status_select": "Queued",
+                "Command_Created": True,
+                "Processed_At": utc_now_iso(),
+                "Mapped_Capability": mapped_capability,
+            },
+        ],
+    )
+
+    return {
+        "ok": True,
+        "mode": "created_command",
+        "event_id": event_record_id,
+        "command_record_id": command_record_id,
+        "capability": mapped_capability,
+        "workspace_id": workspace_id,
+    }
 
     candidates = _build_command_fields_candidates(
         capability=mapped_capability,
