@@ -1789,7 +1789,7 @@ def get_events(limit: int = 30) -> Dict[str, Any]:
         else:
             stats["other"] += 1
 
-        payload = _event_payload(f)
+        payload = _json_load_maybe(f.get("Payload_JSON"))
 
         events.append(
             {
