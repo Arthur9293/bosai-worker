@@ -1619,8 +1619,8 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         first_item = mapped_capability_raw[0]
         if isinstance(first_item, dict):
             mapped_capability = str(first_item.get("name") or "").strip()
-    else:
-        mapped_capability = str(first_item or "").strip()
+        else:
+            mapped_capability = str(first_item or "").strip()
     else:
         mapped_capability = str(mapped_capability_raw or "").strip()
 
