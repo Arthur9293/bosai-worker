@@ -1611,7 +1611,7 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
     if not event_record_id:
         return {"ok": False, "error": "missing_event_record_id"}
 
-        mapped_capability_raw = fields.get("Mapped_Capability")
+    mapped_capability_raw = fields.get("Mapped_Capability")
 
     if isinstance(mapped_capability_raw, dict):
         mapped_capability = str(mapped_capability_raw.get("name") or "").strip()
