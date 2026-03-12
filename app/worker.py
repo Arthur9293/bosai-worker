@@ -1480,11 +1480,6 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         "error": "event_engine temporarily disabled in worker bootstrap",
     }
 
-    if post_ops:
-        result["post_ops"] = post_ops
-
-    return result
-
 def capability_escalation_engine(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     return capability_escalation_dispatch(
         req,
