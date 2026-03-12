@@ -1621,11 +1621,11 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
             mapped_capability = str(first_item.get("name") or "").strip()
     else:
         mapped_capability = str(first_item or "").strip()
-else:
-    mapped_capability = str(mapped_capability_raw or "").strip()
+    else:
+        mapped_capability = str(mapped_capability_raw or "").strip()
 
-if not mapped_capability:
-    return {"ok": False, "error": "missing_mapped_capability"}
+    if not mapped_capability:
+        return {"ok": False, "error": "missing_mapped_capability"}
 
     workspace_id = str(fields.get("Workspace_ID") or "production").strip() or "production"
     idempotency_key = str(fields.get("Idempotency_Key") or "").strip()
