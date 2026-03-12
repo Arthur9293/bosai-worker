@@ -1552,6 +1552,157 @@ def capability_escalation_engine(req: RunRequest, run_record_id: str) -> Dict[st
         logs_errors_view_name=LOGS_ERRORS_VIEW_NAME,
         commands_table_name=COMMANDS_TABLE_NAME,
     )
+
+# ============================================================
+# Event Engine minimal V1
+# ============================================================
+
+def _event_status(fields: Dict[str, Any]) -> str:
+    return str(fields.get("Status_select", fields.get("Status", "")) or "").strip()
+
+
+def _build_command_fields_candidates(
+    *,
+    capability: str,
+    command_input: Dict[str, Any],
+    workspace_id: str,
+    event_record_id: str,
+    idempotency_key: Optional[str] = None,
+    priority: int = 1,
+) -> List[Dict[str, Any]]:
+    idem = str(idempotency_key or f"evt:{event_record_id}:{capability}").strip()
+
+    input_json = json.dumps(command_input or {}, ensure_ascii=False)
+
+    candidates: List[Dict[str, Any]] = [
+        {
+            "Capability": capability,
+            "Status_select": "Queued",
+            "Priority": priority,
+            "Input_JSON": input_json,
+            "Idempotency_Key": idem,
+            "Workspace_ID": workspace_id,
+            "Source_Event": [event_record_id],
+        },
+        {
+            "Capability": capability,
+            "Status_select": "Queued",
+            "Priority": priority,
+            "Input_JSON": input_json,
+            "Idempotency_Key": idem,
+            "Workspace_ID": workspace_id,
+        },
+        {
+            "Capability": capability,
+            "Status_select": "Queued",
+            "Priority": priority,
+            "Input_JSON": input_json,
+            "Idempotency_Key": idem,
+        },
+    ]
+
+    return candidates
+
+
+def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
+    fields = event_record.get("fields", {}) or {}
+    event_record_id = str(event_record.get("id") or "").strip()
+
+    if not event_record_id:
+        return {"ok": False, "error": "missing_event_record_id"}
+
+    mapped_capability = str(fields.get("Mapped_Capability") or "").strip()
+    if not mapped_capability:
+        return {"ok": False, "error": "missing_mapped_capability"}
+
+    if mapped_capability not in CAPABILITIES:
+        return {
+            "ok": False,
+            "error": f"unsupported_mapped_capability:{mapped_capability}",
+        }
+
+    workspace_id = str(fields.get("Workspace_ID") or "production").strip() or "production"
+    idempotency_key = str(fields.get("Idempotency_Key") or "").strip()
+
+    command_input = _json_load_maybe(fields.get("Command_Input_JSON"))
+    if not isinstance(command_input, dict):
+        command_input = {}
+
+    existing = None
+    if idempotency_key:
+        existing = find_command_by_idem(idempotency_key)
+
+    if existing:
+        existing_id = existing.get("id")
+        _airtable_update_best_effort(
+            EVENTS_TABLE_NAME,
+            event_record_id,
+            [
+                {
+                    "Status_select": "Queued",
+                    "Command_Created": True,
+                    "Linked_Command": [existing_id] if existing_id else [],
+                    "Processed_At": utc_now_iso(),
+                },
+                {
+                    "Status_select": "Queued",
+                    "Command_Created": True,
+                    "Processed_At": utc_now_iso(),
+                },
+            ],
+        )
+        return {
+            "ok": True,
+            "mode": "existing_command",
+            "event_id": event_record_id,
+            "command_record_id": existing_id,
+            "capability": mapped_capability,
+        }
+
+    candidates = _build_command_fields_candidates(
+        capability=mapped_capability,
+        command_input=command_input,
+        workspace_id=workspace_id,
+        event_record_id=event_record_id,
+        idempotency_key=idempotency_key or f"evt:{event_record_id}:{mapped_capability}",
+        priority=1,
+    )
+
+    create_res = _airtable_create_best_effort(COMMANDS_TABLE_NAME, candidates)
+    if not create_res.get("ok"):
+        return {
+            "ok": False,
+            "error": f"command_create_failed:{create_res.get('error')}",
+            "event_id": event_record_id,
+        }
+
+    command_record_id = create_res.get("record_id")
+
+    _airtable_update_best_effort(
+        EVENTS_TABLE_NAME,
+        event_record_id,
+        [
+            {
+                "Status_select": "Queued",
+                "Command_Created": True,
+                "Linked_Command": [command_record_id] if command_record_id else [],
+                "Processed_At": utc_now_iso(),
+            },
+            {
+                "Status_select": "Queued",
+                "Command_Created": True,
+                "Processed_At": utc_now_iso(),
+            },
+        ],
+    )
+
+    return {
+        "ok": True,
+        "mode": "created_command",
+        "event_id": event_record_id,
+        "command_record_id": command_record_id,
+        "capability": mapped_capability,
+    }
 # ============================================================
 # Capabilities registry
 # ============================================================
@@ -1875,12 +2026,13 @@ def create_event(evt: EventCreate) -> Dict[str, Any]:
 
     payload_json = evt.payload or {}
     command_input_json = evt.command_input or {}
+    workspace_id = str(evt.workspace_id or "production").strip() or "production"
 
     fields = {
         "Event_Type": evt.event_type,
         "Status_select": "New",
         "Source": evt.source,
-        "Workspace_ID": evt.workspace_id,
+        "Workspace_ID": workspace_id,
         "Payload_JSON": json.dumps(payload_json, ensure_ascii=False),
         "Mapped_Capability": evt.command_capability,
         "Command_Input_JSON": json.dumps(command_input_json, ensure_ascii=False),
@@ -1894,17 +2046,71 @@ def create_event(evt: EventCreate) -> Dict[str, Any]:
         "ok": True,
         "event_id": event_id,
         "status": "New",
+        "workspace_id": workspace_id,
         "ts": utc_now_iso(),
     }
 
-
 @app.post("/events/process")
 def process_events(limit: int = 10) -> Dict[str, Any]:
-    raise HTTPException(
-        status_code=501,
-        detail="event_engine temporarily disabled in worker bootstrap",
+    limit = _safe_limit(limit, default=10, minimum=1, maximum=100)
+
+    records, meta = _safe_records_from_view(
+        EVENTS_TABLE_NAME,
+        EVENTS_VIEW_NAME or "Queue",
+        limit,
     )
 
+    scanned = 0
+    created = 0
+    failed = 0
+    skipped = 0
+    processed_ids: List[str] = []
+    errors: List[str] = []
+
+    for event_record in records:
+        event_id = str(event_record.get("id") or "").strip()
+        fields = event_record.get("fields", {}) or {}
+        status = _event_status(fields).lower()
+
+        if status not in ("new", "queued"):
+            skipped += 1
+            continue
+
+        scanned += 1
+        processed_ids.append(event_id)
+
+        res = _create_command_from_event(event_record)
+
+        if res.get("ok"):
+            created += 1
+        else:
+            failed += 1
+            errors.append(f"{event_id}: {res.get('error')}")
+            _airtable_update_best_effort(
+                EVENTS_TABLE_NAME,
+                event_id,
+                [
+                    {
+                        "Status_select": "Error",
+                        "Processed_At": utc_now_iso(),
+                    },
+                    {
+                        "Status_select": "Error",
+                    },
+                ],
+            )
+
+    return {
+        "ok": True,
+        "source": meta,
+        "scanned": scanned,
+        "created": created,
+        "failed": failed,
+        "skipped": skipped,
+        "event_record_ids": processed_ids,
+        "errors": errors[:10],
+        "ts": utc_now_iso(),
+    }
 # ============================================================
 # Run endpoint
 # ============================================================
