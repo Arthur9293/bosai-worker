@@ -468,7 +468,24 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
 
     return base
 
+def _resolve_workspace_id(
+    req: Optional[RunRequest] = None,
+    fields: Optional[Dict[str, Any]] = None,
+    fallback: str = "production",
+) -> str:
+    req_input = {}
+    if req and isinstance(getattr(req, "input", None), dict):
+        req_input = req.input or {}
 
+    fields = fields or {}
+
+    workspace_id = (
+        str(req_input.get("workspace_id") or "").strip()
+        or str(fields.get("Workspace_ID") or "").strip()
+        or fallback
+    )
+    return workspace_id
+    
 def _verify_hmac_signature(raw_body: bytes, signature_header: Optional[str]) -> bool:
     if not RUN_SHARED_SECRET:
         return False
@@ -577,6 +594,8 @@ def _airtable_create_best_effort(table_name: str, candidates: List[Dict[str, Any
 
 def create_system_run(req: RunRequest) -> Tuple[str, str]:
     run_uuid = str(uuid.uuid4())
+    workspace_id = _resolve_workspace_id(req=req)
+
     fields = {
         "Run_ID": run_uuid,
         "Worker": req.worker,
@@ -589,10 +608,11 @@ def create_system_run(req: RunRequest) -> Tuple[str, str]:
         "Input_JSON": json.dumps(req.input, ensure_ascii=False),
         "App_Name": APP_NAME,
         "App_Version": APP_VERSION,
+        "Workspace_ID": workspace_id,
     }
+
     record_id = airtable_create(SYSTEM_RUNS_TABLE_NAME, fields)
     return record_id, run_uuid
-
 
 def finish_system_run(record_id: str, status: str, result_obj: Dict[str, Any]) -> None:
     airtable_update(
@@ -686,33 +706,48 @@ def state_get_record(app_key: str) -> Optional[Dict[str, Any]]:
     return airtable_find_first(STATE_TABLE_NAME, formula=f"{{App_Key}}='{app_key}'", max_records=1)
 
 
-def state_put(app_key: str, value_obj: Dict[str, Any]) -> Dict[str, Any]:
-    existing = state_get_record(app_key)
-    fields = {
-        "App_Key": app_key,
-        "Value_JSON": json.dumps(value_obj, ensure_ascii=False),
-        "Updated_At": utc_now_iso(),
-        "App_Version": APP_VERSION,
-    }
-    if existing:
-        airtable_update(STATE_TABLE_NAME, existing["id"], fields)
-        return {"ok": True, "mode": "update", "record_id": existing["id"]}
-    rid = airtable_create(STATE_TABLE_NAME, fields)
-    return {"ok": True, "mode": "create", "record_id": rid}
+def capability_state_put(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    payload = req.input or {}
+    app_key = str(payload.get("app_key") or "").strip()
+    value = payload.get("value") or {}
+    workspace_id = _resolve_workspace_id(req=req)
 
+    if not app_key:
+        raise HTTPException(status_code=400, detail="state_put missing app_key")
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=400, detail="state_put value must be an object")
 
+    res = state_put(app_key, value, workspace_id=workspace_id)
+    res["run_record_id"] = run_record_id
+    return res
 def capability_state_get(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     key = str((req.input or {}).get("app_key") or "").strip()
+    workspace_id = _resolve_workspace_id(req=req)
+
     if not key:
         raise HTTPException(status_code=400, detail="state_get missing app_key")
-    rec = state_get_record(key)
+
+    rec = airtable_find_first(
+        STATE_TABLE_NAME,
+        formula=f"AND({{App_Key}}='{key}',{{Workspace_ID}}='{workspace_id}')",
+        max_records=1,
+    )
+
     if not rec:
-        return {"ok": True, "found": False, "app_key": key, "run_record_id": run_record_id}
+        return {
+            "ok": True,
+            "found": False,
+            "app_key": key,
+            "workspace_id": workspace_id,
+            "run_record_id": run_record_id,
+        }
+
     fields = rec.get("fields", {}) or {}
     return {
         "ok": True,
         "found": True,
         "app_key": key,
+        "workspace_id": workspace_id,
         "record_id": rec.get("id"),
         "value": _json_load_maybe(fields.get("Value_JSON")),
         "run_record_id": run_record_id,
