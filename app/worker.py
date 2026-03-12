@@ -1919,61 +1919,7 @@ async def run(request: Request, response: Response) -> RunResponse:
     except Exception as e:
         fail_system_run(run_record_id, repr(e))
         raise HTTPException(status_code=500, detail="Internal error.")
-@app.get("/tools")
-def get_tools() -> Dict[str, Any]:
-    tools: List[Dict[str, Any]] = []
 
-    capabilities = sorted(list(CAPABILITIES.keys()))
-    allowlist_items = [
-        item.strip()
-        for item in (HTTP_EXEC_ALLOWLIST_RAW or "").split(",")
-        if item.strip()
-    ]
-
-    target_aliases: List[str] = []
-    if HTTP_EXEC_TARGETS_JSON:
-        try:
-            parsed = json.loads(HTTP_EXEC_TARGETS_JSON)
-            if isinstance(parsed, dict):
-                target_aliases = sorted([str(k) for k in parsed.keys()])
-        except Exception:
-            target_aliases = []
-
-    for capability in capabilities:
-        category = "core"
-        if capability in ("http_exec",):
-            category = "http"
-        elif capability in ("state_get", "state_put", "lock_acquire", "lock_release"):
-            category = "state"
-        elif capability in ("retry_queue", "lock_recovery", "command_orchestrator"):
-            category = "queue"
-        elif capability in ("health_tick", "commands_tick", "sla_machine", "escalation_engine", "event_engine"):
-            category = "system"
-
-        tools.append(
-            {
-                "key": capability,
-                "name": capability,
-                "category": category,
-                "enabled": True,
-                "source": "worker_registry",
-            }
-        )
-
-    return {
-        "ok": True,
-        "count": len(tools),
-        "tools": tools,
-        "config": {
-            "toolcatalog_http_exec_enforced": TOOLCATALOG_ENFORCE_HTTP_EXEC,
-            "http_exec_allowlist_count": len(allowlist_items),
-            "http_exec_allowlist": allowlist_items,
-            "http_exec_target_aliases": target_aliases,
-            "policies_loaded": bool(POLICIES),
-            "policy_keys": sorted(list(POLICIES.keys())) if isinstance(POLICIES, dict) else [],
-        },
-        "ts": utc_now_iso(),
-    }
 
 # ============================================================
 # Incidents / graphs / details
