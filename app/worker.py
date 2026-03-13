@@ -1673,6 +1673,7 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
            [
                 {
                     "Linked_Command": [existing_id],
+                    "Command_ID": command_record_id,
                     "Status_select": "Queued",
                     "Command_Created": True,
                     "Processed_At": utc_now_iso(),
@@ -1686,10 +1687,12 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
                 {
                     "Linked_Command": [existing_id],
                     "Status_select": "Queued",
+                    "Processed_At": utc_now_iso(),
                 },
                 {
                     "Linked_Command": [existing_id],
                     "Status": "Queued",
+                    "Processed_At": utc_now_iso(),
              },     
         ],
     )    
