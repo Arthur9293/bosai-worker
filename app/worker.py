@@ -1603,7 +1603,6 @@ def _build_command_fields_candidates(
 
     return candidates
 
-
 def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
     fields = event_record.get("fields", {}) or {}
     event_record_id = str(event_record.get("id") or "").strip()
@@ -1670,33 +1669,34 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         _airtable_update_best_effort(
             EVENTS_TABLE_NAME,
             event_record_id,
-           [
+            [
                 {
-                    "Linked_Command": [command_record_id],
-                    "Command_ID": command_record_id,
+                    "Linked_Command": [existing_id],
+                    "Command_ID": existing_id,
                     "Status_select": "Queued",
                     "Command_Created": True,
                     "Processed_At": utc_now_iso(),
                 },
                 {
-                    "Linked_Command": [command_record_id],
-                    "Status": "Queued",
-                    "Command_Created": True,
-                    "Processed_At": utc_now_iso(),
-                },
-                {
-                    
                     "Linked_Command": [existing_id],
                     "Status_select": "Queued",
+                    "Command_Created": True,
+                    "Processed_At": utc_now_iso(),
+                },
+                {
+                    "Command_ID": existing_id,
+                    "Status_select": "Queued",
+                    "Command_Created": True,
                     "Processed_At": utc_now_iso(),
                 },
                 {
                     "Status_select": "Queued",
                     "Command_Created": True,
                     "Processed_At": utc_now_iso(),
-             },     
-        ],
-    )    
+                },
+            ],
+        )
+
         return {
             "ok": True,
             "mode": "existing_command",
@@ -1730,20 +1730,28 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         event_record_id,
         [
             {
+                "Linked_Command": [command_record_id],
+                "Command_ID": command_record_id,
                 "Status_select": "Queued",
                 "Command_Created": True,
                 "Processed_At": utc_now_iso(),
             },
             {
-                "Status": "Queued",
+                "Linked_Command": [command_record_id],
+                "Status_select": "Queued",
+                "Command_Created": True,
+                "Processed_At": utc_now_iso(),
+            },
+            {
+                "Command_ID": command_record_id,
+                "Status_select": "Queued",
                 "Command_Created": True,
                 "Processed_At": utc_now_iso(),
             },
             {
                 "Status_select": "Queued",
-            },
-            {
-                "Status": "Queued",
+                "Command_Created": True,
+                "Processed_At": utc_now_iso(),
             },
         ],
     )
@@ -1756,8 +1764,6 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         "capability": mapped_capability,
         "workspace_id": workspace_id,
     }
-
-
 # ============================================================
 # Capabilities registry
 # ============================================================
