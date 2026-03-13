@@ -2127,10 +2127,154 @@ def get_events(limit: int = 30) -> Dict[str, Any]:
         "ts": utc_now_iso(),
     }
 
+# ============================================================
+# Webhook Monitor
+# ============================================================
 
+class WebhookIn(BaseModel):
+    source: Optional[str] = "generic"
+    event_type: Optional[str] = "webhook_received"
+    workspace_id: Optional[str] = "production"
+    target_capability: Optional[str] = None
+    command_input: Optional[Dict[str, Any]] = None
+    payload: Optional[Dict[str, Any]] = None
+    idempotency_key: Optional[str] = None
+
+
+def _build_webhook_event_fields(
+    source: str,
+    event_type: str,
+    workspace_id: str,
+    payload: Dict[str, Any],
+    target_capability: Optional[str] = None,
+    command_input: Optional[Dict[str, Any]] = None,
+    idempotency_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    fields: Dict[str, Any] = {
+        "Event_Type": event_type,
+        "Source": source,
+        "Workspace_ID": workspace_id,
+        "Payload_JSON": json.dumps(payload or {}, ensure_ascii=False),
+        "Status_select": "New",
+        "Command_Created": False,
+    }
+
+    if target_capability:
+        fields["Mapped_Capability"] = target_capability
+
+    if command_input is not None:
+        fields["Command_Input_JSON"] = json.dumps(command_input, ensure_ascii=False)
+
+    if idempotency_key:
+        fields["Idempotency_Key"] = idempotency_key
+
+    return fields
 # ============================================================
 # Event endpoints
 # ============================================================
+@app.post("/webhook")
+async def webhook_receiver(request: Request) -> Dict[str, Any]:
+    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+        raise HTTPException(status_code=500, detail="airtable not configured")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.")
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Webhook payload must be a JSON object.")
+
+    source = str(payload.get("source") or request.headers.get("x-webhook-source") or "generic").strip() or "generic"
+    event_type = str(payload.get("event_type") or request.headers.get("x-webhook-event") or "webhook_received").strip() or "webhook_received"
+    workspace_id = str(payload.get("workspace_id") or request.headers.get("x-workspace-id") or "production").strip() or "production"
+
+    target_capability = payload.get("target_capability")
+    if target_capability is not None:
+        target_capability = str(target_capability).strip() or None
+
+    command_input = payload.get("command_input")
+    if command_input is not None and not isinstance(command_input, dict):
+        raise HTTPException(status_code=400, detail="command_input must be an object when provided")
+
+    idempotency_key = payload.get("idempotency_key")
+    if idempotency_key is not None:
+        idempotency_key = str(idempotency_key).strip() or None
+
+    event_fields = _build_webhook_event_fields(
+        source=source,
+        event_type=event_type,
+        workspace_id=workspace_id,
+        payload=payload,
+        target_capability=target_capability,
+        command_input=command_input,
+        idempotency_key=idempotency_key,
+    )
+
+    event_id = airtable_create(EVENTS_TABLE_NAME, event_fields)
+
+    return {
+        "ok": True,
+        "event_id": event_id,
+        "event_type": event_type,
+        "source": source,
+        "workspace_id": workspace_id,
+        "ts": utc_now_iso(),
+    }
+
+
+@app.post("/webhook/failure")
+async def webhook_failure_receiver(request: Request) -> Dict[str, Any]:
+    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+        raise HTTPException(status_code=500, detail="airtable not configured")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.")
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Webhook payload must be a JSON object.")
+
+    source = str(payload.get("source") or request.headers.get("x-webhook-source") or "generic").strip() or "generic"
+    workspace_id = str(payload.get("workspace_id") or request.headers.get("x-workspace-id") or "production").strip() or "production"
+
+    retry_url = str(
+        payload.get("retry_url")
+        or payload.get("url")
+        or payload.get("http_target")
+        or ""
+    ).strip()
+
+    retry_method = str(payload.get("method") or "POST").strip().upper() or "POST"
+
+    command_input: Dict[str, Any] = {}
+    if retry_url:
+        command_input["url"] = retry_url
+        command_input["http_target"] = retry_url
+        command_input["method"] = retry_method
+
+    event_fields = _build_webhook_event_fields(
+        source=source,
+        event_type="webhook_failed",
+        workspace_id=workspace_id,
+        payload=payload,
+        target_capability="http_exec" if retry_url else None,
+        command_input=command_input if retry_url else None,
+        idempotency_key=str(payload.get("idempotency_key") or "").strip() or None,
+    )
+
+    event_id = airtable_create(EVENTS_TABLE_NAME, event_fields)
+
+    return {
+        "ok": True,
+        "event_id": event_id,
+        "event_type": "webhook_failed",
+        "source": source,
+        "workspace_id": workspace_id,
+        "retry_ready": bool(retry_url),
+        "ts": utc_now_iso(),
+    }
 
 @app.post("/events")
 def create_event(evt: EventCreate) -> Dict[str, Any]:
