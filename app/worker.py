@@ -1604,7 +1604,7 @@ def _build_command_fields_candidates(
     return candidates
 
 
-    def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
+def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
     fields = event_record.get("fields", {}) or {}
     event_record_id = str(event_record.get("id") or "").strip()
 
