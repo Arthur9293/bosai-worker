@@ -1602,6 +1602,7 @@ def _build_command_fields_candidates(
     ]
 
     return candidates
+    
 def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
     fields = event_record.get("fields", {}) or {}
     event_record_id = str(event_record.get("id") or "").strip()
@@ -2049,7 +2050,7 @@ def get_events(limit: int = 30) -> Dict[str, Any]:
 
     for r in records:
         f = r.get("fields", {}) or {}
-        status = str(f.get("Status", f.get("Status_select", "")) or "").strip()
+        status = str(f.get("Status_select", f.get("Status", "")) or "").strip()
         key = status.lower()
 
         if key == "new":
@@ -2121,6 +2122,7 @@ def _build_webhook_event_fields(
         "Workspace_ID": workspace_id,
         "Payload_JSON": json.dumps(payload or {}, ensure_ascii=False),
         "Status_select": "New",
+        "Status": "New",
         "Command_Created": False,
     }
 
@@ -2253,6 +2255,7 @@ def create_event(evt: EventCreate) -> Dict[str, Any]:
     fields = {
         "Event_Type": evt.event_type,
         "Status_select": "New",
+        "Status": "New",
         "Source": evt.source,
         "Workspace_ID": workspace_id,
         "Payload_JSON": json.dumps(payload_json, ensure_ascii=False),
@@ -2314,10 +2317,22 @@ def process_events(limit: int = 10) -> Dict[str, Any]:
                 [
                     {
                         "Status_select": "Error",
+                        "Status": "Error",
                         "Processed_At": utc_now_iso(),
                     },
                     {
                         "Status_select": "Error",
+                        "Processed_At": utc_now_iso(),
+                    },
+                    {
+                        "Status": "Error",
+                        "Processed_At": utc_now_iso(),
+                    },
+                    {
+                        "Status_select": "Error",
+                    },
+                    {
+                        "Status": "Error",
                     },
                 ],
             )
