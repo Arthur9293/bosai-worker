@@ -1670,26 +1670,29 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         _airtable_update_best_effort(
             EVENTS_TABLE_NAME,
             event_record_id,
-            [
+           [
                 {
+                    "Linked_Command": [existing_id],
                     "Status_select": "Queued",
                     "Command_Created": True,
                     "Processed_At": utc_now_iso(),
                 },
                 {
+                    "Linked_Command": [existing_id],
                     "Status": "Queued",
                     "Command_Created": True,
                     "Processed_At": utc_now_iso(),
                 },
                 {
+                    "Linked_Command": [existing_id],
                     "Status_select": "Queued",
                 },
                 {
+                    "Linked_Command": [existing_id],
                     "Status": "Queued",
-                },
-            ],
-        )
-
+             },     
+        ],
+    )    
         return {
             "ok": True,
             "mode": "existing_command",
