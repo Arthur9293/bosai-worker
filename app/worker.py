@@ -1672,7 +1672,7 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
             event_record_id,
            [
                 {
-                    "Linked_Command": [existing_id],
+                    "Linked_Command": [command_record_id],
                     "Command_ID": command_record_id,
                     "Status_select": "Queued",
                     "Command_Created": True,
