@@ -2136,6 +2136,7 @@ def _build_webhook_event_fields(
         fields["Idempotency_Key"] = idempotency_key
 
     return fields
+    
 # ============================================================
 # Event endpoints
 # ============================================================
