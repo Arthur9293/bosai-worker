@@ -2070,76 +2070,7 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         "workspace_id": workspace_id,
         "idempotency_key": effective_idempotency_key,
     }
-
-    candidates = _build_command_fields_candidates(
-        capability=mapped_capability,
-        command_input=command_input,
-        workspace_id=workspace_id,
-        event_record_id=event_record_id,
-        idempotency_key=idempotency_key or f"evt:{event_record_id}:{mapped_capability}",
-        priority=1,
-    )
-
-    print(
-        f"[_create_command_from_event][FINAL] "
-        f"event_id={event_record_id} "
-        f"mapped_capability={mapped_capability} "
-        f"command_input={command_input}"
-    )
-    create_res = _airtable_create_best_effort(COMMANDS_TABLE_NAME, candidates)
-    if not create_res.get("ok"):
-        return {
-            "ok": False,
-            "error": f"command_create_failed:{create_res.get('error')}",
-            "event_id": event_record_id,
-        }
-
-    command_record_id = str(create_res.get("record_id") or "").strip()
-
-    _airtable_update_best_effort(
-        EVENTS_TABLE_NAME,
-        event_record_id,
-        [
-            {
-                "Linked_Command": [command_record_id],
-                "Command_ID": command_record_id,
-                "Status_select": "Queued",
-                "Status": "Queued",
-                "Command_Created": True,
-                "Processed_At": utc_now_iso(),
-            },
-            {
-                "Linked_Command": [command_record_id],
-                "Status_select": "Processed",
-                "Status": "Processed",
-                "Command_Created": True,
-                "Processed_At": utc_now_iso(),
-            },
-            {
-                "Command_ID": command_record_id,
-                "Status_select": "Processed",
-                "Status": "Processed",
-                "Command_Created": True,
-                "Processed_At": utc_now_iso(),
-            },
-            {
-                "Status_select": "Processed",
-                "Status": "Processed",
-                "Command_Created": True,
-                "Processed_At": utc_now_iso(),
-            },
-        ],
-    )
-
-    return {
-        "ok": True,
-        "mode": "created_command",
-        "event_id": event_record_id,
-        "command_record_id": command_record_id,
-        "capability": mapped_capability,
-        "workspace_id": workspace_id,
-    }
-
+    
 EVENT_CAPABILITY_ALLOWLIST = {"http_exec"}
 EXECUTABLE_CAPABILITY_ALLOWLIST = {"http_exec"}
     
