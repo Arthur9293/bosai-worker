@@ -8,6 +8,7 @@ import os
 import time
 import traceback
 import uuid
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
@@ -185,6 +186,41 @@ app.add_middleware(
 
 _HTTP_SESSION = requests.Session()
 
+def bosai_scheduler_loop():
+    while True:
+        try:
+            payload = {
+                "worker": WORKER_NAME,
+                "capability": "command_orchestrator",
+                "idempotency_key": f"scheduler-{int(time.time())}",
+                "input": {}
+            }
+
+            req = RunRequest.from_payload(payload)
+            run_record_id, run_uuid = create_system_run(req)
+
+            try:
+                result_obj = capability_command_orchestrator(req, run_record_id)
+                if isinstance(result_obj, dict) and "run_record_id" not in result_obj:
+                    result_obj["run_record_id"] = run_record_id
+                finish_system_run(run_record_id, "Done", result_obj)
+            except Exception as e:
+                fail_system_run(run_record_id, repr(e))
+
+        except Exception as e:
+            print("scheduler crash:", repr(e))
+
+        time.sleep(10)
+        
+@app.on_event("startup")
+def start_scheduler():
+
+    thread = threading.Thread(
+        target=bosai_scheduler_loop,
+        daemon=True
+    )
+
+    thread.start()
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
@@ -2792,3 +2828,27 @@ def get_run_detail(record_id: str) -> Dict[str, Any]:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"run_detail_failed: {repr(e)}")
+
+import threading
+import time
+
+
+def bosai_scheduler_loop():
+    while True:
+        try:
+            payload = {
+                "worker": WORKER_NAME,
+                "capability": "command_orchestrator",
+                "idempotency_key": f"scheduler-{int(time.time())}",
+                "input": {}
+            }
+
+            try:
+                run_capability(payload)
+            except Exception as e:
+                print("scheduler error:", e)
+
+        except Exception as e:
+            print("scheduler crash:", e)
+
+        time.sleep(10)
