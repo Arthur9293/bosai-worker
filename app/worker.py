@@ -2259,7 +2259,7 @@ def create_event(evt: EventCreate) -> Dict[str, Any]:
     }
 
 @app.post("/events/process")
-def process_events(limit: int = 10) -> Dict[str, Any]:
+def process_events(limit: int = 50) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=10, minimum=1, maximum=100)
 
     records, meta = _safe_records_from_view(
