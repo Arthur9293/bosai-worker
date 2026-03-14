@@ -1787,9 +1787,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
 
                 errors.append(f"{cid}: lock_lost_before_finalize")
                 continue
-
-            _command_mark_done_best_effort(cid, run_record_id, result_obj)
-
+    
             workspace_id = str(fields.get("Workspace_ID") or "production").strip() or "production"
             spawn_res = _spawn_next_commands_from_result(
                 parent_command_id=cid,
@@ -1801,6 +1799,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             if isinstance(result_obj, dict):
                 result_obj["spawn_summary"] = spawn_res
 
+            _command_mark_done_best_effort(cid, run_record_id, result_obj)
             succeeded += 1
 
         except HTTPException as e:
