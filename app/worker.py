@@ -1572,7 +1572,21 @@ def _build_command_fields_candidates(
 ) -> List[Dict[str, Any]]:
     idem = str(idempotency_key or f"evt:{event_record_id}:{capability}").strip()
 
-    input_json = json.dumps(command_input or {}, ensure_ascii=False)
+    command_input = command_input or {}
+    input_json = json.dumps(command_input, ensure_ascii=False)
+
+    url_value = str(
+        command_input.get("url")
+        or command_input.get("http_target")
+        or command_input.get("URL")
+        or ""
+    ).strip()
+
+    method_value = str(
+        command_input.get("method")
+        or command_input.get("HTTP_Method")
+        or "GET"
+    ).strip().upper()
 
     candidates: List[Dict[str, Any]] = [
         {
@@ -1583,6 +1597,9 @@ def _build_command_fields_candidates(
             "Idempotency_Key": idem,
             "Workspace_ID": workspace_id,
             "Source_Event": [event_record_id],
+            "http_target": url_value,
+            "URL": url_value,
+            "HTTP_Method": method_value,
         },
         {
             "Capability": capability,
@@ -1591,6 +1608,9 @@ def _build_command_fields_candidates(
             "Input_JSON": input_json,
             "Idempotency_Key": idem,
             "Workspace_ID": workspace_id,
+            "http_target": url_value,
+            "URL": url_value,
+            "HTTP_Method": method_value,
         },
         {
             "Capability": capability,
@@ -1598,6 +1618,9 @@ def _build_command_fields_candidates(
             "Priority": priority,
             "Input_JSON": input_json,
             "Idempotency_Key": idem,
+            "http_target": url_value,
+            "URL": url_value,
+            "HTTP_Method": method_value,
         },
     ]
 
@@ -1745,6 +1768,12 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         priority=1,
     )
 
+    print(
+        f"[_create_command_from_event][FINAL] "
+        f"event_id={event_record_id} "
+        f"mapped_capability={mapped_capability} "
+        f"command_input={command_input}"
+    )
     create_res = _airtable_create_best_effort(COMMANDS_TABLE_NAME, candidates)
     if not create_res.get("ok"):
         return {
