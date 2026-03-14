@@ -1573,14 +1573,33 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         capability = str(fields.get("Capability", "")).strip()
         if not capability:
             failed += 1
-            _command_mark_retry_or_dead_best_effort(cid, run_record_id, fields, "Missing Capability")
+            _command_mark_retry_or_dead_best_effort(
+                cid,
+                run_record_id,
+                fields,
+                "Missing Capability",
+            )
+            _release_command_lock_best_effort(cid)
+            continue
+
+        if capability not in EXECUTABLE_CAPABILITY_ALLOWLIST:
+            unsupported += 1
+            _command_mark_unsupported_best_effort(
+                cid,
+                run_record_id,
+                f"legacy_or_disallowed_capability:{capability}",
+            )
             _release_command_lock_best_effort(cid)
             continue
 
         fn = CAPABILITIES.get(capability)
         if not fn:
             unsupported += 1
-            _command_mark_unsupported_best_effort(cid, run_record_id, f"Unsupported capability: {capability}")
+            _command_mark_unsupported_best_effort(
+                cid,
+                run_record_id,
+                f"Unsupported capability: {capability}",
+            )
             _release_command_lock_best_effort(cid)
             continue
 
@@ -1835,8 +1854,6 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
     fields = event_record.get("fields", {}) or {}
     event_record_id = str(event_record.get("id") or "").strip()
 
-    print(f"[_create_command_from_event] event_id={event_record_id} fields_keys={list(fields.keys())}")
-
     if not event_record_id:
         return {"ok": False, "error": "missing_event_record_id"}
 
@@ -1867,14 +1884,36 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
     if not mapped_capability:
         return {"ok": False, "error": "missing_mapped_capability"}
 
-    if mapped_capability not in CAPABILITIES:
+    if mapped_capability not in EVENT_CAPABILITY_ALLOWLIST:
+        _airtable_update_best_effort(
+            EVENTS_TABLE_NAME,
+            event_record_id,
+            [
+                {
+                    "Status_select": "Ignored",
+                    "Status": "Ignored",
+                    "Processed_At": utc_now_iso(),
+                    "Error_Message": f"legacy_or_disallowed_capability:{mapped_capability}",
+                },
+                {
+                    "Status_select": "Ignored",
+                    "Processed_At": utc_now_iso(),
+                    "Error_Message": f"legacy_or_disallowed_capability:{mapped_capability}",
+                },
+                {
+                    "Status": "Ignored",
+                    "Processed_At": utc_now_iso(),
+                    "Error_Message": f"legacy_or_disallowed_capability:{mapped_capability}",
+                },
+            ],
+        )
         return {
             "ok": False,
-            "error": f"unsupported_mapped_capability:{mapped_capability}",
+            "error": f"legacy_or_disallowed_capability:{mapped_capability}",
+            "event_id": event_record_id,
         }
 
     workspace_id = str(fields.get("Workspace_ID") or "production").strip() or "production"
-    idempotency_key = str(fields.get("Idempotency_Key") or "").strip()
 
     command_input = _json_load_maybe(fields.get("Command_Input_JSON"))
     if not command_input:
@@ -1905,17 +1944,12 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
     if http_method and "method" not in command_input:
         command_input["method"] = http_method
 
-    print(
-        f"[_create_command_from_event] event_id={event_record_id} "
-        f"mapped_capability={mapped_capability} "
-        f"workspace_id={workspace_id} "
-        f"idempotency_key={idempotency_key} "
-        f"command_input={command_input}"
+    effective_idempotency_key = (
+        str(fields.get("Idempotency_Key") or "").strip()
+        or f"evt:{event_record_id}:{mapped_capability}"
     )
 
-    existing = None
-    if idempotency_key:
-        existing = find_command_by_idem(idempotency_key)
+    existing = find_command_by_idem(effective_idempotency_key)
 
     if existing:
         existing_id = str(existing.get("id") or "").strip()
@@ -1931,6 +1965,7 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
                     "Status": "Processed",
                     "Command_Created": True,
                     "Processed_At": utc_now_iso(),
+                    "Idempotency_Key": effective_idempotency_key,
                 },
                 {
                     "Linked_Command": [existing_id],
@@ -1938,6 +1973,7 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
                     "Status": "Processed",
                     "Command_Created": True,
                     "Processed_At": utc_now_iso(),
+                    "Idempotency_Key": effective_idempotency_key,
                 },
                 {
                     "Command_ID": existing_id,
@@ -1945,12 +1981,14 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
                     "Status": "Processed",
                     "Command_Created": True,
                     "Processed_At": utc_now_iso(),
+                    "Idempotency_Key": effective_idempotency_key,
                 },
                 {
                     "Status_select": "Processed",
                     "Status": "Processed",
                     "Command_Created": True,
                     "Processed_At": utc_now_iso(),
+                    "Idempotency_Key": effective_idempotency_key,
                 },
             ],
         )
@@ -1962,7 +2000,76 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
             "command_record_id": existing_id,
             "capability": mapped_capability,
             "workspace_id": workspace_id,
+            "idempotency_key": effective_idempotency_key,
         }
+
+    candidates = _build_command_fields_candidates(
+        capability=mapped_capability,
+        command_input=command_input,
+        workspace_id=workspace_id,
+        event_record_id=event_record_id,
+        idempotency_key=effective_idempotency_key,
+        priority=1,
+    )
+
+    create_res = _airtable_create_best_effort(COMMANDS_TABLE_NAME, candidates)
+    if not create_res.get("ok"):
+        return {
+            "ok": False,
+            "error": f"command_create_failed:{create_res.get('error')}",
+            "event_id": event_record_id,
+        }
+
+    command_record_id = str(create_res.get("record_id") or "").strip()
+
+    _airtable_update_best_effort(
+        EVENTS_TABLE_NAME,
+        event_record_id,
+        [
+            {
+                "Linked_Command": [command_record_id],
+                "Command_ID": command_record_id,
+                "Status_select": "Processed",
+                "Status": "Processed",
+                "Command_Created": True,
+                "Processed_At": utc_now_iso(),
+                "Idempotency_Key": effective_idempotency_key,
+            },
+            {
+                "Linked_Command": [command_record_id],
+                "Status_select": "Processed",
+                "Status": "Processed",
+                "Command_Created": True,
+                "Processed_At": utc_now_iso(),
+                "Idempotency_Key": effective_idempotency_key,
+            },
+            {
+                "Command_ID": command_record_id,
+                "Status_select": "Processed",
+                "Status": "Processed",
+                "Command_Created": True,
+                "Processed_At": utc_now_iso(),
+                "Idempotency_Key": effective_idempotency_key,
+            },
+            {
+                "Status_select": "Processed",
+                "Status": "Processed",
+                "Command_Created": True,
+                "Processed_At": utc_now_iso(),
+                "Idempotency_Key": effective_idempotency_key,
+            },
+        ],
+    )
+
+    return {
+        "ok": True,
+        "mode": "created_command",
+        "event_id": event_record_id,
+        "command_record_id": command_record_id,
+        "capability": mapped_capability,
+        "workspace_id": workspace_id,
+        "idempotency_key": effective_idempotency_key,
+    }
 
     candidates = _build_command_fields_candidates(
         capability=mapped_capability,
@@ -2032,6 +2139,9 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         "capability": mapped_capability,
         "workspace_id": workspace_id,
     }
+
+EVENT_CAPABILITY_ALLOWLIST = {"http_exec"}
+EXECUTABLE_CAPABILITY_ALLOWLIST = {"http_exec"}
     
 # ============================================================
 # Capabilities registry
@@ -2040,7 +2150,6 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
 CAPABILITIES = {
     "health_tick": capability_health_tick,
     "commands_tick": capability_commands_tick,
-    "sla_machine": capability_sla_machine,
     "escalation_engine": capability_escalation_engine,
     "http_exec": capability_http_exec,
     "state_get": capability_state_get,
