@@ -189,23 +189,49 @@ _HTTP_SESSION = requests.Session()
 def bosai_scheduler_loop():
     while True:
         try:
-            payload = {
+            # 1) Transformer les events en commands
+            evt_payload = {
                 "worker": WORKER_NAME,
-                "capability": "command_orchestrator",
-                "idempotency_key": f"scheduler-{int(time.time())}",
+                "capability": "event_engine",
+                "idempotency_key": f"scheduler-events-{int(time.time())}",
                 "input": {}
             }
 
-            req = RunRequest.from_payload(payload)
-            run_record_id, run_uuid = create_system_run(req)
+            # 2) Exécuter les commands en queue
+            cmd_payload = {
+                "worker": WORKER_NAME,
+                "capability": "command_orchestrator",
+                "idempotency_key": f"scheduler-commands-{int(time.time())}",
+                "input": {}
+            }
 
             try:
-                result_obj = capability_command_orchestrator(req, run_record_id)
-                if isinstance(result_obj, dict) and "run_record_id" not in result_obj:
-                    result_obj["run_record_id"] = run_record_id
-                finish_system_run(run_record_id, "Done", result_obj)
+                req_evt = RunRequest.from_payload(evt_payload)
+                evt_run_record_id, _ = create_system_run(req_evt)
+                evt_result = process_events(limit=20)
+                if isinstance(evt_result, dict) and "run_record_id" not in evt_result:
+                    evt_result["run_record_id"] = evt_run_record_id
+                finish_system_run(evt_run_record_id, "Done", evt_result)
             except Exception as e:
-                fail_system_run(run_record_id, repr(e))
+                try:
+                    fail_system_run(evt_run_record_id, repr(e))
+                except Exception:
+                    pass
+                print("scheduler event_engine error:", repr(e))
+
+            try:
+                req_cmd = RunRequest.from_payload(cmd_payload)
+                cmd_run_record_id, _ = create_system_run(req_cmd)
+                cmd_result = capability_command_orchestrator(req_cmd, cmd_run_record_id)
+                if isinstance(cmd_result, dict) and "run_record_id" not in cmd_result:
+                    cmd_result["run_record_id"] = cmd_run_record_id
+                finish_system_run(cmd_run_record_id, "Done", cmd_result)
+            except Exception as e:
+                try:
+                    fail_system_run(cmd_run_record_id, repr(e))
+                except Exception:
+                    pass
+                print("scheduler command_orchestrator error:", repr(e))
 
         except Exception as e:
             print("scheduler crash:", repr(e))
@@ -2024,6 +2050,7 @@ CAPABILITIES = {
     "retry_queue": capability_retry_queue,
     "lock_recovery": capability_lock_recovery,
     "command_orchestrator": capability_command_orchestrator,
+    "event_engine": lambda req, run_record_id: process_events(limit=20),
 }
 
 
