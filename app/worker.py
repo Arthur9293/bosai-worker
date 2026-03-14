@@ -1404,6 +1404,27 @@ def _normalize_http_exec_input(cmd_input: Dict[str, Any]) -> Dict[str, Any]:
     normalized["method"] = method
     return normalized
 
+def _validate_command_input(capability: str, cmd_input: Dict[str, Any]) -> Tuple[bool, Dict[str, Any], Optional[str]]:
+    if not isinstance(cmd_input, dict):
+        cmd_input = {}
+
+    normalized = dict(cmd_input)
+
+    if capability == "http_exec":
+        normalized = _normalize_http_exec_input(normalized)
+        resolved_url = _resolve_http_exec_url_from_command_input(normalized)
+
+        if not resolved_url:
+            return False, normalized, "HTTP_EXEC missing url (Input_JSON.url / http_target / URL)"
+
+        method = str(normalized.get("method") or "").strip().upper()
+        if method not in ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"):
+            return False, normalized, f"HTTP_EXEC invalid method: {method or 'EMPTY'}"
+
+        return True, normalized, None
+
+    return True, normalized, None
+
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     max_cmds = int(req.max_commands or 0) or 5
     if POLICY_MAX_TOOL_CALLS > 0:
@@ -1518,16 +1539,18 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             errors.append(f"{cid}: failed_to_claim:{lock_res.get('reason') or lock_res.get('error')}")
             continue
             
-        if capability == "http_exec":
-            cmd_input = _normalize_http_exec_input(cmd_input)
-            resolved_url = _resolve_http_exec_url_from_command_input(cmd_input)
-            if not resolved_url:
-                msg = "HTTP_EXEC missing url (Input_JSON.url / http_target / URL)"
-                failed += 1
-                _command_mark_retry_or_dead_best_effort(cid, run_record_id, fields, msg)
-                _release_command_lock_best_effort(cid)
-                errors.append(f"{cid}: {msg}")
-                continue
+        is_valid, cmd_input, validation_error = _validate_command_input(capability, cmd_input)
+        if not is_valid:
+            failed += 1
+            _command_mark_retry_or_dead_best_effort(
+                cid,
+                run_record_id,
+                fields,
+                validation_error or "invalid_command_input",
+            )
+            _release_command_lock_best_effort(cid)
+            errors.append(f"{cid}: {validation_error or 'invalid_command_input'}")
+            continue
 
         executed += 1
 
