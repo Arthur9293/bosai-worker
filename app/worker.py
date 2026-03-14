@@ -1039,6 +1039,39 @@ def _claim_command_for_worker(command_id: str, worker_name: str, run_record_id: 
     except Exception as e:
         return {"ok": False, "reason": "refresh_failed", "error": repr(e)}
 
+def _worker_still_owns_lock(command_id: str, worker_name: str, lock_token: str) -> bool:
+    try:
+        rec = airtable_get_record(COMMANDS_TABLE_NAME, command_id)
+        fields = rec.get("fields", {}) or {}
+
+        if (
+            str(fields.get("Locked_By") or "").strip() == worker_name
+            and str(fields.get("Lock_Token") or "").strip() == lock_token
+            and _read_command_status(fields) == "Running"
+        ):
+            return True
+
+        return False
+    except Exception:
+        return False
+
+def _command_lock_heartbeat(command_id: str, lock_token: str) -> None:
+    now = utc_now_iso()
+    ttl_min = _command_lock_ttl_min()
+    expires_at = _utc_plus_minutes_iso(ttl_min)
+
+    _airtable_update_best_effort(
+        COMMANDS_TABLE_NAME,
+        command_id,
+        [
+            {
+                "Last_Heartbeat_At": now,
+                "Lock_Expires_At": expires_at,
+                "Lock_Token": lock_token,
+            }
+        ],
+    )
+    
 def _command_mark_done_best_effort(command_id: str, run_record_id: str, result_obj: Dict[str, Any]) -> Dict[str, Any]:
     now = utc_now_iso()
     result_json = json.dumps(result_obj, ensure_ascii=False)
@@ -1072,7 +1105,6 @@ def _command_mark_done_best_effort(command_id: str, run_record_id: str, result_o
             },
         ],
     )
-
 
 def _command_mark_blocked_duplicate_best_effort(command_id: str, run_record_id: str, note: Dict[str, Any]) -> Dict[str, Any]:
     now = utc_now_iso()
@@ -1538,6 +1570,8 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             blocked += 1
             errors.append(f"{cid}: failed_to_claim:{lock_res.get('reason') or lock_res.get('error')}")
             continue
+
+        lock_token = lock_res.get("lock_token")
             
         is_valid, cmd_input, validation_error = _validate_command_input(capability, cmd_input)
         if not is_valid:
@@ -1567,9 +1601,11 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             )
 
             result_obj = fn(cmd_req, run_record_id)
-            if not isinstance(result_obj, dict):
-                result_obj = {"ok": True, "result": result_obj}
-
+          # vérifie que le worker possède toujours le lock
+            if not _worker_still_owns_lock(cid, req.worker, lock_token):
+                blocked += 1
+                errors.append(f"{cid}: lock_lost_before_finalize")
+                continue
             _command_mark_done_best_effort(cid, run_record_id, result_obj)
             succeeded += 1
 
