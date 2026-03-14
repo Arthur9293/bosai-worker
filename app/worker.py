@@ -990,7 +990,54 @@ def _command_mark_running_best_effort(command_id: str, run_record_id: str, worke
             },
         ],
     )
+    
+def _claim_command_for_worker(command_id: str, worker_name: str, run_record_id: str, idem: str) -> Dict[str, Any]:
+    now = utc_now_iso()
+    ttl_min = _command_lock_ttl_min()
+    lock_token = _new_lock_token()
+    expires_at = _utc_plus_minutes_iso(ttl_min)
 
+    update_res = _airtable_update_best_effort(
+        COMMANDS_TABLE_NAME,
+        command_id,
+        [
+            {
+                "Status_select": "Running",
+                "Idempotency_Key": idem,
+                "Linked_Run": [run_record_id],
+                "Started_At": now,
+                "Is_Locked": True,
+                "Locked_At": now,
+                "Locked_By": worker_name,
+                "Lock_Token": lock_token,
+                "Lock_TTL_Min": ttl_min,
+                "Lock_Expires_At": expires_at,
+                "Last_Heartbeat_At": now,
+            }
+        ],
+    )
+
+    if not update_res.get("ok"):
+        return {"ok": False, "reason": "update_failed", "error": update_res.get("error")}
+
+    try:
+        rec = airtable_get_record(COMMANDS_TABLE_NAME, command_id)
+        fields = rec.get("fields", {}) or {}
+
+        if (
+            str(fields.get("Locked_By") or "").strip() == worker_name
+            and str(fields.get("Lock_Token") or "").strip() == lock_token
+            and _read_command_status(fields) == "Running"
+        ):
+            return {
+                "ok": True,
+                "lock_token": lock_token,
+                "record_id": command_id,
+            }
+
+        return {"ok": False, "reason": "lock_not_owned_after_refresh"}
+    except Exception as e:
+        return {"ok": False, "reason": "refresh_failed", "error": repr(e)}
 
 def _command_mark_done_best_effort(command_id: str, run_record_id: str, result_obj: Dict[str, Any]) -> Dict[str, Any]:
     now = utc_now_iso()
@@ -1332,6 +1379,30 @@ def _resolve_http_exec_url_from_command_input(cmd_input: Dict[str, Any]) -> str:
             return value
     return ""
 
+def _normalize_http_exec_input(cmd_input: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(cmd_input, dict):
+        cmd_input = {}
+
+    normalized = dict(cmd_input)
+
+    url = str(
+        normalized.get("url")
+        or normalized.get("http_target")
+        or normalized.get("URL")
+        or ""
+    ).strip()
+
+    method = str(normalized.get("method") or normalized.get("HTTP_Method") or "").strip().upper()
+    if not method:
+        method = "GET"
+
+    if url:
+        normalized["url"] = url
+        if "http_target" not in normalized or not str(normalized.get("http_target") or "").strip():
+            normalized["http_target"] = url
+
+    normalized["method"] = method
+    return normalized
 
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     max_cmds = int(req.max_commands or 0) or 5
@@ -1424,6 +1495,8 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         idem = str(fields.get("Idempotency_Key", "")).strip() or f"cmd:{cid}:{capability}"
         cmd_input = _compose_command_input(fields)
 
+        if capability == "http_exec":
+            cmd_input = _normalize_http_exec_input(cmd_input)
         dup_done = find_done_command_by_idem(idem, exclude_record_id=cid)
         if dup_done:
             _command_mark_blocked_duplicate_best_effort(
@@ -1441,13 +1514,14 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             blocked += 1
             continue
 
-        lock_res = _command_mark_running_best_effort(cid, run_record_id, req.worker, idem)
+        lock_res = _claim_command_for_worker(cid, req.worker, run_record_id, idem)
         if not lock_res.get("ok"):
             blocked += 1
-            errors.append(f"{cid}: failed_to_mark_running:{lock_res.get('error')}")
+            errors.append(f"{cid}: failed_to_claim:{lock_res.get('reason') or lock_res.get('error')}")
             continue
-
+            
         if capability == "http_exec":
+            cmd_input = _normalize_http_exec_input(cmd_input)
             resolved_url = _resolve_http_exec_url_from_command_input(cmd_input)
             if not resolved_url:
                 msg = "HTTP_EXEC missing url (Input_JSON.url / http_target / URL)"
