@@ -2277,9 +2277,40 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         "workspace_id": workspace_id,
         "idempotency_key": effective_idempotency_key,
     }
+
+def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    payload = req.input or {}
+
+    return {
+        "ok": True,
+        "message": "planner_demo_executed",
+        "plan": [
+            {"step": 1, "capability": "http_exec", "goal": "fetch_probe"},
+            {"step": 2, "capability": "http_exec", "goal": "confirm_probe"},
+        ],
+        "next_commands": [
+            {
+                "capability": "http_exec",
+                "priority": 1,
+                "input": {
+                    "url": "https://httpbin.org/get",
+                    "method": "GET",
+                },
+            },
+            {
+                "capability": "http_exec",
+                "priority": 1,
+                "input": {
+                    "url": "https://httpbin.org/uuid",
+                    "method": "GET",
+                },
+            },
+        ],
+        "run_record_id": run_record_id,
+    }
     
-EVENT_CAPABILITY_ALLOWLIST = {"http_exec", "chain_demo", "decision_demo"}
-EXECUTABLE_CAPABILITY_ALLOWLIST = {"http_exec", "chain_demo", "decision_demo"}
+EVENT_CAPABILITY_ALLOWLIST = {"http_exec", "decision_demo","chain_demo", "planner_demo"}
+EXECUTABLE_CAPABILITY_ALLOWLIST = {"http_exec","decision_demo", "chain_demo", "planner_demo"}
     
 # ============================================================
 # Capabilities registry
@@ -2300,6 +2331,7 @@ CAPABILITIES = {
     "event_engine": lambda req, run_record_id: process_events(limit=20),
     "chain_demo": capability_chain_demo,
     "decision_demo": capability_decision_demo,
+    "planner_demo": capability_planner_demo,
 }
 
 
