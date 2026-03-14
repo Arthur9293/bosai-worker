@@ -1517,7 +1517,97 @@ def _validate_command_input(capability: str, cmd_input: Dict[str, Any]) -> Tuple
         return True, normalized, None
 
     return True, normalized, None
+    
+def _spawn_next_commands_from_result(
+    parent_command_id: str,
+    parent_idempotency_key: str,
+    workspace_id: str,
+    result_obj: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not isinstance(result_obj, dict):
+        return {"ok": True, "spawned": 0, "skipped": 0, "errors": []}
 
+    next_commands = result_obj.get("next_commands")
+    if not isinstance(next_commands, list) or not next_commands:
+        return {"ok": True, "spawned": 0, "skipped": 0, "errors": []}
+
+    spawned = 0
+    skipped = 0
+    errors: List[str] = []
+
+    for idx, item in enumerate(next_commands, start=1):
+        if not isinstance(item, dict):
+            skipped += 1
+            errors.append(f"next_commands[{idx}] invalid_item")
+            continue
+
+        capability = str(item.get("capability") or "").strip()
+        cmd_input = item.get("input") or {}
+        priority = int(item.get("priority") or 1)
+
+        if not capability:
+            skipped += 1
+            errors.append(f"next_commands[{idx}] missing_capability")
+            continue
+
+        if capability not in EXECUTABLE_CAPABILITY_ALLOWLIST:
+            skipped += 1
+            errors.append(f"next_commands[{idx}] disallowed_capability:{capability}")
+            continue
+
+        if not isinstance(cmd_input, dict):
+            skipped += 1
+            errors.append(f"next_commands[{idx}] invalid_input")
+            continue
+
+        child_idem = f"{parent_idempotency_key}:next:{idx}:{capability}"
+
+        existing = find_command_by_idem(child_idem)
+        if existing:
+            skipped += 1
+            continue
+
+        create_res = _airtable_create_best_effort(
+            COMMANDS_TABLE_NAME,
+            [
+                {
+                    "Capability": capability,
+                    "Status_select": "Queued",
+                    "Priority": priority,
+                    "Input_JSON": json.dumps(cmd_input, ensure_ascii=False),
+                    "Idempotency_Key": child_idem,
+                    "Workspace_ID": workspace_id,
+                    "Parent_Command_ID": parent_command_id,
+                },
+                {
+                    "Capability": capability,
+                    "Status_select": "Queued",
+                    "Priority": priority,
+                    "Input_JSON": json.dumps(cmd_input, ensure_ascii=False),
+                    "Idempotency_Key": child_idem,
+                    "Workspace_ID": workspace_id,
+                },
+                {
+                    "Capability": capability,
+                    "Status_select": "Queued",
+                    "Priority": priority,
+                    "Input_JSON": json.dumps(cmd_input, ensure_ascii=False),
+                    "Idempotency_Key": child_idem,
+                },
+            ],
+        )
+
+        if create_res.get("ok"):
+            spawned += 1
+        else:
+            errors.append(f"next_commands[{idx}] create_failed:{create_res.get('error')}")
+
+    return {
+        "ok": True,
+        "spawned": spawned,
+        "skipped": skipped,
+        "errors": errors[:10],
+    }
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     max_cmds = int(req.max_commands or 0) or 5
     if POLICY_MAX_TOOL_CALLS > 0:
@@ -1699,6 +1789,18 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                 continue
 
             _command_mark_done_best_effort(cid, run_record_id, result_obj)
+
+            workspace_id = str(fields.get("Workspace_ID") or "production").strip() or "production"
+            spawn_res = _spawn_next_commands_from_result(
+                parent_command_id=cid,
+                parent_idempotency_key=idem,
+                workspace_id=workspace_id,
+                result_obj=result_obj,
+            )
+
+            if isinstance(result_obj, dict):
+                result_obj["spawn_summary"] = spawn_res
+
             succeeded += 1
 
         except HTTPException as e:
@@ -1775,7 +1877,23 @@ def capability_escalation_engine(req: RunRequest, run_record_id: str) -> Dict[st
         logs_errors_view_name=LOGS_ERRORS_VIEW_NAME,
         commands_table_name=COMMANDS_TABLE_NAME,
     )
-
+def capability_chain_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "message": "chain_demo_executed",
+        "next_commands": [
+            {
+                "capability": "http_exec",
+                "priority": 1,
+                "input": {
+                    "url": "https://httpbin.org/get",
+                    "method": "GET",
+                },
+            }
+        ],
+        "run_record_id": run_record_id,
+    }
+    
 # ============================================================
 # Event Engine minimal V1
 # ============================================================
@@ -2070,8 +2188,8 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         "idempotency_key": effective_idempotency_key,
     }
     
-EVENT_CAPABILITY_ALLOWLIST = {"http_exec"}
-EXECUTABLE_CAPABILITY_ALLOWLIST = {"http_exec"}
+EVENT_CAPABILITY_ALLOWLIST = {"http_exec", "chain_demo"}
+EXECUTABLE_CAPABILITY_ALLOWLIST = {"http_exec", "chain_demo"}
     
 # ============================================================
 # Capabilities registry
@@ -2090,6 +2208,7 @@ CAPABILITIES = {
     "lock_recovery": capability_lock_recovery,
     "command_orchestrator": capability_command_orchestrator,
     "event_engine": lambda req, run_record_id: process_events(limit=20),
+    "chain_demo": capability_chain_demo,
 }
 
 
