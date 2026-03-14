@@ -2829,26 +2829,3 @@ def get_run_detail(record_id: str) -> Dict[str, Any]:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"run_detail_failed: {repr(e)}")
 
-import threading
-import time
-
-
-def bosai_scheduler_loop():
-    while True:
-        try:
-            payload = {
-                "worker": WORKER_NAME,
-                "capability": "command_orchestrator",
-                "idempotency_key": f"scheduler-{int(time.time())}",
-                "input": {}
-            }
-
-            try:
-                run_capability(payload)
-            except Exception as e:
-                print("scheduler error:", e)
-
-        except Exception as e:
-            print("scheduler crash:", e)
-
-        time.sleep(10)
