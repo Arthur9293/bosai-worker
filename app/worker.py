@@ -1495,8 +1495,6 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         idem = str(fields.get("Idempotency_Key", "")).strip() or f"cmd:{cid}:{capability}"
         cmd_input = _compose_command_input(fields)
 
-        if capability == "http_exec":
-            cmd_input = _normalize_http_exec_input(cmd_input)
         dup_done = find_done_command_by_idem(idem, exclude_record_id=cid)
         if dup_done:
             _command_mark_blocked_duplicate_best_effort(
