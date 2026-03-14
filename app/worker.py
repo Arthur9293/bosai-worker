@@ -1607,6 +1607,8 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
     fields = event_record.get("fields", {}) or {}
     event_record_id = str(event_record.get("id") or "").strip()
 
+    print(f"[_create_command_from_event] event_id={event_record_id} fields_keys={list(fields.keys())}")
+
     if not event_record_id:
         return {"ok": False, "error": "missing_event_record_id"}
 
@@ -1623,6 +1625,17 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
     else:
         mapped_capability = str(mapped_capability_raw or "").strip()
 
+    payload_guess = _json_load_maybe(fields.get("Payload_JSON"))
+
+    if not mapped_capability:
+        if (
+            fields.get("http_target")
+            or fields.get("URL")
+            or fields.get("Http_Target")
+            or (isinstance(payload_guess, dict) and payload_guess.get("url"))
+        ):
+            mapped_capability = "http_exec"
+
     if not mapped_capability:
         return {"ok": False, "error": "missing_mapped_capability"}
 
@@ -1636,6 +1649,8 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
     idempotency_key = str(fields.get("Idempotency_Key") or "").strip()
 
     command_input = _json_load_maybe(fields.get("Command_Input_JSON"))
+    if not command_input:
+        command_input = _json_load_maybe(fields.get("Payload_JSON"))
     if not isinstance(command_input, dict):
         command_input = {}
 
@@ -1643,6 +1658,8 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         fields.get("http_target")
         or fields.get("URL")
         or fields.get("Http_Target")
+        or command_input.get("http_target")
+        or command_input.get("url")
         or ""
     ).strip()
     if http_target and "url" not in command_input:
@@ -1654,10 +1671,19 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         fields.get("HTTP_Method")
         or fields.get("Http_Method")
         or fields.get("method")
+        or command_input.get("method")
         or ""
     ).strip()
     if http_method and "method" not in command_input:
         command_input["method"] = http_method
+
+    print(
+        f"[_create_command_from_event] event_id={event_record_id} "
+        f"mapped_capability={mapped_capability} "
+        f"workspace_id={workspace_id} "
+        f"idempotency_key={idempotency_key} "
+        f"command_input={command_input}"
+    )
 
     existing = None
     if idempotency_key:
@@ -1674,23 +1700,27 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
                     "Linked_Command": [existing_id],
                     "Command_ID": existing_id,
                     "Status_select": "Queued",
+                    "Status": "Queued",
                     "Command_Created": True,
                     "Processed_At": utc_now_iso(),
                 },
                 {
                     "Linked_Command": [existing_id],
                     "Status_select": "Queued",
+                    "Status": "Queued",
                     "Command_Created": True,
                     "Processed_At": utc_now_iso(),
                 },
                 {
                     "Command_ID": existing_id,
                     "Status_select": "Queued",
+                    "Status": "Queued",
                     "Command_Created": True,
                     "Processed_At": utc_now_iso(),
                 },
                 {
                     "Status_select": "Queued",
+                    "Status": "Queued",
                     "Command_Created": True,
                     "Processed_At": utc_now_iso(),
                 },
@@ -1733,23 +1763,27 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
                 "Linked_Command": [command_record_id],
                 "Command_ID": command_record_id,
                 "Status_select": "Queued",
+                "Status": "Queued",
                 "Command_Created": True,
                 "Processed_At": utc_now_iso(),
             },
             {
                 "Linked_Command": [command_record_id],
                 "Status_select": "Queued",
+                "Status": "Queued",
                 "Command_Created": True,
                 "Processed_At": utc_now_iso(),
             },
             {
                 "Command_ID": command_record_id,
                 "Status_select": "Queued",
+                "Status": "Queued",
                 "Command_Created": True,
                 "Processed_At": utc_now_iso(),
             },
             {
                 "Status_select": "Queued",
+                "Status": "Queued",
                 "Command_Created": True,
                 "Processed_At": utc_now_iso(),
             },
@@ -1764,6 +1798,7 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         "capability": mapped_capability,
         "workspace_id": workspace_id,
     }
+    
 # ============================================================
 # Capabilities registry
 # ============================================================
@@ -2260,13 +2295,33 @@ def create_event(evt: EventCreate) -> Dict[str, Any]:
 
 @app.post("/events/process")
 def process_events(limit: int = 50) -> Dict[str, Any]:
-    limit = _safe_limit(limit, default=10, minimum=1, maximum=100)
+    limit = _safe_limit(limit, default=50, minimum=1, maximum=100)
 
-    records, meta = _safe_records_from_view(
-        EVENTS_TABLE_NAME,
-        EVENTS_VIEW_NAME or "Queue",
-        limit,
-    )
+    formula = "OR({Status_select}='New',{Status_select}='Queued')"
+
+    try:
+        records = airtable_list_filtered(
+            EVENTS_TABLE_NAME,
+            formula=formula,
+            view_name=EVENTS_VIEW_NAME or "Queue",
+            max_records=limit,
+        )
+        meta = {
+            "ok": True,
+            "table": EVENTS_TABLE_NAME,
+            "view": EVENTS_VIEW_NAME or "Queue",
+            "mode": "formula+view",
+            "formula": formula,
+        }
+    except Exception as e:
+        records, meta = _safe_records_from_view(
+            EVENTS_TABLE_NAME,
+            EVENTS_VIEW_NAME or "Queue",
+            limit,
+        )
+        meta["fallback_reason"] = repr(e)
+
+    print(f"[events/process] fetched={len(records)} meta={meta}")
 
     scanned = 0
     created = 0
@@ -2287,13 +2342,23 @@ def process_events(limit: int = 50) -> Dict[str, Any]:
         scanned += 1
         processed_ids.append(event_id)
 
+        print(
+            f"[events/process] handling event_id={event_id} "
+            f"status={status} "
+            f"mapped={fields.get('Mapped_Capability')} "
+            f"name={fields.get('Name')}"
+        )
+
         res = _create_command_from_event(event_record)
 
         if res.get("ok"):
             created += 1
+            print(f"[events/process] success event_id={event_id} res={res}")
         else:
             failed += 1
             errors.append(f"{event_id}: {res.get('error')}")
+            print(f"[events/process] failed event_id={event_id} res={res}")
+
             _airtable_update_best_effort(
                 EVENTS_TABLE_NAME,
                 event_id,
@@ -2302,14 +2367,17 @@ def process_events(limit: int = 50) -> Dict[str, Any]:
                         "Status_select": "Error",
                         "Status": "Error",
                         "Processed_At": utc_now_iso(),
+                        "Error_Message": str(res.get("error") or "event_processing_failed"),
                     },
                     {
                         "Status_select": "Error",
                         "Processed_At": utc_now_iso(),
+                        "Error_Message": str(res.get("error") or "event_processing_failed"),
                     },
                     {
                         "Status": "Error",
                         "Processed_At": utc_now_iso(),
+                        "Error_Message": str(res.get("error") or "event_processing_failed"),
                     },
                     {
                         "Status_select": "Error",
@@ -2320,7 +2388,7 @@ def process_events(limit: int = 50) -> Dict[str, Any]:
                 ],
             )
 
-    return {
+    result = {
         "ok": True,
         "source": meta,
         "scanned": scanned,
@@ -2331,6 +2399,10 @@ def process_events(limit: int = 50) -> Dict[str, Any]:
         "errors": errors[:10],
         "ts": utc_now_iso(),
     }
+
+    print(f"[events/process] result={result}")
+    return result
+    
 # ============================================================
 # Run endpoint
 # ============================================================
