@@ -23,7 +23,6 @@ from app.capabilities.commands_tick import run as capability_commands_tick
 from app.capabilities.escalation_dispatch import capability_escalation_dispatch
 from app.capabilities.health_tick import run as capability_health_tick
 from app.capabilities.http_exec import capability_http_exec
-from app.capabilities.sla_machine import run as capability_sla_machine
 from app.policies import get_policies
 
 
