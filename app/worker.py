@@ -2630,8 +2630,16 @@ def process_events(limit: int = 50) -> Dict[str, Any]:
             created += 1
             print(f"[events/process] success event_id={event_id} res={res}")
         else:
+            error_code = str(res.get("error") or "")
+
+            if error_code.startswith("legacy_or_disallowed_capability:"):
+                skipped += 1
+                errors.append(f"{event_id}: {error_code}")
+                print(f"[events/process] ignored event_id={event_id} res={res}")
+                continue
+
             failed += 1
-            errors.append(f"{event_id}: {res.get('error')}")
+            errors.append(f"{event_id}: {error_code or 'event_processing_failed'}")
             print(f"[events/process] failed event_id={event_id} res={res}")
 
             _airtable_update_best_effort(
@@ -2642,17 +2650,17 @@ def process_events(limit: int = 50) -> Dict[str, Any]:
                         "Status_select": "Error",
                         "Status": "Error",
                         "Processed_At": utc_now_iso(),
-                        "Error_Message": str(res.get("error") or "event_processing_failed"),
+                        "Error_Message": error_code or "event_processing_failed",
                     },
                     {
                         "Status_select": "Error",
                         "Processed_At": utc_now_iso(),
-                        "Error_Message": str(res.get("error") or "event_processing_failed"),
+                        "Error_Message": error_code or "event_processing_failed",
                     },
                     {
                         "Status": "Error",
                         "Processed_At": utc_now_iso(),
-                        "Error_Message": str(res.get("error") or "event_processing_failed"),
+                        "Error_Message": error_code or "event_processing_failed",
                     },
                     {
                         "Status_select": "Error",
