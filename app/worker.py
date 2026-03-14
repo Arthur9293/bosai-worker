@@ -57,6 +57,7 @@ RUN_MAX_SECONDS = float((os.getenv("RUN_MAX_SECONDS", "30") or "30").strip())
 HTTP_TIMEOUT_SECONDS = float((os.getenv("HTTP_TIMEOUT_SECONDS", "20") or "20").strip())
 RUN_LOCK_TTL_SECONDS = int((os.getenv("RUN_LOCK_TTL_SECONDS", "600") or "600").strip())
 COMMAND_LOCK_TTL_MIN = int((os.getenv("COMMAND_LOCK_TTL_MIN", "10") or "10").strip())
+CHAIN_MAX_DEPTH = int((os.getenv("CHAIN_MAX_DEPTH", "5") or "5").strip())
 
 RUN_SHARED_SECRET = os.getenv("RUN_SHARED_SECRET", "").strip()
 SCHEDULER_SECRET = os.getenv("SCHEDULER_SECRET", "").strip()
@@ -1517,23 +1518,61 @@ def _validate_command_input(capability: str, cmd_input: Dict[str, Any]) -> Tuple
         return True, normalized, None
 
     return True, normalized, None
+
+def _count_chain_depth(idempotency_key: str) -> int:
+    if not idempotency_key:
+        return 0
+    return str(idempotency_key).count(":next:")
+
+
+def _infer_root_event_id(fields: Dict[str, Any], parent_idempotency_key: str) -> str:
+    direct = str(fields.get("Root_Event_ID") or "").strip()
+    if direct:
+        return direct
+
+    source_event = fields.get("Source_Event")
+    if isinstance(source_event, list) and source_event:
+        return str(source_event[0] or "").strip()
+
+    idem = str(parent_idempotency_key or "").strip()
+    if idem.startswith("evt:"):
+        parts = idem.split(":")
+        if len(parts) >= 2:
+            return str(parts[1] or "").strip()
+
+    return ""
     
 def _spawn_next_commands_from_result(
     parent_command_id: str,
     parent_idempotency_key: str,
     workspace_id: str,
     result_obj: Dict[str, Any],
+    root_event_id: str = "",
 ) -> Dict[str, Any]:
     if not isinstance(result_obj, dict):
+        return {"ok": True, "spawned": 0, "skipped": 0, "errors": []}
+
+    if bool(result_obj.get("terminal")):
         return {"ok": True, "spawned": 0, "skipped": 0, "errors": []}
 
     next_commands = result_obj.get("next_commands")
     if not isinstance(next_commands, list) or not next_commands:
         return {"ok": True, "spawned": 0, "skipped": 0, "errors": []}
 
+    current_depth = _count_chain_depth(parent_idempotency_key)
+    if current_depth >= CHAIN_MAX_DEPTH:
+        return {
+            "ok": True,
+            "spawned": 0,
+            "skipped": len(next_commands),
+            "errors": [f"max_chain_depth_reached:{CHAIN_MAX_DEPTH}"],
+        }
+
     spawned = 0
     skipped = 0
     errors: List[str] = []
+
+    flow_id = str(root_event_id or parent_idempotency_key).strip() or parent_idempotency_key
 
     for idx, item in enumerate(next_commands, start=1):
         if not isinstance(item, dict):
@@ -1578,6 +1617,19 @@ def _spawn_next_commands_from_result(
                     "Idempotency_Key": child_idem,
                     "Workspace_ID": workspace_id,
                     "Parent_Command_ID": parent_command_id,
+                    "Root_Event_ID": root_event_id,
+                    "Step_Index": current_depth + idx,
+                    "Flow_ID": flow_id,
+                },
+                {
+                    "Capability": capability,
+                    "Status_select": "Queued",
+                    "Priority": priority,
+                    "Input_JSON": json.dumps(cmd_input, ensure_ascii=False),
+                    "Idempotency_Key": child_idem,
+                    "Workspace_ID": workspace_id,
+                    "Parent_Command_ID": parent_command_id,
+                    "Flow_ID": flow_id,
                 },
                 {
                     "Capability": capability,
@@ -1607,7 +1659,11 @@ def _spawn_next_commands_from_result(
         "spawned": spawned,
         "skipped": skipped,
         "errors": errors[:10],
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "max_depth": CHAIN_MAX_DEPTH,
     }
+    
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     max_cmds = int(req.max_commands or 0) or 5
     if POLICY_MAX_TOOL_CALLS > 0:
@@ -1789,15 +1845,20 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                 continue
     
             workspace_id = str(fields.get("Workspace_ID") or "production").strip() or "production"
+            root_event_id = _infer_root_event_id(fields, idem)
+
             spawn_res = _spawn_next_commands_from_result(
                 parent_command_id=cid,
                 parent_idempotency_key=idem,
                 workspace_id=workspace_id,
                 result_obj=result_obj,
+                root_event_id=root_event_id,
             )
 
             if isinstance(result_obj, dict):
                 result_obj["spawn_summary"] = spawn_res
+                result_obj["flow_id"] = spawn_res.get("flow_id")
+                result_obj["root_event_id"] = root_event_id
 
             _command_mark_done_best_effort(cid, run_record_id, result_obj)
             succeeded += 1
@@ -1890,6 +1951,36 @@ def capability_chain_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]
                 },
             }
         ],
+        "run_record_id": run_record_id,
+    }
+
+def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    payload = req.input or {}
+    mode = str(payload.get("mode") or "notify").strip().lower()
+
+    if mode == "notify":
+        return {
+            "ok": True,
+            "decision": "send_http_ping",
+            "reason": "demo_notify_path",
+            "next_commands": [
+                {
+                    "capability": "http_exec",
+                    "priority": 1,
+                    "input": {
+                        "url": "https://httpbin.org/get",
+                        "method": "GET",
+                    },
+                }
+            ],
+            "run_record_id": run_record_id,
+        }
+
+    return {
+        "ok": True,
+        "terminal": True,
+        "decision": "stop",
+        "reason": "demo_no_action_needed",
         "run_record_id": run_record_id,
     }
     
@@ -2187,8 +2278,8 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         "idempotency_key": effective_idempotency_key,
     }
     
-EVENT_CAPABILITY_ALLOWLIST = {"http_exec", "chain_demo"}
-EXECUTABLE_CAPABILITY_ALLOWLIST = {"http_exec", "chain_demo"}
+EVENT_CAPABILITY_ALLOWLIST = {"http_exec", "chain_demo", "decision_demo"}
+EXECUTABLE_CAPABILITY_ALLOWLIST = {"http_exec", "chain_demo", "decision_demo"}
     
 # ============================================================
 # Capabilities registry
@@ -2208,6 +2299,7 @@ CAPABILITIES = {
     "command_orchestrator": capability_command_orchestrator,
     "event_engine": lambda req, run_record_id: process_events(limit=20),
     "chain_demo": capability_chain_demo,
+    "decision_demo": capability_decision_demo,
 }
 
 
