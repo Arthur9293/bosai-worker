@@ -1600,15 +1600,26 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                 }
             )
 
-            _command_lock_heartbeat(cid, lock_token)
-            result_obj = fn(cmd_req, run_record_id)
-          # vérifie que le worker possède toujours le lock
-            if not _worker_still_owns_lock(cid, req.worker, lock_token):
-                blocked += 1
-                errors.append(f"{cid}: lock_lost_before_finalize")
-                continue
-            _command_mark_done_best_effort(cid, run_record_id, result_obj)
-            succeeded += 1
+           _command_lock_heartbeat(cid, lock_token)
+           result_obj = fn(cmd_req, run_record_id)
+
+           if not _worker_still_owns_lock(cid, req.worker, lock_token):
+               blocked += 1
+
+               _command_mark_retry_or_dead_best_effort(
+                   cid,
+                   run_record_id,
+                   fields,
+                   "lock_lost_before_finalize",
+               )
+
+               _release_command_lock_best_effort(cid)
+
+               errors.append(f"{cid}: lock_lost_before_finalize")
+               continue
+
+               _command_mark_done_best_effort(cid, run_record_id, result_obj)
+               succeeded += 1
 
         except HTTPException as e:
             msg = str(e.detail)
