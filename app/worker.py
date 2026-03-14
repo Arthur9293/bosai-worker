@@ -1586,9 +1586,9 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             errors.append(f"{cid}: {validation_error or 'invalid_command_input'}")
             continue
 
-                executed += 1
+        executed += 1
 
-                try:
+        try:
             cmd_req = RunRequest.from_payload(
                 {
                     "worker": req.worker,
