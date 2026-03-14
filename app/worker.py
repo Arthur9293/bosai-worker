@@ -1600,6 +1600,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                 }
             )
 
+            _command_lock_heartbeat(cid, lock_token)
             result_obj = fn(cmd_req, run_record_id)
           # vérifie que le worker possède toujours le lock
             if not _worker_still_owns_lock(cid, req.worker, lock_token):
