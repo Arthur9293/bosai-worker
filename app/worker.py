@@ -847,7 +847,158 @@ def capability_state_put(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     res = state_put(app_key, value, workspace_id=workspace_id)
     res["run_record_id"] = run_record_id
     return res
+# ============================================================
+# Flow state helpers
+# ============================================================
 
+def _flow_state_key(flow_id: str) -> str:
+    return f"flow:{flow_id}"
+
+
+def flow_state_get(flow_id: str, workspace_id: str = "production") -> Dict[str, Any]:
+    key = _flow_state_key(flow_id)
+
+    rec = airtable_find_first(
+        STATE_TABLE_NAME,
+        formula=f"AND({{App_Key}}='{key}',{{Workspace_ID}}='{workspace_id}')",
+        max_records=1,
+    )
+
+    if not rec:
+        return {
+            "ok": True,
+            "found": False,
+            "flow_id": flow_id,
+            "workspace_id": workspace_id,
+            "state": {
+                "flow_id": flow_id,
+                "root_event_id": flow_id,
+                "latest_status": "new",
+                "latest_decision": None,
+                "steps": [],
+            },
+        }
+
+    fields = rec.get("fields", {}) or {}
+    value = _json_load_maybe(fields.get("Value_JSON"))
+
+    if not isinstance(value, dict):
+        value = {}
+
+    value.setdefault("flow_id", flow_id)
+    value.setdefault("root_event_id", flow_id)
+    value.setdefault("latest_status", "running")
+    value.setdefault("latest_decision", None)
+    value.setdefault("steps", [])
+
+    if not isinstance(value.get("steps"), list):
+        value["steps"] = []
+
+    return {
+        "ok": True,
+        "found": True,
+        "flow_id": flow_id,
+        "workspace_id": workspace_id,
+        "record_id": rec.get("id"),
+        "state": value,
+    }
+
+
+def flow_state_put(flow_id: str, state_obj: Dict[str, Any], workspace_id: str = "production") -> Dict[str, Any]:
+    key = _flow_state_key(flow_id)
+
+    if not isinstance(state_obj, dict):
+        raise HTTPException(status_code=400, detail="flow_state_put state_obj must be an object")
+
+    state_obj = dict(state_obj)
+    state_obj.setdefault("flow_id", flow_id)
+    state_obj.setdefault("root_event_id", flow_id)
+    state_obj.setdefault("latest_status", "running")
+    state_obj.setdefault("latest_decision", None)
+    state_obj.setdefault("steps", [])
+
+    return state_put(key, state_obj, workspace_id=workspace_id)
+
+
+def flow_state_append_step(
+    flow_id: str,
+    step_obj: Dict[str, Any],
+    workspace_id: str = "production",
+) -> Dict[str, Any]:
+    if not isinstance(step_obj, dict):
+        raise HTTPException(status_code=400, detail="flow_state_append_step step_obj must be an object")
+
+    current = flow_state_get(flow_id, workspace_id=workspace_id)
+    state = dict(current.get("state") or {})
+
+    steps = state.get("steps")
+    if not isinstance(steps, list):
+        steps = []
+
+    step_copy = dict(step_obj)
+    step_copy.setdefault("recorded_at", utc_now_iso())
+
+    steps.append(step_copy)
+
+    state["steps"] = steps
+    state["flow_id"] = flow_id
+    state.setdefault("root_event_id", flow_id)
+
+    if "status" in step_copy:
+        state["latest_status"] = step_copy.get("status")
+
+    if "decision" in step_copy:
+        state["latest_decision"] = step_copy.get("decision")
+
+    saved = flow_state_put(flow_id, state, workspace_id=workspace_id)
+    saved["appended_step"] = step_copy
+    return saved
+
+
+def capability_flow_state_get(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    payload = req.input or {}
+    flow_id = str(payload.get("flow_id") or payload.get("root_event_id") or "").strip()
+    workspace_id = _resolve_workspace_id(req=req)
+
+    if not flow_id:
+        raise HTTPException(status_code=400, detail="flow_state_get missing flow_id")
+
+    result = flow_state_get(flow_id, workspace_id=workspace_id)
+    result["run_record_id"] = run_record_id
+    return result
+
+
+def capability_flow_state_put(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    payload = req.input or {}
+    flow_id = str(payload.get("flow_id") or payload.get("root_event_id") or "").strip()
+    state_obj = payload.get("state") or {}
+    workspace_id = _resolve_workspace_id(req=req)
+
+    if not flow_id:
+        raise HTTPException(status_code=400, detail="flow_state_put missing flow_id")
+    if not isinstance(state_obj, dict):
+        raise HTTPException(status_code=400, detail="flow_state_put state must be an object")
+
+    result = flow_state_put(flow_id, state_obj, workspace_id=workspace_id)
+    result["run_record_id"] = run_record_id
+    return result
+
+
+def capability_flow_state_append_step(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    payload = req.input or {}
+    flow_id = str(payload.get("flow_id") or payload.get("root_event_id") or "").strip()
+    step_obj = payload.get("step") or {}
+    workspace_id = _resolve_workspace_id(req=req)
+
+    if not flow_id:
+        raise HTTPException(status_code=400, detail="flow_state_append_step missing flow_id")
+    if not isinstance(step_obj, dict):
+        raise HTTPException(status_code=400, detail="flow_state_append_step step must be an object")
+
+    result = flow_state_append_step(flow_id, step_obj, workspace_id=workspace_id)
+    result["run_record_id"] = run_record_id
+    return result
+    
 def lock_acquire(lock_key: str, holder: str) -> Dict[str, Any]:
     app_key = f"lock:{lock_key}"
     rec = state_get_record(app_key)
@@ -1956,33 +2107,70 @@ def capability_chain_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]
 
 def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = req.input or {}
-    mode = str(payload.get("mode") or "notify").strip().lower()
 
-    if mode == "notify":
-        return {
-            "ok": True,
-            "decision": "send_http_ping",
-            "reason": "demo_notify_path",
-            "next_commands": [
-                {
-                    "capability": "http_exec",
-                    "priority": 1,
-                    "input": {
-                        "url": "https://httpbin.org/get",
-                        "method": "GET",
-                    },
-                }
-            ],
+    flow_id = str(payload.get("flow_id") or payload.get("root_event_id") or "").strip()
+    if not flow_id:
+        raise HTTPException(status_code=400, detail="decision_demo missing flow_id")
+
+    workspace_id = _resolve_workspace_id(req=req)
+    root_event_id = str(payload.get("root_event_id") or flow_id).strip() or flow_id
+
+    state_snapshot = flow_state_get(flow_id, workspace_id=workspace_id)
+    state_obj = state_snapshot.get("state") or {}
+    steps = state_obj.get("steps") or []
+
+    http_exec_done = [
+        s for s in steps
+        if isinstance(s, dict)
+        and s.get("capability") == "http_exec"
+        and s.get("status") == "done"
+    ]
+
+    if len(http_exec_done) >= 1:
+        decision = "send_http_ping"
+        reason = "demo_notify_path"
+        next_commands = [
+            {
+                "capability": "http_exec",
+                "priority": 1,
+                "input": {
+                    "url": "https://httpbin.org/get",
+                    "method": "GET",
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": len(steps) + 1,
+                    "goal": "decision_followup_ping",
+                },
+            }
+        ]
+    else:
+        decision = "wait_for_probe"
+        reason = "no_http_exec_done_yet"
+        next_commands = []
+
+    flow_state_append_step(
+        flow_id=flow_id,
+        workspace_id=workspace_id,
+        step_obj={
+            "step_index": len(steps) + 1,
+            "capability": "decision_demo",
+            "status": "done",
+            "decision": decision,
+            "reason": reason,
             "run_record_id": run_record_id,
-        }
+        },
+    )
 
     return {
         "ok": True,
-        "terminal": True,
-        "decision": "stop",
-        "reason": "demo_no_action_needed",
+        "decision": decision,
+        "reason": reason,
+        "next_commands": next_commands,
         "run_record_id": run_record_id,
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
     }
+    
     
 # ============================================================
 # Event Engine minimal V1
@@ -2281,37 +2469,98 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
 def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = req.input or {}
 
+    flow_id = str(payload.get("flow_id") or payload.get("root_event_id") or "").strip()
+    if not flow_id:
+        flow_id = str(payload.get("event_id") or "").strip()
+
+    if not flow_id:
+        flow_id = f"flow-{uuid.uuid4().hex[:12]}"
+
+    workspace_id = _resolve_workspace_id(req=req)
+    root_event_id = str(payload.get("root_event_id") or flow_id).strip() or flow_id
+
+    probe_url = str(payload.get("probe_url") or "https://httpbin.org/get").strip()
+    confirm_url = str(payload.get("confirm_url") or "https://httpbin.org/uuid").strip()
+
+    plan = [
+        {
+            "step": 1,
+            "capability": "http_exec",
+            "goal": "fetch_probe",
+            "url": probe_url,
+        },
+        {
+            "step": 2,
+            "capability": "http_exec",
+            "goal": "confirm_probe",
+            "url": confirm_url,
+        },
+    ]
+
+    flow_state_append_step(
+        flow_id=flow_id,
+        workspace_id=workspace_id,
+        step_obj={
+            "step_index": 0,
+            "capability": "planner_demo",
+            "status": "done",
+            "plan_size": len(plan),
+            "run_record_id": run_record_id,
+        },
+    )
+
     return {
         "ok": True,
         "message": "planner_demo_executed",
-        "plan": [
-            {"step": 1, "capability": "http_exec", "goal": "fetch_probe"},
-            {"step": 2, "capability": "http_exec", "goal": "confirm_probe"},
-        ],
+        "plan": plan,
         "next_commands": [
             {
                 "capability": "http_exec",
                 "priority": 1,
                 "input": {
-                    "url": "https://httpbin.org/get",
+                    "url": probe_url,
                     "method": "GET",
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": 1,
+                    "goal": "fetch_probe",
                 },
             },
             {
                 "capability": "http_exec",
                 "priority": 1,
                 "input": {
-                    "url": "https://httpbin.org/uuid",
+                    "url": confirm_url,
                     "method": "GET",
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": 2,
+                    "goal": "confirm_probe",
                 },
             },
         ],
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
         "run_record_id": run_record_id,
     }
     
-EVENT_CAPABILITY_ALLOWLIST = {"http_exec", "decision_demo","chain_demo", "planner_demo"}
-EXECUTABLE_CAPABILITY_ALLOWLIST = {"http_exec","decision_demo", "chain_demo", "planner_demo"}
-    
+EVENT_CAPABILITY_ALLOWLIST = {
+    "http_exec",
+    "chain_demo",
+    "planner_demo",
+    "decision_demo",
+}
+
+EXECUTABLE_CAPABILITY_ALLOWLIST = {
+    "http_exec",
+    "chain_demo",
+    "planner_demo",
+    "decision_demo",
+    "flow_state_get",
+    "flow_state_put",
+    "flow_state_append_step",
+}
+
 # ============================================================
 # Capabilities registry
 # ============================================================
@@ -2320,9 +2569,12 @@ CAPABILITIES = {
     "health_tick": capability_health_tick,
     "commands_tick": capability_commands_tick,
     "escalation_engine": capability_escalation_engine,
-    "http_exec": capability_http_exec,
+    "http_exec": capability_http_exec_wrapped,
     "state_get": capability_state_get,
     "state_put": capability_state_put,
+    "flow_state_get": capability_flow_state_get,
+    "flow_state_put": capability_flow_state_put,
+    "flow_state_append_step": capability_flow_state_append_step,
     "lock_acquire": capability_lock_acquire,
     "lock_release": capability_lock_release,
     "retry_queue": capability_retry_queue,
@@ -2330,8 +2582,8 @@ CAPABILITIES = {
     "command_orchestrator": capability_command_orchestrator,
     "event_engine": lambda req, run_record_id: process_events(limit=20),
     "chain_demo": capability_chain_demo,
-    "decision_demo": capability_decision_demo,
     "planner_demo": capability_planner_demo,
+    "decision_demo": capability_decision_demo,
 }
 
 
