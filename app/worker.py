@@ -2470,17 +2470,19 @@ def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, A
         terminal = False
 
     elif len(http_exec_done) == 1:
-        decision = "wait_for_probe"
-        reason = "only_one_http_exec_done"
+        decision = "send_second_http_ping"
+        reason = "need_second_probe"
         next_commands = [
             {
-                "capability": "decision_demo",
+                "capability": "http_exec",
                 "priority": 1,
                 "input": {
+                    "url": "https://httpbin.org/uuid",
+                    "method": "GET",
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
                     "step_index": len(steps) + 1,
-                    "goal": "final_decision_retry",
+                    "goal": "second_probe",
                 },
             }
         ]
