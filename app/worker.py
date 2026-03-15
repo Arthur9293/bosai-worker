@@ -2197,14 +2197,8 @@ def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, A
     ]
 
     if len(http_exec_done) == 0:
-        decision = "wait_for_probe"
-        reason = "no_http_exec_done_yet"
-        next_commands = []
-        terminal = False
-
-    elif len(http_exec_done) == 1:
         decision = "send_http_ping"
-        reason = "first_probe_confirmed"
+        reason = "bootstrap_first_probe"
         next_commands = [
             {
                 "capability": "http_exec",
@@ -2215,11 +2209,17 @@ def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, A
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
                     "step_index": len(steps) + 1,
-                    "goal": "decision_followup_ping",
+                    "goal": "first_probe",
                 },
             }
         ]
         terminal = False
+
+    elif len(http_exec_done) == 1:
+        decision = "complete_flow"
+        reason = "probe_confirmed"
+        next_commands = []
+        terminal = True
 
     else:
         decision = "complete_flow"
