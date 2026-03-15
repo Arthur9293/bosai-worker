@@ -1971,6 +1971,7 @@ def _infer_root_event_id(fields: Dict[str, Any], parent_idempotency_key: str) ->
 
     return ""
     
+
 def _spawn_next_commands_from_result(
     parent_command_id: str,
     parent_idempotency_key: str,
@@ -2001,7 +2002,19 @@ def _spawn_next_commands_from_result(
     skipped = 0
     errors: List[str] = []
 
-    flow_id = str(root_event_id or parent_idempotency_key).strip() or parent_idempotency_key
+    resolved_flow_id = str(
+        result_obj.get("flow_id")
+        or result_obj.get("root_event_id")
+        or root_event_id
+        or ""
+    ).strip()
+
+    resolved_root_event_id = str(
+        result_obj.get("root_event_id")
+        or root_event_id
+        or resolved_flow_id
+        or ""
+    ).strip()
 
     for idx, item in enumerate(next_commands, start=1):
         if not isinstance(item, dict):
@@ -2028,6 +2041,12 @@ def _spawn_next_commands_from_result(
             errors.append(f"next_commands[{idx}] invalid_input")
             continue
 
+        if resolved_flow_id and not str(cmd_input.get("flow_id") or "").strip():
+            cmd_input["flow_id"] = resolved_flow_id
+
+        if resolved_root_event_id and not str(cmd_input.get("root_event_id") or "").strip():
+            cmd_input["root_event_id"] = resolved_root_event_id
+
         child_idem = f"{parent_idempotency_key}:next:{idx}:{capability}"
 
         existing = find_command_by_idem(child_idem)
@@ -2046,9 +2065,9 @@ def _spawn_next_commands_from_result(
                     "Idempotency_Key": child_idem,
                     "Workspace_ID": workspace_id,
                     "Parent_Command_ID": parent_command_id,
-                    "Root_Event_ID": root_event_id,
+                    "Root_Event_ID": resolved_root_event_id,
                     "Step_Index": current_depth + idx,
-                    "Flow_ID": flow_id,
+                    "Flow_ID": resolved_flow_id,
                 },
                 {
                     "Capability": capability,
@@ -2058,7 +2077,7 @@ def _spawn_next_commands_from_result(
                     "Idempotency_Key": child_idem,
                     "Workspace_ID": workspace_id,
                     "Parent_Command_ID": parent_command_id,
-                    "Flow_ID": flow_id,
+                    "Flow_ID": resolved_flow_id,
                 },
                 {
                     "Capability": capability,
@@ -2088,8 +2107,8 @@ def _spawn_next_commands_from_result(
         "spawned": spawned,
         "skipped": skipped,
         "errors": errors[:10],
-        "flow_id": flow_id,
-        "root_event_id": root_event_id,
+        "flow_id": resolved_flow_id,
+        "root_event_id": resolved_root_event_id,
         "max_depth": CHAIN_MAX_DEPTH,
     }
     
