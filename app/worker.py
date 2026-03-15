@@ -469,6 +469,40 @@ def _json_load_maybe(val: Any) -> Dict[str, Any]:
     except Exception:
         return {}
 
+def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+
+    normalized = dict(payload)
+
+    flow_id = str(
+        normalized.get("flow_id")
+        or normalized.get("flowid")
+        or normalized.get("flowId")
+        or normalized.get("Flow_ID")
+        or normalized.get("FlowId")
+        or ""
+    ).strip()
+
+    root_event_id = str(
+        normalized.get("root_event_id")
+        or normalized.get("rooteventid")
+        or normalized.get("rootEventId")
+        or normalized.get("root_eventid")
+        or normalized.get("Root_Event_ID")
+        or normalized.get("RootEventId")
+        or ""
+    ).strip()
+
+    if flow_id:
+        normalized["flow_id"] = flow_id
+        normalized["flowid"] = flow_id
+
+    if root_event_id:
+        normalized["root_event_id"] = root_event_id
+        normalized["rooteventid"] = root_event_id
+
+    return normalized
 
 def _parse_float(val: Any) -> Optional[float]:
     if val is None:
@@ -522,10 +556,26 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(base, dict):
         base = {}
 
-    for direct_key in ("url", "http_target", "URL", "method", "headers", "body", "timeout"):
-        if direct_key in fields and fields.get(direct_key) is not None and direct_key not in base:
-            base[direct_key] = fields.get(direct_key)
+    field_alias_map = {
+        "url": ("url", "URL"),
+        "http_target": ("http_target", "httptarget", "Http_Target"),
+        "method": ("method", "HTTP_Method", "Http_Method"),
+        "headers": ("headers", "HTTP_Headers_JSON"),
+        "body": ("body", "HTTP_Payload_JSON"),
+        "timeout": ("timeout",),
+        "flow_id": ("flow_id", "flowid", "Flow_ID"),
+        "root_event_id": ("root_event_id", "rooteventid", "Root_Event_ID"),
+    }
 
+    for target_key, aliases in field_alias_map.items():
+        if target_key in base:
+            continue
+        for alias in aliases:
+            if alias in fields and fields.get(alias) is not None:
+                base[target_key] = fields.get(alias)
+                break
+
+    base = _normalize_flow_keys(base)
     return base
 
 def _resolve_workspace_id(
@@ -2104,9 +2154,14 @@ def capability_chain_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]
     }
 
 def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    payload = req.input or {}
+    payload = _normalize_flow_keys(req.input or {})
 
-    flow_id = str(payload.get("flow_id") or payload.get("root_event_id") or "").strip()
+    flow_id = str(
+        payload.get("flow_id")
+        or payload.get("root_event_id")
+        or ""
+    ).strip()
+
     if not flow_id:
         raise HTTPException(status_code=400, detail="decision_demo missing flow_id")
 
@@ -2124,9 +2179,15 @@ def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, A
         and s.get("status") == "done"
     ]
 
-    if len(http_exec_done) >= 1:
+    if len(http_exec_done) == 0:
+        decision = "wait_for_probe"
+        reason = "no_http_exec_done_yet"
+        next_commands = []
+        terminal = False
+
+    elif len(http_exec_done) == 1:
         decision = "send_http_ping"
-        reason = "demo_notify_path"
+        reason = "first_probe_confirmed"
         next_commands = [
             {
                 "capability": "http_exec",
@@ -2141,10 +2202,13 @@ def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, A
                 },
             }
         ]
+        terminal = False
+
     else:
-        decision = "wait_for_probe"
-        reason = "no_http_exec_done_yet"
+        decision = "complete_flow"
+        reason = "enough_http_exec_done"
         next_commands = []
+        terminal = True
 
     flow_state_append_step(
         flow_id=flow_id,
@@ -2164,11 +2228,11 @@ def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, A
         "decision": decision,
         "reason": reason,
         "next_commands": next_commands,
+        "terminal": terminal,
         "run_record_id": run_record_id,
         "flow_id": flow_id,
         "root_event_id": root_event_id,
     }
-    
     
 # ============================================================
 # Event Engine minimal V1
@@ -2476,11 +2540,14 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    payload = req.input or {}
+    payload = _normalize_flow_keys(req.input or {})
 
-    flow_id = str(payload.get("flow_id") or payload.get("root_event_id") or "").strip()
-    if not flow_id:
-        flow_id = str(payload.get("event_id") or "").strip()
+    flow_id = str(
+        payload.get("flow_id")
+        or payload.get("root_event_id")
+        or payload.get("event_id")
+        or ""
+    ).strip()
 
     if not flow_id:
         flow_id = f"flow-{uuid.uuid4().hex[:12]}"
@@ -2554,10 +2621,21 @@ def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, An
     }
     
 def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    payload = req.input or {}
+    payload = _normalize_flow_keys(req.input or {})
     workspace_id = _resolve_workspace_id(req=req)
 
-    result = capability_http_exec(req, run_record_id)
+    normalized_req = RunRequest.from_payload(
+        {
+            "worker": req.worker,
+            "capability": req.capability,
+            "idempotency_key": req.idempotency_key,
+            "priority": req.priority,
+            "dry_run": req.dry_run,
+            "input": payload,
+        }
+    )
+
+    result = capability_http_exec(normalized_req, run_record_id)
 
     flow_id = str(payload.get("flow_id") or payload.get("root_event_id") or "").strip()
     if flow_id:
@@ -2579,13 +2657,6 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         )
 
     return result
-    
-EVENT_CAPABILITY_ALLOWLIST = {
-    "http_exec",
-    "chain_demo",
-    "planner_demo",
-    "decision_demo",
-}
 
 EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "http_exec",
