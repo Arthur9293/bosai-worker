@@ -2542,24 +2542,7 @@ def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, An
         "run_record_id": run_record_id,
     }
     
-EVENT_CAPABILITY_ALLOWLIST = {
-    "http_exec",
-    "chain_demo",
-    "planner_demo",
-    "decision_demo",
-}
-
-EXECUTABLE_CAPABILITY_ALLOWLIST = {
-    "http_exec",
-    "chain_demo",
-    "planner_demo",
-    "decision_demo",
-    "flow_state_get",
-    "flow_state_put",
-    "flow_state_append_step",
-}
-
-    def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = req.input or {}
     workspace_id = _resolve_workspace_id(req=req)
 
@@ -2585,6 +2568,23 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
         )
 
     return result
+    
+EVENT_CAPABILITY_ALLOWLIST = {
+    "http_exec",
+    "chain_demo",
+    "planner_demo",
+    "decision_demo",
+}
+
+EXECUTABLE_CAPABILITY_ALLOWLIST = {
+    "http_exec",
+    "chain_demo",
+    "planner_demo",
+    "decision_demo",
+    "flow_state_get",
+    "flow_state_put",
+    "flow_state_append_step",
+}
         
 # ============================================================
 # Capabilities registry
