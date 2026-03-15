@@ -3047,7 +3047,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             pass
 
         # 4) Après un http_exec utile, relancer decision_demo
-        if goal in ("first_probe", "confirm_probe", "second_probe"):
+        if goal in ("first_probe", "fetch_probe", "confirm_probe", "second_probe"):
             next_commands = [
                 {
                     "capability": "decision_demo",
