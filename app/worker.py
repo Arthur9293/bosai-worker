@@ -2469,21 +2469,21 @@ def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, A
         ]
         terminal = False
 
-   elif len(http_exec_done) == 1:
+    elif len(http_exec_done) == 1:
         decision = "wait_for_probe"
         reason = "only_one_http_exec_done"
         next_commands = [
-            {   
-                 "capability": "decision_demo",
-                 "priority": 1,
-                 "input": {
-                     "flow_id": flow_id,
-                     "root_event_id": root_event_id,
-                     "step_index": len(steps) + 1,
-                     "goal": "final_decision_retry",
-                 },
-             }
-         ]
+            {
+                "capability": "decision_demo",
+                "priority": 1,
+                "input": {
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": len(steps) + 1,
+                    "goal": "final_decision_retry",
+                },
+            }
+        ]
         terminal = False
 
     elif len(http_exec_done) >= 2:
