@@ -2942,22 +2942,13 @@ def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, An
                     "goal": "confirm_probe",
                 },
             },
-            {
-                "capability": "decision_demo",
-                "priority": 1,
-                "input": {
-                    "flow_id": flow_id,
-                    "root_event_id": root_event_id,
-                    "step_index": 3,
-                    "goal": "final_decision",
-                },
-            },
         ],
         "flow_id": flow_id,
         "root_event_id": root_event_id,
         "run_record_id": run_record_id,
     }
     
+
 def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
     workspace_id = _resolve_workspace_id(req=req)
@@ -2976,6 +2967,10 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
     result = capability_http_exec(normalized_req, run_record_id)
 
     flow_id = str(payload.get("flow_id") or payload.get("root_event_id") or "").strip()
+    root_event_id = str(payload.get("root_event_id") or flow_id).strip() or flow_id
+
+    next_commands: List[Dict[str, Any]] = []
+
     if flow_id:
         step_index = payload.get("step_index")
         goal = payload.get("goal")
@@ -3021,6 +3016,26 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             )
         except Exception:
             pass
+
+        if str(goal or "").strip() == "confirm_probe":
+            next_commands = [
+                {
+                    "capability": "decision_demo",
+                    "priority": 1,
+                    "input": {
+                        "flow_id": flow_id,
+                        "root_event_id": root_event_id,
+                        "step_index": int(payload.get("step_index") or 0) + 1,
+                        "goal": "final_decision",
+                    },
+                }
+            ]
+
+    if next_commands:
+        result["next_commands"] = next_commands
+        result["terminal"] = False
+        result["flow_id"] = flow_id
+        result["root_event_id"] = root_event_id
 
     return result
 
