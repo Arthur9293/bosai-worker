@@ -3030,7 +3030,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         except Exception:
             pass
 
-        if str(goal or "").strip() == "confirm_probe":
+        if str(goal or "").strip() in ("confirm_probe", "second_probe"):
             next_commands = [
                 {
                     "capability": "decision_demo",
