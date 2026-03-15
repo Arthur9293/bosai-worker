@@ -2059,8 +2059,22 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
 
             if isinstance(result_obj, dict):
                 result_obj["spawn_summary"] = spawn_res
-                result_obj["flow_id"] = spawn_res.get("flow_id")
-                result_obj["root_event_id"] = root_event_id
+
+                if not result_obj.get("flow_id"):
+                    result_obj["flow_id"] = (
+                        spawn_res.get("flow_id")
+                        or cmd_input.get("flow_id")
+                        or cmd_input.get("flowid")
+                        or root_event_id
+                    )
+
+                if not result_obj.get("root_event_id"):
+                    result_obj["root_event_id"] = (
+                        spawn_res.get("root_event_id")
+                        or cmd_input.get("root_event_id")
+                        or cmd_input.get("rooteventid")
+                        or root_event_id
+                    )
 
             _command_mark_done_best_effort(cid, run_record_id, result_obj)
             succeeded += 1
