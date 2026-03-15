@@ -187,6 +187,7 @@ _HTTP_SESSION = requests.Session()
 def bosai_scheduler_loop():
     while True:
         try:
+            print("[scheduler] tick")
             # 1) Transformer les events en commands
             evt_payload = {
                 "worker": WORKER_NAME,
@@ -194,7 +195,6 @@ def bosai_scheduler_loop():
                 "idempotency_key": f"scheduler-events-{int(time.time())}",
                 "input": {}
             }
-                print("[scheduler] tick")
 
             # 2) Exécuter les commands en queue
             cmd_payload = {
