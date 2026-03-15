@@ -2342,6 +2342,17 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         or f"evt:{event_record_id}:{mapped_capability}"
     )
 
+    # PATCH: injecter automatiquement flow_id/root_event_id pour decision_demo
+    if mapped_capability == "decision_demo":
+        if not isinstance(command_input, dict):
+            command_input = {}
+
+        if not str(command_input.get("flow_id") or "").strip():
+            command_input["flow_id"] = event_record_id
+
+        if not str(command_input.get("root_event_id") or "").strip():
+            command_input["root_event_id"] = event_record_id
+
     existing = find_command_by_idem(effective_idempotency_key)
 
     if existing:
