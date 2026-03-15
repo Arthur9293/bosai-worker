@@ -2988,9 +2988,10 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
     next_commands: List[Dict[str, Any]] = []
 
     if flow_id:
-        step_index = payload.get("step_index")
-        goal = payload.get("goal")
+        step_index = int(payload.get("step_index") or 0)
+        goal = str(payload.get("goal") or "").strip()
 
+        # 1) Enregistrer le step http_exec dans le flow_state
         flow_state_append_step(
             flow_id=flow_id,
             workspace_id=workspace_id,
@@ -3008,16 +3009,27 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             },
         )
 
-        try:
-            current = flow_state_get(flow_id, workspace_id=workspace_id)
-            state_obj = current.get("state") or {}
-            steps = state_obj.get("steps") or []
+        # 2) Relire le state APRÈS append pour avoir le vrai count
+        current = flow_state_get(flow_id, workspace_id=workspace_id)
+        state_obj = current.get("state") or {}
+        steps = state_obj.get("steps") or []
 
+        http_exec_done_count = len(
+            [
+                s for s in steps
+                if isinstance(s, dict)
+                and s.get("capability") == "http_exec"
+                and s.get("status") == "done"
+            ]
+        )
+
+        # 3) Mettre à jour le registre Flows
+        try:
             flow_update(
                 flow_id=flow_id,
                 workspace_id=workspace_id,
                 status="Running",
-                current_step=int(step_index or 0),
+                current_step=step_index,
                 last_decision=f"http_exec_done:{goal or 'unknown'}",
                 memory_obj={
                     "last_http_exec": {
@@ -3026,6 +3038,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                         "status_code": result.get("status_code"),
                         "ok": result.get("ok"),
                     },
+                    "http_exec_done_count": http_exec_done_count,
                     "steps_count": len(steps),
                 },
                 linked_run=[run_record_id],
@@ -3033,7 +3046,8 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         except Exception:
             pass
 
-        if str(goal or "").strip() in ("first_probe", "confirm_probe", "second_probe"):
+        # 4) Après un http_exec utile, relancer decision_demo
+        if goal in ("first_probe", "confirm_probe", "second_probe"):
             next_commands = [
                 {
                     "capability": "decision_demo",
@@ -3041,17 +3055,20 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                     "input": {
                         "flow_id": flow_id,
                         "root_event_id": root_event_id,
-                        "step_index": int(payload.get("step_index") or 0) + 1,
+                        "step_index": step_index + 1,
                         "goal": "final_decision",
                     },
                 }
             ]
 
+        # 5) Réinjecter flow_id/root_event_id dans le résultat
+        result["flow_id"] = flow_id
+        result["root_event_id"] = root_event_id
+        result["http_exec_done_count"] = http_exec_done_count
+
     if next_commands:
         result["next_commands"] = next_commands
         result["terminal"] = False
-        result["flow_id"] = flow_id
-        result["root_event_id"] = root_event_id
 
     return result
 
