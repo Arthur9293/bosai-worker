@@ -194,6 +194,7 @@ def bosai_scheduler_loop():
                 "idempotency_key": f"scheduler-events-{int(time.time())}",
                 "input": {}
             }
+                print("[scheduler] tick")
 
             # 2) Exécuter les commands en queue
             cmd_payload = {
@@ -207,6 +208,7 @@ def bosai_scheduler_loop():
                 req_evt = RunRequest.from_payload(evt_payload)
                 evt_run_record_id, _ = create_system_run(req_evt)
                 evt_result = process_events(limit=20)
+                print(f"[scheduler] event_engine result={evt_result}")
                 if isinstance(evt_result, dict) and "run_record_id" not in evt_result:
                     evt_result["run_record_id"] = evt_run_record_id
                 finish_system_run(evt_run_record_id, "Done", evt_result)
@@ -221,6 +223,7 @@ def bosai_scheduler_loop():
                 req_cmd = RunRequest.from_payload(cmd_payload)
                 cmd_run_record_id, _ = create_system_run(req_cmd)
                 cmd_result = capability_command_orchestrator(req_cmd, cmd_run_record_id)
+                print(f"[scheduler] command_orchestrator result={cmd_result}")
                 if isinstance(cmd_result, dict) and "run_record_id" not in cmd_result:
                     cmd_result["run_record_id"] = cmd_run_record_id
                 finish_system_run(cmd_run_record_id, "Done", cmd_result)
@@ -2658,6 +2661,13 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
     return result
 
+EVENT_CAPABILITY_ALLOWLIST = {
+    "http_exec",
+    "chain_demo",
+    "planner_demo",
+    "decision_demo",
+}
+
 EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "http_exec",
     "chain_demo",
@@ -3172,29 +3182,32 @@ def create_event(evt: EventCreate) -> Dict[str, Any]:
 def process_events(limit: int = 50) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=50, minimum=1, maximum=100)
 
-    formula = "OR({Status_select}='New',{Status_select}='Queued')"
+    formula = "OR({Status_select}='New',{Status_select}='Queued',{Status}='New',{Status}='Queued')"
 
     try:
         records = airtable_list_filtered(
             EVENTS_TABLE_NAME,
             formula=formula,
-            view_name=EVENTS_VIEW_NAME or "Queue",
+            view_name=None,
             max_records=limit,
         )
         meta = {
             "ok": True,
             "table": EVENTS_TABLE_NAME,
-            "view": EVENTS_VIEW_NAME or "Queue",
-            "mode": "formula+view",
+            "view": None,
+            "mode": "formula_only",
             "formula": formula,
         }
     except Exception as e:
-        records, meta = _safe_records_from_view(
-            EVENTS_TABLE_NAME,
-            EVENTS_VIEW_NAME or "Queue",
-            limit,
-        )
-        meta["fallback_reason"] = repr(e)
+        records = []
+        meta = {
+            "ok": False,
+            "table": EVENTS_TABLE_NAME,
+            "view": None,
+            "mode": "formula_only_failed",
+            "formula": formula,
+            "error": repr(e),
+        }
 
     print(f"[events/process] fetched={len(records)} meta={meta}")
 
