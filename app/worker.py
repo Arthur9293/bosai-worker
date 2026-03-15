@@ -1,6 +1,4 @@
-# app/worker.py — BOSAI Worker rebuilt bootstrap
-from __future__ import annotations
-
+# app/worker.py — BOSAI Worker rebuilt 
 import hashlib
 import hmac
 import json
@@ -2561,6 +2559,33 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "flow_state_append_step",
 }
 
+    def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    payload = req.input or {}
+    workspace_id = _resolve_workspace_id(req=req)
+
+    result = capability_http_exec(req, run_record_id)
+
+    flow_id = str(payload.get("flow_id") or payload.get("root_event_id") or "").strip()
+    if flow_id:
+        flow_state_append_step(
+            flow_id=flow_id,
+            workspace_id=workspace_id,
+            step_obj={
+                "step_index": payload.get("step_index"),
+                "capability": "http_exec",
+                "status": "done",
+                "goal": payload.get("goal"),
+                "url": payload.get("url") or payload.get("http_target"),
+                "result": {
+                    "status_code": result.get("status_code"),
+                    "ok": result.get("ok"),
+                },
+                "run_record_id": run_record_id,
+            },
+        )
+
+    return result
+        
 # ============================================================
 # Capabilities registry
 # ============================================================
