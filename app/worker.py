@@ -57,6 +57,7 @@ RUN_LOCK_TTL_SECONDS = int((os.getenv("RUN_LOCK_TTL_SECONDS", "600") or "600").s
 COMMAND_LOCK_TTL_MIN = int((os.getenv("COMMAND_LOCK_TTL_MIN", "10") or "10").strip())
 CHAIN_MAX_DEPTH = int((os.getenv("CHAIN_MAX_DEPTH", "5") or "5").strip())
 
+FLOWS_TABLE_NAME = os.getenv("FLOWS_TABLE_NAME", "Flows").strip()
 RUN_SHARED_SECRET = os.getenv("RUN_SHARED_SECRET", "").strip()
 SCHEDULER_SECRET = os.getenv("SCHEDULER_SECRET", "").strip()
 
@@ -1135,7 +1136,233 @@ def capability_lock_release(req: RunRequest, run_record_id: str) -> Dict[str, An
     res["run_record_id"] = run_record_id
     return res
 
+# ============================================================
+# Flows registry helpers
+# ============================================================
 
+def flow_get_record(flow_id: str, workspace_id: str = "production") -> Optional[Dict[str, Any]]:
+    if not flow_id:
+        return None
+    return airtable_find_first(
+        FLOWS_TABLE_NAME,
+        formula=f"AND({{Flow_ID}}='{flow_id}',{{Workspace_ID}}='{workspace_id}')",
+        max_records=1,
+    )
+
+
+def flow_create(
+    flow_id: str,
+    root_event_id: str,
+    workspace_id: str = "production",
+    goal: str = "",
+    status: str = "New",
+    current_step: int = 0,
+    last_decision: str = "",
+    plan_obj: Optional[Dict[str, Any]] = None,
+    memory_obj: Optional[Dict[str, Any]] = None,
+    result_obj: Optional[Dict[str, Any]] = None,
+    linked_run: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    now = utc_now_iso()
+
+    fields: Dict[str, Any] = {
+        "Flow_ID": flow_id,
+        "Root_Event_ID": root_event_id or flow_id,
+        "Goal": goal or "",
+        "Status_select": status or "New",
+        "Current_Step": int(current_step or 0),
+        "Last_Decision": last_decision or "",
+        "Plan_JSON": json.dumps(plan_obj or {}, ensure_ascii=False),
+        "Memory_JSON": json.dumps(memory_obj or {}, ensure_ascii=False),
+        "Result_JSON": json.dumps(result_obj or {}, ensure_ascii=False),
+        "Workspace_ID": workspace_id or "production",
+        "Started_At": now,
+        "Last_Updated_At": now,
+    }
+
+    if linked_run:
+        fields["Linked_Run"] = linked_run
+
+    record_id = airtable_create(FLOWS_TABLE_NAME, fields)
+
+    return {
+        "ok": True,
+        "record_id": record_id,
+        "flow_id": flow_id,
+        "workspace_id": workspace_id,
+        "mode": "create",
+    }
+
+
+def flow_update(
+    flow_id: str,
+    workspace_id: str = "production",
+    goal: Optional[str] = None,
+    status: Optional[str] = None,
+    current_step: Optional[int] = None,
+    last_decision: Optional[str] = None,
+    plan_obj: Optional[Dict[str, Any]] = None,
+    memory_obj: Optional[Dict[str, Any]] = None,
+    result_obj: Optional[Dict[str, Any]] = None,
+    linked_run: Optional[List[str]] = None,
+    finished: bool = False,
+) -> Dict[str, Any]:
+    rec = flow_get_record(flow_id, workspace_id=workspace_id)
+    if not rec:
+        return {
+            "ok": False,
+            "error": "flow_not_found",
+            "flow_id": flow_id,
+            "workspace_id": workspace_id,
+        }
+
+    fields: Dict[str, Any] = {
+        "Last_Updated_At": utc_now_iso(),
+    }
+
+    if goal is not None:
+        fields["Goal"] = goal
+
+    if status is not None:
+        fields["Status_select"] = status
+
+    if current_step is not None:
+        fields["Current_Step"] = int(current_step)
+
+    if last_decision is not None:
+        fields["Last_Decision"] = last_decision
+
+    if plan_obj is not None:
+        fields["Plan_JSON"] = json.dumps(plan_obj, ensure_ascii=False)
+
+    if memory_obj is not None:
+        fields["Memory_JSON"] = json.dumps(memory_obj, ensure_ascii=False)
+
+    if result_obj is not None:
+        fields["Result_JSON"] = json.dumps(result_obj, ensure_ascii=False)
+
+    if linked_run is not None:
+        fields["Linked_Run"] = linked_run
+
+    if finished:
+        fields["Finished_At"] = utc_now_iso()
+
+    airtable_update(FLOWS_TABLE_NAME, rec["id"], fields)
+
+    return {
+        "ok": True,
+        "record_id": rec["id"],
+        "flow_id": flow_id,
+        "workspace_id": workspace_id,
+        "mode": "update",
+    }
+
+
+def flow_get_or_create(
+    flow_id: str,
+    root_event_id: str,
+    workspace_id: str = "production",
+    goal: str = "",
+    linked_run: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    rec = flow_get_record(flow_id, workspace_id=workspace_id)
+    if rec:
+        return {
+            "ok": True,
+            "record_id": rec["id"],
+            "flow_id": flow_id,
+            "workspace_id": workspace_id,
+            "mode": "existing",
+        }
+
+    return flow_create(
+        flow_id=flow_id,
+        root_event_id=root_event_id,
+        workspace_id=workspace_id,
+        goal=goal,
+        status="Running",
+        current_step=0,
+        linked_run=linked_run,
+    )
+
+
+def complete_flow(
+    flow_id: str,
+    workspace_id: str = "production",
+    result_obj: Optional[Dict[str, Any]] = None,
+    last_decision: str = "complete_flow",
+    linked_run: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    return flow_update(
+        flow_id=flow_id,
+        workspace_id=workspace_id,
+        status="Completed",
+        last_decision=last_decision,
+        result_obj=result_obj or {"ok": True, "completed": True},
+        linked_run=linked_run,
+        finished=True,
+    )
+
+
+def fail_flow(
+    flow_id: str,
+    workspace_id: str = "production",
+    result_obj: Optional[Dict[str, Any]] = None,
+    last_decision: str = "fail_flow",
+    linked_run: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    return flow_update(
+        flow_id=flow_id,
+        workspace_id=workspace_id,
+        status="Failed",
+        last_decision=last_decision,
+        result_obj=result_obj or {"ok": False, "failed": True},
+        linked_run=linked_run,
+        finished=True,
+    )
+
+
+def capability_complete_flow_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    payload = _normalize_flow_keys(req.input or {})
+    flow_id = str(payload.get("flow_id") or payload.get("root_event_id") or "").strip()
+
+    if not flow_id:
+        raise HTTPException(status_code=400, detail="complete_flow_demo missing flow_id")
+
+    workspace_id = _resolve_workspace_id(req=req)
+    root_event_id = str(payload.get("root_event_id") or flow_id).strip() or flow_id
+
+    flow_state_append_step(
+        flow_id=flow_id,
+        workspace_id=workspace_id,
+        step_obj={
+            "step_index": payload.get("step_index"),
+            "capability": "complete_flow_demo",
+            "status": "done",
+            "decision": "complete_flow",
+            "run_record_id": run_record_id,
+        },
+    )
+
+    flow_result = {
+        "ok": True,
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "completed": True,
+        "message": "flow_completed",
+        "run_record_id": run_record_id,
+    }
+
+    complete_flow(
+        flow_id=flow_id,
+        workspace_id=workspace_id,
+        result_obj=flow_result,
+        last_decision="complete_flow",
+        linked_run=[run_record_id],
+    )
+
+    return flow_result
+    
 # ============================================================
 # Command queue helpers
 # ============================================================
@@ -2185,6 +2412,14 @@ def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, A
     workspace_id = _resolve_workspace_id(req=req)
     root_event_id = str(payload.get("root_event_id") or flow_id).strip() or flow_id
 
+    flow_get_or_create(
+        flow_id=flow_id,
+        root_event_id=root_event_id,
+        workspace_id=workspace_id,
+        goal=str(payload.get("goal") or "").strip(),
+        linked_run=[run_record_id],
+    )
+
     state_snapshot = flow_state_get(flow_id, workspace_id=workspace_id)
     state_obj = state_snapshot.get("state") or {}
     steps = state_obj.get("steps") or []
@@ -2216,16 +2451,27 @@ def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, A
         terminal = False
 
     elif len(http_exec_done) == 1:
-        decision = "complete_flow"
-        reason = "probe_confirmed"
+        decision = "wait_for_probe"
+        reason = "only_one_http_exec_done"
         next_commands = []
-        terminal = True
+        terminal = False
 
-    else:
+    elif len(http_exec_done) >= 2:
         decision = "complete_flow"
         reason = "enough_http_exec_done"
-        next_commands = []
-        terminal = True
+        next_commands = [
+            {
+                "capability": "complete_flow_demo",
+                "priority": 1,
+                "input": {
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": len(steps) + 1,
+                    "goal": "complete_flow",
+                },
+            }
+        ]
+        terminal = False
 
     flow_state_append_step(
         flow_id=flow_id,
@@ -2238,6 +2484,25 @@ def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, A
             "reason": reason,
             "run_record_id": run_record_id,
         },
+    )
+
+    flow_update(
+        flow_id=flow_id,
+        workspace_id=workspace_id,
+        status="Running" if decision != "complete_flow" else "Running",
+        current_step=len(steps) + 1,
+        last_decision=decision,
+        memory_obj={
+            "http_exec_done_count": len(http_exec_done),
+            "last_reason": reason,
+        },
+        result_obj={
+            "last_decision_result": {
+                "decision": decision,
+                "reason": reason,
+            }
+        },
+        linked_run=[run_record_id],
     )
 
     return {
@@ -2556,6 +2821,8 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         "idempotency_key": effective_idempotency_key,
     }
 
+
+
 def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
 
@@ -2571,6 +2838,7 @@ def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, An
 
     workspace_id = _resolve_workspace_id(req=req)
     root_event_id = str(payload.get("root_event_id") or flow_id).strip() or flow_id
+    goal = str(payload.get("goal") or "verify endpoint flow").strip()
 
     probe_url = str(payload.get("probe_url") or "https://httpbin.org/get").strip()
     confirm_url = str(payload.get("confirm_url") or "https://httpbin.org/uuid").strip()
@@ -2588,7 +2856,31 @@ def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, An
             "goal": "confirm_probe",
             "url": confirm_url,
         },
+        {
+            "step": 3,
+            "capability": "decision_demo",
+            "goal": "final_decision",
+        },
     ]
+
+    flow_get_or_create(
+        flow_id=flow_id,
+        root_event_id=root_event_id,
+        workspace_id=workspace_id,
+        goal=goal,
+        linked_run=[run_record_id],
+    )
+
+    flow_update(
+        flow_id=flow_id,
+        workspace_id=workspace_id,
+        status="Running",
+        current_step=0,
+        last_decision="planner_initialized",
+        plan_obj={"steps": plan},
+        memory_obj={"planner_initialized": True},
+        linked_run=[run_record_id],
+    )
 
     flow_state_append_step(
         flow_id=flow_id,
@@ -2631,6 +2923,16 @@ def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, An
                     "goal": "confirm_probe",
                 },
             },
+            {
+                "capability": "decision_demo",
+                "priority": 1,
+                "input": {
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": 3,
+                    "goal": "final_decision",
+                },
+            },
         ],
         "flow_id": flow_id,
         "root_event_id": root_event_id,
@@ -2656,14 +2958,17 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
     flow_id = str(payload.get("flow_id") or payload.get("root_event_id") or "").strip()
     if flow_id:
+        step_index = payload.get("step_index")
+        goal = payload.get("goal")
+
         flow_state_append_step(
             flow_id=flow_id,
             workspace_id=workspace_id,
             step_obj={
-                "step_index": payload.get("step_index"),
+                "step_index": step_index,
                 "capability": "http_exec",
                 "status": "done",
-                "goal": payload.get("goal"),
+                "goal": goal,
                 "url": payload.get("url") or payload.get("http_target"),
                 "result": {
                     "status_code": result.get("status_code"),
@@ -2673,6 +2978,31 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             },
         )
 
+        try:
+            current = flow_state_get(flow_id, workspace_id=workspace_id)
+            state_obj = current.get("state") or {}
+            steps = state_obj.get("steps") or []
+
+            flow_update(
+                flow_id=flow_id,
+                workspace_id=workspace_id,
+                status="Running",
+                current_step=int(step_index or 0),
+                last_decision=f"http_exec_done:{goal or 'unknown'}",
+                memory_obj={
+                    "last_http_exec": {
+                        "goal": goal,
+                        "step_index": step_index,
+                        "status_code": result.get("status_code"),
+                        "ok": result.get("ok"),
+                    },
+                    "steps_count": len(steps),
+                },
+                linked_run=[run_record_id],
+            )
+        except Exception:
+            pass
+
     return result
 
 EVENT_CAPABILITY_ALLOWLIST = {
@@ -2680,6 +3010,7 @@ EVENT_CAPABILITY_ALLOWLIST = {
     "chain_demo",
     "planner_demo",
     "decision_demo",
+    "complete_flow_demo",
 }
 
 EXECUTABLE_CAPABILITY_ALLOWLIST = {
@@ -2687,6 +3018,7 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "chain_demo",
     "planner_demo",
     "decision_demo",
+    "complete_flow_demo",
     "flow_state_get",
     "flow_state_put",
     "flow_state_append_step",
@@ -2715,6 +3047,7 @@ CAPABILITIES = {
     "chain_demo": capability_chain_demo,
     "planner_demo": capability_planner_demo,
     "decision_demo": capability_decision_demo,
+    "complete_flow_demo": capability_complete_flow_demo,
 }
 
 
