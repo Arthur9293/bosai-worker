@@ -2444,68 +2444,68 @@ def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, A
     steps = state_obj.get("steps") or []
 
     http_exec_done = [
-    s for s in steps
-    if isinstance(s, dict)
-    and s.get("capability") == "http_exec"
-    and s.get("status") == "done"
-]
+        s for s in steps
+        if isinstance(s, dict)
+        and s.get("capability") == "http_exec"
+        and s.get("status") == "done"
+    ]
 
     http_exec_done_count = len(http_exec_done)
 
     if http_exec_done_count == 0:
-    decision = "send_http_ping"
-    reason = "bootstrap_first_probe"
-    next_commands = [
-        {
-            "capability": "http_exec",
-            "priority": 1,
-            "input": {
-                "url": "https://httpbin.org/get",
-                "method": "GET",
-                "flow_id": flow_id,
-                "root_event_id": root_event_id,
-                "step_index": len(steps) + 1,
-                "goal": "first_probe",
-            },
-        }
-    ]
-    terminal = False
+        decision = "send_http_ping"
+        reason = "bootstrap_first_probe"
+        next_commands = [
+            {
+                "capability": "http_exec",
+                "priority": 1,
+                "input": {
+                    "url": "https://httpbin.org/get",
+                    "method": "GET",
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": len(steps) + 1,
+                    "goal": "first_probe",
+                },
+            }
+        ]
+        terminal = False
 
-elif http_exec_done_count == 1:
-    decision = "send_second_http_ping"
-    reason = "need_second_probe"
-    next_commands = [
-        {
-            "capability": "http_exec",
-            "priority": 1,
-            "input": {
-                "url": "https://httpbin.org/uuid",
-                "method": "GET",
-                "flow_id": flow_id,
-                "root_event_id": root_event_id,
-                "step_index": len(steps) + 1,
-                "goal": "second_probe",
-            },
-        }
-    ]
-    terminal = False
+    elif http_exec_done_count == 1:
+        decision = "send_second_http_ping"
+        reason = "need_second_probe"
+        next_commands = [
+            {
+                "capability": "http_exec",
+                "priority": 1,
+                "input": {
+                    "url": "https://httpbin.org/uuid",
+                    "method": "GET",
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": len(steps) + 1,
+                    "goal": "second_probe",
+                },
+            }
+        ]
+        terminal = False
 
-elif http_exec_done_count >= 2:
-    decision = "complete_flow"
-    reason = "enough_http_exec_done"
-    next_commands = [
-        {
-            "capability": "complete_flow_demo",
-            "priority": 1,
-            "input": {
-                "flow_id": flow_id,
-                "root_event_id": root_event_id,
-                "step_index": len(steps) + 1,
-                "goal": "complete_flow",
-            },
-        }
-    ]
-    terminal = False
+    else:
+        decision = "complete_flow"
+        reason = "enough_http_exec_done"
+        next_commands = [
+            {
+                "capability": "complete_flow_demo",
+                "priority": 1,
+                "input": {
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": len(steps) + 1,
+                    "goal": "complete_flow",
+                },
+            }
+        ]
+        terminal = False
 
     flow_state_append_step(
         flow_id=flow_id,
@@ -2523,11 +2523,11 @@ elif http_exec_done_count >= 2:
     flow_update(
         flow_id=flow_id,
         workspace_id=workspace_id,
-        status="Running" if decision != "complete_flow" else "Running",
+        status="Running",
         current_step=len(steps) + 1,
         last_decision=decision,
         memory_obj={
-            "http_exec_done_count": len(http_exec_done),
+            "http_exec_done_count": http_exec_done_count,
             "last_reason": reason,
         },
         result_obj={
@@ -2543,6 +2543,7 @@ elif http_exec_done_count >= 2:
         "ok": True,
         "decision": decision,
         "reason": reason,
+        "http_exec_done_count": http_exec_done_count,
         "next_commands": next_commands,
         "terminal": terminal,
         "run_record_id": run_record_id,
