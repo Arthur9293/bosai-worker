@@ -186,13 +186,69 @@ app.add_middleware(
 _HTTP_SESSION = requests.Session()
 
 def bosai_scheduler_loop():
-    print("[scheduler] internal scheduler disabled")
-    return
+    while True:
+        try:
+            print("[scheduler] tick")
 
+            try:
+                evt_payload = {
+                    "worker": WORKER_NAME,
+                    "capability": "event_engine",
+                    "idempotency_key": f"scheduler-events-{int(time.time())}",
+                    "input": {}
+                }
+                req_evt = RunRequest.from_payload(evt_payload)
+                evt_run_record_id, _ = create_system_run(req_evt)
+                evt_result = process_events(limit=20)
+                if isinstance(evt_result, dict) and "run_record_id" not in evt_result:
+                    evt_result["run_record_id"] = evt_run_record_id
+                finish_system_run(evt_run_record_id, "Done", evt_result)
+                print(f"[scheduler] event_engine result={evt_result}")
+            except Exception as e:
+                try:
+                    fail_system_run(evt_run_record_id, repr(e))
+                except Exception:
+                    pass
+                print("scheduler event_engine error:", repr(e))
+
+            try:
+                cmd_payload = {
+                    "worker": WORKER_NAME,
+                    "capability": "command_orchestrator",
+                    "idempotency_key": f"scheduler-commands-{int(time.time())}",
+                    "input": {
+                        "run_retry_queue": True,
+                        "run_lock_recovery": True
+                    },
+                    "max_commands": 10
+                }
+                req_cmd = RunRequest.from_payload(cmd_payload)
+                cmd_run_record_id, _ = create_system_run(req_cmd)
+                cmd_result = capability_command_orchestrator(req_cmd, cmd_run_record_id)
+                if isinstance(cmd_result, dict) and "run_record_id" not in cmd_result:
+                    cmd_result["run_record_id"] = cmd_run_record_id
+                finish_system_run(cmd_run_record_id, "Done", cmd_result)
+                print(f"[scheduler] command_orchestrator result={cmd_result}")
+            except Exception as e:
+                try:
+                    fail_system_run(cmd_run_record_id, repr(e))
+                except Exception:
+                    pass
+                print("scheduler command_orchestrator error:", repr(e))
+
+        except Exception as e:
+            print("scheduler crash:", repr(e))
+
+        time.sleep(10)
 
 @app.on_event("startup")
 def start_scheduler():
-    print("[startup] internal scheduler disabled")
+    thread = threading.Thread(
+        target=bosai_scheduler_loop,
+        daemon=True
+    )
+    thread.start()
+    print("[startup] internal scheduler enabled")
     
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
