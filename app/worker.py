@@ -1438,7 +1438,12 @@ def capability_complete_flow(req: RunRequest, run_record_id: str) -> Dict[str, A
     return final_result
 
 def capability_decision_router(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    payload = _normalize_flow_keys(req.input or {})
+    raw_input = req.input or {}
+
+    if not isinstance(raw_input, dict):
+        raw_input = {}
+
+    payload = _normalize_flow_keys(raw_input)
 
     flow_id = str(
         payload.get("flow_id")
