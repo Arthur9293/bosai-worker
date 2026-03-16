@@ -550,38 +550,48 @@ def _safe_records_from_view(table_name: str, view_name: str, limit: int) -> Tupl
     except Exception as e:
         return [], {"ok": False, "reason": "exception", "detail": repr(e), "table": table_name, "view": view_name}
 
-
 def _read_command_status(fields: Dict[str, Any]) -> str:
     return str(fields.get("Status_select", fields.get("Status", "")) or "").strip()
 
-
 def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
-    base = _json_load_maybe(fields.get("Input_JSON"))
+    base = {}
+
+    # 1) priorité aux JSON explicites
+    for source_key in ("Input_JSON", "Command_JSON", "Command_Input_JSON"):
+        parsed = _json_load_maybe(fields.get(source_key))
+        if isinstance(parsed, dict) and parsed:
+            base = parsed
+            break
+
     if not isinstance(base, dict):
         base = {}
 
     field_alias_map = {
-        "url": ("url", "URL"),
-        "http_target": ("http_target", "httptarget", "Http_Target"),
+        "url": ("url", "URL", "http_target", "Http_Target"),
+        "http_target": ("http_target", "Http_Target", "URL", "url"),
         "method": ("method", "HTTP_Method", "Http_Method"),
         "headers": ("headers", "HTTP_Headers_JSON"),
         "body": ("body", "HTTP_Payload_JSON"),
         "timeout": ("timeout",),
         "flow_id": ("flow_id", "flowid", "Flow_ID"),
         "root_event_id": ("root_event_id", "rooteventid", "Root_Event_ID"),
+        "step_index": ("step_index", "Step_Index"),
+        "goal": ("goal", "Goal"),
     }
 
     for target_key, aliases in field_alias_map.items():
-        if target_key in base:
+        if target_key in base and base.get(target_key) not in (None, ""):
             continue
+
         for alias in aliases:
-            if alias in fields and fields.get(alias) is not None:
-                base[target_key] = fields.get(alias)
+            value = fields.get(alias)
+            if value is not None and str(value).strip() != "":
+                base[target_key] = value
                 break
 
     base = _normalize_flow_keys(base)
     return base
-
+    
 def _resolve_workspace_id(
     req: Optional[RunRequest] = None,
     fields: Optional[Dict[str, Any]] = None,
