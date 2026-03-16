@@ -190,25 +190,29 @@ def bosai_scheduler_loop():
         try:
             print("[scheduler] tick")
 
+            evt_run_record_id = None
+            cmd_run_record_id = None
+
             try:
                 evt_payload = {
                     "worker": WORKER_NAME,
                     "capability": "event_engine",
                     "idempotency_key": f"scheduler-events-{int(time.time())}",
-                    "input": {}
+                    "input": {"limit": 20}
                 }
                 req_evt = RunRequest.from_payload(evt_payload)
                 evt_run_record_id, _ = create_system_run(req_evt)
-                evt_result = process_events(limit=20)
+                evt_result = capability_event_engine(req_evt, evt_run_record_id)
                 if isinstance(evt_result, dict) and "run_record_id" not in evt_result:
                     evt_result["run_record_id"] = evt_run_record_id
                 finish_system_run(evt_run_record_id, "Done", evt_result)
                 print(f"[scheduler] event_engine result={evt_result}")
             except Exception as e:
-                try:
-                    fail_system_run(evt_run_record_id, repr(e))
-                except Exception:
-                    pass
+                if evt_run_record_id:
+                    try:
+                        fail_system_run(evt_run_record_id, repr(e))
+                    except Exception:
+                        pass
                 print("scheduler event_engine error:", repr(e))
 
             try:
@@ -230,16 +234,18 @@ def bosai_scheduler_loop():
                 finish_system_run(cmd_run_record_id, "Done", cmd_result)
                 print(f"[scheduler] command_orchestrator result={cmd_result}")
             except Exception as e:
-                try:
-                    fail_system_run(cmd_run_record_id, repr(e))
-                except Exception:
-                    pass
+                if cmd_run_record_id:
+                    try:
+                        fail_system_run(cmd_run_record_id, repr(e))
+                    except Exception:
+                        pass
                 print("scheduler command_orchestrator error:", repr(e))
 
         except Exception as e:
             print("scheduler crash:", repr(e))
 
         time.sleep(10)
+
 
 @app.on_event("startup")
 def start_scheduler():
@@ -498,6 +504,27 @@ def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
         or ""
     ).strip()
 
+    goal = str(
+        normalized.get("goal")
+        or normalized.get("Goal")
+        or ""
+    ).strip()
+
+    raw_step_index = (
+        normalized.get("step_index")
+        or normalized.get("stepindex")
+        or normalized.get("stepIndex")
+        or normalized.get("Step_Index")
+        or normalized.get("StepIndex")
+    )
+
+    step_index = 0
+    try:
+        if raw_step_index is not None and str(raw_step_index).strip() != "":
+            step_index = int(raw_step_index)
+    except Exception:
+        step_index = 0
+
     if flow_id:
         normalized["flow_id"] = flow_id
         normalized["flowid"] = flow_id
@@ -505,6 +532,12 @@ def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
     if root_event_id:
         normalized["root_event_id"] = root_event_id
         normalized["rooteventid"] = root_event_id
+
+    if goal:
+        normalized["goal"] = goal
+
+    normalized["step_index"] = step_index
+    normalized["stepindex"] = step_index
 
     return normalized
 
@@ -573,9 +606,9 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         "headers": ("headers", "HTTP_Headers_JSON"),
         "body": ("body", "HTTP_Payload_JSON"),
         "timeout": ("timeout",),
-        "flow_id": ("flow_id", "flowid", "Flow_ID"),
-        "root_event_id": ("root_event_id", "rooteventid", "Root_Event_ID"),
-        "step_index": ("step_index", "Step_Index"),
+        "flow_id": ("flow_id", "flowid", "flowId", "Flow_ID"),
+        "root_event_id": ("root_event_id", "rooteventid", "rootEventId", "Root_Event_ID"),
+        "step_index": ("step_index", "stepindex", "stepIndex", "Step_Index"),
         "goal": ("goal", "Goal"),
     }
 
@@ -1387,8 +1420,20 @@ def capability_complete_flow(req: RunRequest, run_record_id: str) -> Dict[str, A
 
     workspace_id = _resolve_workspace_id(req=req)
     root_event_id = str(payload.get("root_event_id") or flow_id).strip() or flow_id
-    step_index = int(payload.get("step_index") or 0)
-    goal = str(payload.get("goal") or "finish").strip()
+    try:
+        step_index = int(
+        payload.get("step_index")
+        or payload.get("stepindex")
+        or 0
+    )
+    except Exception:
+        step_index = 0
+
+    goal = str(
+        payload.get("goal")
+        or payload.get("Goal")
+        or "finish"
+    ).strip()
 
     flow_state_append_step(
         flow_id=flow_id,
@@ -3195,10 +3240,21 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
     next_commands: List[Dict[str, Any]] = []
 
     if flow_id:
-        step_index = int(payload.get("step_index") or 0)
-        goal = str(payload.get("goal") or "").strip()
+        try:
+            step_index = int(
+                payload.get("step_index")
+                or payload.get("stepindex")
+                or 0
+            )
+        except Exception:
+            step_index = 0
 
-        # 1) Enregistrer le step http_exec dans le flow_state
+        goal = str(
+            payload.get("goal")
+            or payload.get("Goal")
+            or ""
+        ).strip()
+
         flow_state_append_step(
             flow_id=flow_id,
             workspace_id=workspace_id,
@@ -3216,7 +3272,6 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             },
         )
 
-        # 2) Relire le state APRÈS append pour avoir le vrai count
         current = flow_state_get(flow_id, workspace_id=workspace_id)
         state_obj = current.get("state") or {}
         steps = state_obj.get("steps") or []
@@ -3230,7 +3285,6 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             ]
         )
 
-        # 3) Mettre à jour le registre Flows
         try:
             flow_update(
                 flow_id=flow_id,
@@ -3253,14 +3307,10 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         except Exception:
             pass
 
-        # 4) Réinjecter flow_id/root_event_id dans le résultat
         result["flow_id"] = flow_id
         result["root_event_id"] = root_event_id
         result["http_exec_done_count"] = http_exec_done_count
 
-        # 5) Orchestration suivante :
-        #    - après 2 http_exec validés => finaliser directement
-        #    - sinon relancer decision_demo
         if http_exec_done_count >= 2:
             next_commands = [
                 {
@@ -3303,6 +3353,7 @@ EVENT_CAPABILITY_ALLOWLIST = {
     "decision_demo",
     "decision_router",
     "complete_flow_demo",
+    "complete_flow",
 }
 
 EXECUTABLE_CAPABILITY_ALLOWLIST = {
@@ -3318,6 +3369,18 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "flow_state_append_step",
 }
 
+def capability_event_engine(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    limit = 20
+    try:
+        raw_limit = (req.input or {}).get("limit", 20)
+        limit = _safe_limit(int(raw_limit), default=20, minimum=1, maximum=100)
+    except Exception:
+        limit = 20
+
+    result = process_events(limit=limit)
+    if isinstance(result, dict) and "run_record_id" not in result:
+        result["run_record_id"] = run_record_id
+    return result
 # ============================================================
 # Capabilities registry
 # ============================================================
@@ -3337,7 +3400,7 @@ CAPABILITIES = {
     "retry_queue": capability_retry_queue,
     "lock_recovery": capability_lock_recovery,
     "command_orchestrator": capability_command_orchestrator,
-    "event_engine": lambda req, run_record_id: process_events(limit=20),
+    "event_engine": capability_event_engine,
     "chain_demo": capability_chain_demo,
     "planner_demo": capability_planner_demo,
     "decision_demo": capability_decision_demo,
