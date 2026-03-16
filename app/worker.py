@@ -3326,7 +3326,6 @@ CAPABILITIES = {
     "decision_demo": capability_decision_demo,
     "decision_router": capability_decision_router,
     "complete_flow": capability_complete_flow_demo,
-    "complete_flow_demo": capability_complete_flow_demo,
 }
 
 # ============================================================
