@@ -3253,8 +3253,28 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         except Exception:
             pass
 
-        # 4) Après un http_exec utile, relancer decision_demo
-        if goal in ("first_probe", "fetch_probe", "confirm_probe", "second_probe"):
+        # 4) Réinjecter flow_id/root_event_id dans le résultat
+        result["flow_id"] = flow_id
+        result["root_event_id"] = root_event_id
+        result["http_exec_done_count"] = http_exec_done_count
+
+        # 5) Orchestration suivante :
+        #    - après 2 http_exec validés => finaliser directement
+        #    - sinon relancer decision_demo
+        if http_exec_done_count >= 2:
+            next_commands = [
+                {
+                    "capability": "complete_flow_demo",
+                    "priority": 1,
+                    "input": {
+                        "flow_id": flow_id,
+                        "root_event_id": root_event_id,
+                        "step_index": step_index + 1,
+                        "goal": "complete_flow",
+                    },
+                }
+            ]
+        elif goal in ("first_probe", "fetch_probe", "confirm_probe", "second_probe"):
             next_commands = [
                 {
                     "capability": "decision_demo",
@@ -3268,14 +3288,11 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                 }
             ]
 
-        # 5) Réinjecter flow_id/root_event_id dans le résultat
-        result["flow_id"] = flow_id
-        result["root_event_id"] = root_event_id
-        result["http_exec_done_count"] = http_exec_done_count
-
     if next_commands:
         result["next_commands"] = next_commands
         result["terminal"] = False
+    else:
+        result["terminal"] = True
 
     return result
     
