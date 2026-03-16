@@ -1362,7 +1362,199 @@ def capability_complete_flow_demo(req: RunRequest, run_record_id: str) -> Dict[s
     )
 
     return flow_result
-    
+
+def capability_complete_flow(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    payload = _normalize_flow_keys(req.input or {})
+
+    flow_id = str(
+        payload.get("flow_id")
+        or payload.get("root_event_id")
+        or ""
+    ).strip()
+
+    if not flow_id:
+        raise HTTPException(status_code=400, detail="complete_flow missing flow_id")
+
+    workspace_id = _resolve_workspace_id(req=req)
+    root_event_id = str(payload.get("root_event_id") or flow_id).strip() or flow_id
+    step_index = int(payload.get("step_index") or 0)
+    goal = str(payload.get("goal") or "finish").strip()
+
+    flow_state_append_step(
+        flow_id=flow_id,
+        workspace_id=workspace_id,
+        step_obj={
+            "step_index": step_index,
+            "capability": "complete_flow",
+            "status": "done",
+            "decision": "complete_flow",
+            "goal": goal,
+            "run_record_id": run_record_id,
+        },
+    )
+
+    final_result = {
+        "ok": True,
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "completed": True,
+        "final_status": "Completed",
+        "goal": goal,
+        "run_record_id": run_record_id,
+    }
+
+    complete_flow(
+        flow_id=flow_id,
+        workspace_id=workspace_id,
+        result_obj=final_result,
+        last_decision="complete_flow",
+        linked_run=[run_record_id],
+    )
+
+    try:
+        flow_update(
+            flow_id=flow_id,
+            workspace_id=workspace_id,
+            status="Completed",
+            current_step=step_index,
+            last_decision="complete_flow",
+            result_obj=final_result,
+            linked_run=[run_record_id],
+            finished=True,
+        )
+    except Exception:
+        pass
+
+    return final_result
+
+def capability_decision_router(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    payload = _normalize_flow_keys(req.input or {})
+
+    flow_id = str(
+        payload.get("flow_id")
+        or payload.get("root_event_id")
+        or ""
+    ).strip()
+
+    if not flow_id:
+        raise HTTPException(status_code=400, detail="decision_router missing flow_id")
+
+    workspace_id = _resolve_workspace_id(req=req)
+    root_event_id = str(payload.get("root_event_id") or flow_id).strip() or flow_id
+    step_index = int(payload.get("step_index") or 0)
+
+    state_snapshot = flow_state_get(flow_id, workspace_id=workspace_id)
+    state_obj = state_snapshot.get("state") or {}
+    steps = state_obj.get("steps") or []
+
+    http_exec_done_count = len(
+        [
+            s for s in steps
+            if isinstance(s, dict)
+            and s.get("capability") == "http_exec"
+            and s.get("status") == "done"
+        ]
+    )
+
+    if http_exec_done_count == 0:
+        decision = "send_first_probe"
+        reason = "no_http_exec_done_yet"
+        next_commands = [
+            {
+                "capability": "http_exec",
+                "priority": 1,
+                "input": {
+                    "url": "https://httpbin.org/get",
+                    "method": "GET",
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": step_index + 1,
+                    "goal": "first_probe",
+                },
+            }
+        ]
+        terminal = False
+
+    elif http_exec_done_count == 1:
+        decision = "send_second_probe"
+        reason = "one_http_exec_done"
+        next_commands = [
+            {
+                "capability": "http_exec",
+                "priority": 1,
+                "input": {
+                    "url": "https://httpbin.org/uuid",
+                    "method": "GET",
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": step_index + 1,
+                    "goal": "second_probe",
+                },
+            }
+        ]
+        terminal = False
+
+    else:
+        decision = "complete_flow"
+        reason = "enough_http_exec_done"
+        next_commands = [
+            {
+                "capability": "complete_flow",
+                "priority": 1,
+                "input": {
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": step_index + 1,
+                    "goal": "finish_flow",
+                },
+            }
+        ]
+        terminal = False
+
+    flow_state_append_step(
+        flow_id=flow_id,
+        workspace_id=workspace_id,
+        step_obj={
+            "step_index": step_index,
+            "capability": "decision_router",
+            "status": "done",
+            "decision": decision,
+            "reason": reason,
+            "http_exec_done_count": http_exec_done_count,
+            "run_record_id": run_record_id,
+        },
+    )
+
+    flow_update(
+        flow_id=flow_id,
+        workspace_id=workspace_id,
+        status="Running",
+        current_step=step_index,
+        last_decision=decision,
+        memory_obj={
+            "http_exec_done_count": http_exec_done_count,
+            "last_reason": reason,
+        },
+        result_obj={
+            "last_decision_result": {
+                "decision": decision,
+                "reason": reason,
+            }
+        },
+        linked_run=[run_record_id],
+    )
+
+    return {
+        "ok": True,
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "decision": decision,
+        "reason": reason,
+        "http_exec_done_count": http_exec_done_count,
+        "next_commands": next_commands,
+        "terminal": terminal,
+        "run_record_id": run_record_id,
+    }
 # ============================================================
 # Command queue helpers
 # ============================================================
@@ -3071,12 +3263,13 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         result["terminal"] = False
 
     return result
-
+    
 EVENT_CAPABILITY_ALLOWLIST = {
     "http_exec",
     "chain_demo",
     "planner_demo",
     "decision_demo",
+    "decision_router",
     "complete_flow_demo",
 }
 
@@ -3085,12 +3278,14 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "chain_demo",
     "planner_demo",
     "decision_demo",
+    "decision_router",
+    "complete_flow",
     "complete_flow_demo",
     "flow_state_get",
     "flow_state_put",
     "flow_state_append_step",
 }
-        
+
 # ============================================================
 # Capabilities registry
 # ============================================================
@@ -3114,9 +3309,10 @@ CAPABILITIES = {
     "chain_demo": capability_chain_demo,
     "planner_demo": capability_planner_demo,
     "decision_demo": capability_decision_demo,
+    "decision_router": capability_decision_router,
+    "complete_flow": capability_complete_flow_demo,
     "complete_flow_demo": capability_complete_flow_demo,
 }
-
 
 # ============================================================
 # Root / health
