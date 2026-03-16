@@ -3236,25 +3236,13 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
     flow_id = str(payload.get("flow_id") or payload.get("root_event_id") or "").strip()
     root_event_id = str(payload.get("root_event_id") or flow_id).strip() or flow_id
+    step_index = int(payload.get("step_index") or 0)
+    goal = str(payload.get("goal") or "").strip()
 
     next_commands: List[Dict[str, Any]] = []
 
     if flow_id:
-        try:
-            step_index = int(
-                payload.get("step_index")
-                or payload.get("stepindex")
-                or 0
-            )
-        except Exception:
-            step_index = 0
-
-        goal = str(
-            payload.get("goal")
-            or payload.get("Goal")
-            or ""
-        ).strip()
-
+        # 1) enregistrer le step http_exec dans le flow_state
         flow_state_append_step(
             flow_id=flow_id,
             workspace_id=workspace_id,
@@ -3272,6 +3260,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             },
         )
 
+        # 2) relire le vrai state après append
         current = flow_state_get(flow_id, workspace_id=workspace_id)
         state_obj = current.get("state") or {}
         steps = state_obj.get("steps") or []
@@ -3285,6 +3274,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             ]
         )
 
+        # 3) mise à jour registre flow
         try:
             flow_update(
                 flow_id=flow_id,
@@ -3307,10 +3297,12 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         except Exception:
             pass
 
+        # 4) réinjecter flow_id/root_event_id dans le résultat
         result["flow_id"] = flow_id
         result["root_event_id"] = root_event_id
         result["http_exec_done_count"] = http_exec_done_count
 
+        # 5) orchestration suivante
         if http_exec_done_count >= 2:
             next_commands = [
                 {
@@ -3324,7 +3316,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                     },
                 }
             ]
-        elif goal in ("first_probe", "fetch_probe", "confirm_probe", "second_probe"):
+        else:
             next_commands = [
                 {
                     "capability": "decision_demo",
@@ -3333,7 +3325,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                         "flow_id": flow_id,
                         "root_event_id": root_event_id,
                         "step_index": step_index + 1,
-                        "goal": "final_decision",
+                        "goal": "continue_flow",
                     },
                 }
             ]
