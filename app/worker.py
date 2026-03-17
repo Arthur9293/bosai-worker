@@ -3633,6 +3633,7 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         "decision_demo",
         "decision_router",
         "incident_router",
+        "retry_router",
         "sla_router",
         "complete_flow",
         "complete_flow_demo",
