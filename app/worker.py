@@ -2967,6 +2967,195 @@ def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, A
         "flow_id": flow_id,
         "root_event_id": root_event_id,
     }
+
+
+# ============================================================
+# Event helpers
+# ============================================================
+
+def _event_workspace_id(fields: Dict[str, Any]) -> str:
+    return str(fields.get("Workspace_ID") or "production").strip() or "production"
+
+
+def _event_effective_idempotency_key(
+    fields: Dict[str, Any],
+    event_record_id: str,
+    capability: str,
+) -> str:
+    return (
+        str(fields.get("Idempotency_Key") or "").strip()
+        or f"evt:{event_record_id}:{capability}"
+    )
+
+
+def _event_extract_mapped_capability(fields: Dict[str, Any]) -> str:
+    raw = fields.get("Mapped_Capability")
+
+    if isinstance(raw, dict):
+        return str(raw.get("name") or "").strip()
+
+    if isinstance(raw, list) and raw:
+        first_item = raw[0]
+        if isinstance(first_item, dict):
+            return str(first_item.get("name") or "").strip()
+        return str(first_item or "").strip()
+
+    return str(raw or "").strip()
+
+
+def _event_guess_http_capability(fields: Dict[str, Any], payload_guess: Dict[str, Any]) -> str:
+    if (
+        fields.get("http_target")
+        or fields.get("URL")
+        or fields.get("Http_Target")
+        or (isinstance(payload_guess, dict) and payload_guess.get("url"))
+    ):
+        return "http_exec"
+    return ""
+
+
+def _event_build_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
+    command_input = _json_load_maybe(fields.get("Command_Input_JSON"))
+    if not command_input:
+        command_input = _json_load_maybe(fields.get("Payload_JSON"))
+    if not isinstance(command_input, dict):
+        command_input = {}
+
+    http_target = str(
+        fields.get("http_target")
+        or fields.get("URL")
+        or fields.get("Http_Target")
+        or command_input.get("http_target")
+        or command_input.get("url")
+        or ""
+    ).strip()
+
+    if http_target and "url" not in command_input:
+        command_input["url"] = http_target
+    if http_target and "http_target" not in command_input:
+        command_input["http_target"] = http_target
+
+    http_method = str(
+        fields.get("HTTP_Method")
+        or fields.get("Http_Method")
+        or fields.get("method")
+        or command_input.get("method")
+        or ""
+    ).strip()
+
+    if http_method and "method" not in command_input:
+        command_input["method"] = http_method
+
+    return command_input
+
+
+def _event_mark_processed(
+    event_record_id: str,
+    *,
+    command_record_id: Optional[str] = None,
+    command_created: bool = True,
+    idempotency_key: str = "",
+) -> Dict[str, Any]:
+    candidates: List[Dict[str, Any]] = []
+
+    if command_record_id:
+        candidates.extend(
+            [
+                {
+                    "Linked_Command": [command_record_id],
+                    "Command_ID": command_record_id,
+                    "Status_select": "Processed",
+                    "Status": "Processed",
+                    "Command_Created": command_created,
+                    "Processed_At": utc_now_iso(),
+                    "Idempotency_Key": idempotency_key,
+                },
+                {
+                    "Linked_Command": [command_record_id],
+                    "Status_select": "Processed",
+                    "Status": "Processed",
+                    "Command_Created": command_created,
+                    "Processed_At": utc_now_iso(),
+                    "Idempotency_Key": idempotency_key,
+                },
+                {
+                    "Command_ID": command_record_id,
+                    "Status_select": "Processed",
+                    "Status": "Processed",
+                    "Command_Created": command_created,
+                    "Processed_At": utc_now_iso(),
+                    "Idempotency_Key": idempotency_key,
+                },
+            ]
+        )
+
+    candidates.append(
+        {
+            "Status_select": "Processed",
+            "Status": "Processed",
+            "Command_Created": command_created,
+            "Processed_At": utc_now_iso(),
+            "Idempotency_Key": idempotency_key,
+        }
+    )
+
+    return _airtable_update_best_effort(EVENTS_TABLE_NAME, event_record_id, candidates)
+
+
+def _event_mark_ignored(event_record_id: str, message: str) -> Dict[str, Any]:
+    return _airtable_update_best_effort(
+        EVENTS_TABLE_NAME,
+        event_record_id,
+        [
+            {
+                "Status_select": "Ignored",
+                "Status": "Ignored",
+                "Processed_At": utc_now_iso(),
+                "Error_Message": message,
+            },
+            {
+                "Status_select": "Ignored",
+                "Processed_At": utc_now_iso(),
+                "Error_Message": message,
+            },
+            {
+                "Status": "Ignored",
+                "Processed_At": utc_now_iso(),
+                "Error_Message": message,
+            },
+        ],
+    )
+
+
+def _event_mark_error(event_record_id: str, message: str) -> Dict[str, Any]:
+    return _airtable_update_best_effort(
+        EVENTS_TABLE_NAME,
+        event_record_id,
+        [
+            {
+                "Status_select": "Error",
+                "Status": "Error",
+                "Processed_At": utc_now_iso(),
+                "Error_Message": message,
+            },
+            {
+                "Status_select": "Error",
+                "Processed_At": utc_now_iso(),
+                "Error_Message": message,
+            },
+            {
+                "Status": "Error",
+                "Processed_At": utc_now_iso(),
+                "Error_Message": message,
+            },
+            {
+                "Status_select": "Error",
+            },
+            {
+                "Status": "Error",
+            },
+        ],
+    )
     
 # ============================================================
 # Event Engine minimal V1
@@ -3048,55 +3237,19 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
     if not event_record_id:
         return {"ok": False, "error": "missing_event_record_id"}
 
-    mapped_capability_raw = fields.get("Mapped_Capability")
-
-    if isinstance(mapped_capability_raw, dict):
-        mapped_capability = str(mapped_capability_raw.get("name") or "").strip()
-    elif isinstance(mapped_capability_raw, list) and mapped_capability_raw:
-        first_item = mapped_capability_raw[0]
-        if isinstance(first_item, dict):
-            mapped_capability = str(first_item.get("name") or "").strip()
-        else:
-            mapped_capability = str(first_item or "").strip()
-    else:
-        mapped_capability = str(mapped_capability_raw or "").strip()
-
     payload_guess = _json_load_maybe(fields.get("Payload_JSON"))
+    mapped_capability = _event_extract_mapped_capability(fields)
 
     if not mapped_capability:
-        if (
-            fields.get("http_target")
-            or fields.get("URL")
-            or fields.get("Http_Target")
-            or (isinstance(payload_guess, dict) and payload_guess.get("url"))
-        ):
-            mapped_capability = "http_exec"
+        mapped_capability = _event_guess_http_capability(fields, payload_guess)
 
     if not mapped_capability:
         return {"ok": False, "error": "missing_mapped_capability"}
 
     if mapped_capability not in EVENT_CAPABILITY_ALLOWLIST:
-        _airtable_update_best_effort(
-            EVENTS_TABLE_NAME,
+        _event_mark_ignored(
             event_record_id,
-            [
-                {
-                    "Status_select": "Ignored",
-                    "Status": "Ignored",
-                    "Processed_At": utc_now_iso(),
-                    "Error_Message": f"legacy_or_disallowed_capability:{mapped_capability}",
-                },
-                {
-                    "Status_select": "Ignored",
-                    "Processed_At": utc_now_iso(),
-                    "Error_Message": f"legacy_or_disallowed_capability:{mapped_capability}",
-                },
-                {
-                    "Status": "Ignored",
-                    "Processed_At": utc_now_iso(),
-                    "Error_Message": f"legacy_or_disallowed_capability:{mapped_capability}",
-                },
-            ],
+            f"legacy_or_disallowed_capability:{mapped_capability}",
         )
         return {
             "ok": False,
@@ -3104,95 +3257,29 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
             "event_id": event_record_id,
         }
 
-    workspace_id = str(fields.get("Workspace_ID") or "production").strip() or "production"
-
-    command_input = _json_load_maybe(fields.get("Command_Input_JSON"))
-    if not command_input:
-        command_input = _json_load_maybe(fields.get("Payload_JSON"))
-    if not isinstance(command_input, dict):
-        command_input = {}
-
-    http_target = str(
-        fields.get("http_target")
-        or fields.get("URL")
-        or fields.get("Http_Target")
-        or command_input.get("http_target")
-        or command_input.get("url")
-        or ""
-    ).strip()
-    if http_target and "url" not in command_input:
-        command_input["url"] = http_target
-    if http_target and "http_target" not in command_input:
-        command_input["http_target"] = http_target
-
-    http_method = str(
-        fields.get("HTTP_Method")
-        or fields.get("Http_Method")
-        or fields.get("method")
-        or command_input.get("method")
-        or ""
-    ).strip()
-    if http_method and "method" not in command_input:
-        command_input["method"] = http_method
-
-    effective_idempotency_key = (
-        str(fields.get("Idempotency_Key") or "").strip()
-        or f"evt:{event_record_id}:{mapped_capability}"
+    workspace_id = _event_workspace_id(fields)
+    command_input = _event_build_command_input(fields)
+    effective_idempotency_key = _event_effective_idempotency_key(
+        fields,
+        event_record_id,
+        mapped_capability,
     )
 
-    # PATCH: injecter automatiquement flow_id/root_event_id pour decision_demo
     if mapped_capability == "decision_demo":
-        if not isinstance(command_input, dict):
-            command_input = {}
-
         if not str(command_input.get("flow_id") or "").strip():
             command_input["flow_id"] = event_record_id
-
         if not str(command_input.get("root_event_id") or "").strip():
             command_input["root_event_id"] = event_record_id
 
     existing = find_command_by_idem(effective_idempotency_key)
-
     if existing:
         existing_id = str(existing.get("id") or "").strip()
 
-        _airtable_update_best_effort(
-            EVENTS_TABLE_NAME,
+        _event_mark_processed(
             event_record_id,
-            [
-                {
-                    "Linked_Command": [existing_id],
-                    "Command_ID": existing_id,
-                    "Status_select": "Processed",
-                    "Status": "Processed",
-                    "Command_Created": True,
-                    "Processed_At": utc_now_iso(),
-                    "Idempotency_Key": effective_idempotency_key,
-                },
-                {
-                    "Linked_Command": [existing_id],
-                    "Status_select": "Processed",
-                    "Status": "Processed",
-                    "Command_Created": True,
-                    "Processed_At": utc_now_iso(),
-                    "Idempotency_Key": effective_idempotency_key,
-                },
-                {
-                    "Command_ID": existing_id,
-                    "Status_select": "Processed",
-                    "Status": "Processed",
-                    "Command_Created": True,
-                    "Processed_At": utc_now_iso(),
-                    "Idempotency_Key": effective_idempotency_key,
-                },
-                {
-                    "Status_select": "Processed",
-                    "Status": "Processed",
-                    "Command_Created": True,
-                    "Processed_At": utc_now_iso(),
-                    "Idempotency_Key": effective_idempotency_key,
-                },
-            ],
+            command_record_id=existing_id,
+            command_created=True,
+            idempotency_key=effective_idempotency_key,
         )
 
         return {
@@ -3224,43 +3311,11 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
 
     command_record_id = str(create_res.get("record_id") or "").strip()
 
-    _airtable_update_best_effort(
-        EVENTS_TABLE_NAME,
+    _event_mark_processed(
         event_record_id,
-        [
-            {
-                "Linked_Command": [command_record_id],
-                "Command_ID": command_record_id,
-                "Status_select": "Processed",
-                "Status": "Processed",
-                "Command_Created": True,
-                "Processed_At": utc_now_iso(),
-                "Idempotency_Key": effective_idempotency_key,
-            },
-            {
-                "Linked_Command": [command_record_id],
-                "Status_select": "Processed",
-                "Status": "Processed",
-                "Command_Created": True,
-                "Processed_At": utc_now_iso(),
-                "Idempotency_Key": effective_idempotency_key,
-            },
-            {
-                "Command_ID": command_record_id,
-                "Status_select": "Processed",
-                "Status": "Processed",
-                "Command_Created": True,
-                "Processed_At": utc_now_iso(),
-                "Idempotency_Key": effective_idempotency_key,
-            },
-            {
-                "Status_select": "Processed",
-                "Status": "Processed",
-                "Command_Created": True,
-                "Processed_At": utc_now_iso(),
-                "Idempotency_Key": effective_idempotency_key,
-            },
-        ],
+        command_record_id=command_record_id,
+        command_created=True,
+        idempotency_key=effective_idempotency_key,
     )
 
     return {
@@ -3272,7 +3327,6 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         "workspace_id": workspace_id,
         "idempotency_key": effective_idempotency_key,
     }
-
 
 
 def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
@@ -4110,47 +4164,21 @@ def process_events(limit: int = 50) -> Dict[str, Any]:
         if res.get("ok"):
             created += 1
             print(f"[events/process] success event_id={event_id} res={res}")
-        else:
-            error_code = str(res.get("error") or "")
+            continue
 
-            if error_code.startswith("legacy_or_disallowed_capability:"):
-                skipped += 1
-                errors.append(f"{event_id}: {error_code}")
-                print(f"[events/process] ignored event_id={event_id} res={res}")
-                continue
+        error_code = str(res.get("error") or "")
 
-            failed += 1
-            errors.append(f"{event_id}: {error_code or 'event_processing_failed'}")
-            print(f"[events/process] failed event_id={event_id} res={res}")
+        if error_code.startswith("legacy_or_disallowed_capability:"):
+            skipped += 1
+            errors.append(f"{event_id}: {error_code}")
+            print(f"[events/process] ignored event_id={event_id} res={res}")
+            continue
 
-            _airtable_update_best_effort(
-                EVENTS_TABLE_NAME,
-                event_id,
-                [
-                    {
-                        "Status_select": "Error",
-                        "Status": "Error",
-                        "Processed_At": utc_now_iso(),
-                        "Error_Message": error_code or "event_processing_failed",
-                    },
-                    {
-                        "Status_select": "Error",
-                        "Processed_At": utc_now_iso(),
-                        "Error_Message": error_code or "event_processing_failed",
-                    },
-                    {
-                        "Status": "Error",
-                        "Processed_At": utc_now_iso(),
-                        "Error_Message": error_code or "event_processing_failed",
-                    },
-                    {
-                        "Status_select": "Error",
-                    },
-                    {
-                        "Status": "Error",
-                    },
-                ],
-            )
+        failed += 1
+        errors.append(f"{event_id}: {error_code or 'event_processing_failed'}")
+        print(f"[events/process] failed event_id={event_id} res={res}")
+
+        _event_mark_error(event_id, error_code or "event_processing_failed")
 
     result = {
         "ok": True,
