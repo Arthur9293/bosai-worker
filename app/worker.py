@@ -4071,22 +4071,19 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
         goal_lower = goal.lower()
 
-       if (
-           "incident" in goal_lower
-           or "sla" in goal_lower
-       ):
+        if "incident" in goal_lower or "sla" in   
             next_commands = [
                 {
-                    "capability": "complete_flow_demo",
-                    "priority": 1,
-                    "input": {
-                        "flow_id": flow_id,
-                        "root_event_id": root_event_id,
-                        "step_index": step_index + 1,
-                        "goal": "incident_flow_closed",
-                    },
-                }
-            ]
+                     "capability": "complete_flow_demo",
+                     "priority": 1,
+                     "input": {
+                         "flow_id": flow_id,
+                         "root_event_id": root_event_id,
+                         "step_index": step_index + 1,
+                         "goal": "incident_flow_closed",
+                     },
+                 }
+             ]
         elif http_exec_done_count >= 2:
             next_commands = [
                 {
