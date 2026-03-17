@@ -2979,6 +2979,160 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
         "run_record_id": run_record_id,
     }
 
+def capability_sla_router(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    payload = _normalize_flow_keys(req.input or {})
+    flow_id, root_event_id = _resolve_flow_ids(payload)
+
+    if not flow_id:
+        raise HTTPException(status_code=400, detail="sla_router missing flow_id")
+
+    workspace_id = _resolve_workspace_id(req=req)
+    step_index = _resolve_flow_step_index(payload, 0)
+
+    sla_status = str(payload.get("sla_status") or payload.get("status") or "warning").strip().lower()
+    remaining_minutes_raw = payload.get("sla_remaining_minutes")
+    target_url = str(
+        payload.get("target_url")
+        or payload.get("url")
+        or "https://httpbin.org/post"
+    ).strip()
+
+    try:
+        sla_remaining_minutes = float(remaining_minutes_raw) if remaining_minutes_raw is not None else None
+    except Exception:
+        sla_remaining_minutes = None
+
+    decision = ""
+    reason = ""
+    next_commands: List[Dict[str, Any]] = []
+    terminal = False
+
+    if sla_status in ("breached", "escalated"):
+        decision = "sla_breached_probe_and_close"
+        reason = "sla_breached_or_escalated"
+        next_commands = [
+            {
+                "capability": "http_exec",
+                "priority": 2,
+                "input": {
+                    "url": target_url,
+                    "method": "POST",
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": step_index + 1,
+                    "goal": "sla_probe",
+                    "body": {
+                        "flow_id": flow_id,
+                        "root_event_id": root_event_id,
+                        "sla_status": sla_status,
+                        "sla_remaining_minutes": sla_remaining_minutes,
+                        "run_record_id": run_record_id,
+                    },
+                },
+            },
+            {
+                "capability": "complete_flow_demo",
+                "priority": 1,
+                "input": {
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": step_index + 2,
+                    "goal": "sla_closed_after_probe",
+                },
+            },
+        ]
+
+    elif sla_status == "warning":
+        decision = "sla_warning_probe"
+        reason = "sla_warning_detected"
+        next_commands = [
+            {
+                "capability": "http_exec",
+                "priority": 1,
+                "input": {
+                    "url": target_url,
+                    "method": "POST",
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": step_index + 1,
+                    "goal": "sla_warning_probe",
+                    "body": {
+                        "flow_id": flow_id,
+                        "root_event_id": root_event_id,
+                        "sla_status": sla_status,
+                        "sla_remaining_minutes": sla_remaining_minutes,
+                        "run_record_id": run_record_id,
+                    },
+                },
+            }
+        ]
+
+    else:
+        decision = "sla_complete_flow"
+        reason = "sla_ok_or_unknown"
+        next_commands = [
+            {
+                "capability": "complete_flow_demo",
+                "priority": 1,
+                "input": {
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": step_index + 1,
+                    "goal": "sla_closed",
+                },
+            }
+        ]
+
+    _append_flow_step_safe(
+        flow_id=flow_id,
+        workspace_id=workspace_id,
+        step_obj={
+            "step_index": step_index,
+            "capability": "sla_router",
+            "status": "done",
+            "decision": decision,
+            "reason": reason,
+            "sla_status": sla_status,
+            "sla_remaining_minutes": sla_remaining_minutes,
+            "run_record_id": run_record_id,
+        },
+    )
+
+    _update_flow_registry_safe(
+        flow_id=flow_id,
+        workspace_id=workspace_id,
+        status="Running",
+        current_step=step_index,
+        last_decision=decision,
+        memory_obj={
+            "sla_status": sla_status,
+            "sla_remaining_minutes": sla_remaining_minutes,
+            "last_reason": reason,
+        },
+        result_obj={
+            "sla_router_result": {
+                "decision": decision,
+                "reason": reason,
+                "sla_status": sla_status,
+                "sla_remaining_minutes": sla_remaining_minutes,
+            }
+        },
+        linked_run=[run_record_id],
+    )
+
+    return {
+        "ok": True,
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "decision": decision,
+        "reason": reason,
+        "sla_status": sla_status,
+        "sla_remaining_minutes": sla_remaining_minutes,
+        "next_commands": next_commands,
+        "terminal": terminal,
+        "run_record_id": run_record_id,
+    }
+    
 # ============================================================
 # Event helpers
 # ============================================================
@@ -3275,7 +3429,14 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         mapped_capability,
     )
 
-    if mapped_capability in ("decision_demo", "decision_router", "incident_router", "complete_flow", "complete_flow_demo"):
+    if mapped_capability in (
+        "decision_demo",
+        "decision_router",
+        "incident_router",
+        "sla_router",
+        "complete_flow",
+        "complete_flow_demo",
+    ):
         if not str(command_input.get("flow_id") or "").strip():
             command_input["flow_id"] = event_record_id
         if not str(command_input.get("root_event_id") or "").strip():
@@ -3536,6 +3697,19 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                     },
                 }
             ]
+        elif goal in ("incident_probe", "warning_probe", "sla_probe", "sla_warning_probe"):
+            next_commands = [
+                {
+                    "capability": "complete_flow_demo",
+                    "priority": 1,
+                    "input": {
+                        "flow_id": flow_id,
+                        "root_event_id": root_event_id,
+                        "step_index": step_index + 1,
+                        "goal": "router_closed_after_probe",
+                    },
+                }
+            ]
         else:
             next_commands = [
                 {
@@ -3549,7 +3723,6 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                     },
                 }
             ]
-
     if next_commands:
         result["next_commands"] = next_commands
         result["terminal"] = False
@@ -3565,6 +3738,7 @@ EVENT_CAPABILITY_ALLOWLIST = {
     "decision_demo",
     "decision_router",
     "incident_router",
+    "sla_router",
     "complete_flow_demo",
     "complete_flow",
 }
@@ -3576,6 +3750,7 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "decision_demo",
     "decision_router",
     "incident_router",
+    "sla_router",
     "complete_flow",
     "complete_flow_demo",
     "flow_state_get",
@@ -3677,6 +3852,7 @@ CAPABILITIES = {
     "complete_flow": capability_complete_flow,
     "complete_flow_demo": capability_complete_flow_demo,
     "incident_router": capability_incident_router,
+    "sla_router": capability_sla_router,
 }
   
 # ============================================================
