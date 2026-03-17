@@ -3996,19 +3996,6 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                     },
                 }
             ]
-        elif http_exec_done_count >= 2:
-            next_commands = [
-                {
-                    "capability": "complete_flow_demo",
-                    "priority": 1,
-                    "input": {
-                        "flow_id": flow_id,
-                        "root_event_id": root_event_id,
-                        "step_index": step_index + 1,
-                        "goal": "complete_flow",
-                    },
-                }
-            ]
         else:
             next_commands = [
                 {
