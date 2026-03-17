@@ -4012,6 +4012,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         result["next_commands"] = next_commands
         result["terminal"] = False
         return result
+
     if flow_id:
         step_index = _resolve_flow_step_index(payload, 0)
         goal = str(payload.get("goal") or "").strip()
@@ -4039,7 +4040,8 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
         http_exec_done_count = len(
             [
-                s for s in steps
+                s
+                for s in steps
                 if isinstance(s, dict)
                 and s.get("capability") == "http_exec"
                 and s.get("status") == "done"
@@ -4071,19 +4073,19 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
         goal_lower = goal.lower()
 
-        if "incident" in goal_lower or "sla" in   
+        if "incident" in goal_lower or "sla" in goal_lower:
             next_commands = [
                 {
-                     "capability": "complete_flow_demo",
-                     "priority": 1,
-                     "input": {
-                         "flow_id": flow_id,
-                         "root_event_id": root_event_id,
-                         "step_index": step_index + 1,
-                         "goal": "incident_flow_closed",
-                     },
-                 }
-             ]
+                    "capability": "complete_flow_demo",
+                    "priority": 1,
+                    "input": {
+                        "flow_id": flow_id,
+                        "root_event_id": root_event_id,
+                        "step_index": step_index + 1,
+                        "goal": "incident_flow_closed",
+                    },
+                }
+            ]
         elif http_exec_done_count >= 2:
             next_commands = [
                 {
