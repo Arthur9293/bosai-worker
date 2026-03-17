@@ -1,12 +1,12 @@
-# app/worker.py — BOSAI Worker rebuilt 
+# app/worker.py — BOSAI Worker rebuilt
 import hashlib
 import hmac
 import json
 import os
+import threading
 import time
 import traceback
 import uuid
-import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
@@ -49,7 +49,7 @@ SLA_DASHBOARD_VIEW_NAME = os.getenv("SLA_DASHBOARD_VIEW_NAME", LOGS_ERRORS_VIEW_
 
 WORKER_NAME = os.getenv("WORKER_NAME", "bosai-worker-01").strip()
 APP_NAME = os.getenv("APP_NAME", "bosai-worker").strip()
-APP_VERSION = os.getenv("APP_VERSION", "2.5.5-rebuild").strip()
+APP_VERSION = os.getenv("APP_VERSION", "2.6.0-internal-scheduler-clean").strip()
 
 RUN_MAX_SECONDS = float((os.getenv("RUN_MAX_SECONDS", "30") or "30").strip())
 HTTP_TIMEOUT_SECONDS = float((os.getenv("HTTP_TIMEOUT_SECONDS", "20") or "20").strip())
@@ -60,6 +60,10 @@ CHAIN_MAX_DEPTH = int((os.getenv("CHAIN_MAX_DEPTH", "5") or "5").strip())
 FLOWS_TABLE_NAME = os.getenv("FLOWS_TABLE_NAME", "Flows").strip()
 RUN_SHARED_SECRET = os.getenv("RUN_SHARED_SECRET", "").strip()
 SCHEDULER_SECRET = os.getenv("SCHEDULER_SECRET", "").strip()
+INTERNAL_SCHEDULER_ENABLED = (
+    os.getenv("INTERNAL_SCHEDULER_ENABLED", "1").strip().lower()
+    in ("1", "true", "yes", "on")
+)
 
 SLA_WARNING_THRESHOLD_MIN = float((os.getenv("SLA_WARNING_THRESHOLD_MIN", "60") or "60").strip())
 
@@ -185,28 +189,32 @@ app.add_middleware(
 
 _HTTP_SESSION = requests.Session()
 
-def bosai_scheduler_loop():
+def bosai_scheduler_loop() -> None:
     while True:
         try:
             print("[scheduler] tick")
 
-            evt_run_record_id = None
-            cmd_run_record_id = None
+            evt_run_record_id: Optional[str] = None
+            cmd_run_record_id: Optional[str] = None
 
+            # 1) Event engine
             try:
                 evt_payload = {
                     "worker": WORKER_NAME,
                     "capability": "event_engine",
                     "idempotency_key": f"scheduler-events-{int(time.time())}",
-                    "input": {"limit": 20}
+                    "input": {},
                 }
                 req_evt = RunRequest.from_payload(evt_payload)
                 evt_run_record_id, _ = create_system_run(req_evt)
-                evt_result = capability_event_engine(req_evt, evt_run_record_id)
+
+                evt_result = process_events(limit=20)
                 if isinstance(evt_result, dict) and "run_record_id" not in evt_result:
                     evt_result["run_record_id"] = evt_run_record_id
+
                 finish_system_run(evt_run_record_id, "Done", evt_result)
                 print(f"[scheduler] event_engine result={evt_result}")
+
             except Exception as e:
                 if evt_run_record_id:
                     try:
@@ -215,6 +223,7 @@ def bosai_scheduler_loop():
                         pass
                 print("scheduler event_engine error:", repr(e))
 
+            # 2) Command orchestrator
             try:
                 cmd_payload = {
                     "worker": WORKER_NAME,
@@ -222,17 +231,20 @@ def bosai_scheduler_loop():
                     "idempotency_key": f"scheduler-commands-{int(time.time())}",
                     "input": {
                         "run_retry_queue": True,
-                        "run_lock_recovery": True
+                        "run_lock_recovery": True,
                     },
-                    "max_commands": 10
+                    "max_commands": 10,
                 }
                 req_cmd = RunRequest.from_payload(cmd_payload)
                 cmd_run_record_id, _ = create_system_run(req_cmd)
+
                 cmd_result = capability_command_orchestrator(req_cmd, cmd_run_record_id)
                 if isinstance(cmd_result, dict) and "run_record_id" not in cmd_result:
                     cmd_result["run_record_id"] = cmd_run_record_id
+
                 finish_system_run(cmd_run_record_id, "Done", cmd_result)
                 print(f"[scheduler] command_orchestrator result={cmd_result}")
+
             except Exception as e:
                 if cmd_run_record_id:
                     try:
@@ -248,10 +260,15 @@ def bosai_scheduler_loop():
 
 
 @app.on_event("startup")
-def start_scheduler():
+def start_scheduler() -> None:
+    if not INTERNAL_SCHEDULER_ENABLED:
+        print("[startup] internal scheduler disabled")
+        return
+
     thread = threading.Thread(
         target=bosai_scheduler_loop,
-        daemon=True
+        daemon=True,
+        name="bosai-internal-scheduler",
     )
     thread.start()
     print("[startup] internal scheduler enabled")
@@ -263,10 +280,13 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     print(tb)
     return JSONResponse(
         status_code=500,
-        content={"detail": "Internal error", "error": repr(exc)},
+        content={
+            "detail": "Internal error",
+            "error": repr(exc),
+            "path": str(request.url.path),
+        },
     )
-
-
+    
 # ============================================================
 # Models
 # ============================================================
@@ -942,6 +962,81 @@ def capability_state_put(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     res = state_put(app_key, value, workspace_id=workspace_id)
     res["run_record_id"] = run_record_id
     return res
+
+# ============================================================
+# Flow helpers
+# ============================================================
+
+def _resolve_flow_ids(payload: Dict[str, Any]) -> Tuple[str, str]:
+    if not isinstance(payload, dict):
+        payload = {}
+
+    flow_id = str(
+        payload.get("flow_id")
+        or payload.get("root_event_id")
+        or payload.get("event_id")
+        or ""
+    ).strip()
+
+    root_event_id = str(
+        payload.get("root_event_id")
+        or flow_id
+        or ""
+    ).strip()
+
+    return flow_id, (root_event_id or flow_id)
+
+
+def _resolve_flow_step_index(payload: Dict[str, Any], default: int = 0) -> int:
+    try:
+        return int(payload.get("step_index") or default)
+    except Exception:
+        return default
+
+
+def _append_flow_step_safe(
+    *,
+    flow_id: str,
+    workspace_id: str,
+    step_obj: Dict[str, Any],
+) -> None:
+    try:
+        flow_state_append_step(
+            flow_id=flow_id,
+            workspace_id=workspace_id,
+            step_obj=step_obj,
+        )
+    except Exception:
+        pass
+
+
+def _update_flow_registry_safe(
+    *,
+    flow_id: str,
+    workspace_id: str,
+    status: Optional[str] = None,
+    current_step: Optional[int] = None,
+    last_decision: Optional[str] = None,
+    memory_obj: Optional[Dict[str, Any]] = None,
+    result_obj: Optional[Dict[str, Any]] = None,
+    linked_run: Optional[List[str]] = None,
+    finished: bool = False,
+) -> None:
+    try:
+        flow_update(
+            flow_id=flow_id,
+            workspace_id=workspace_id,
+            status=status,
+            current_step=current_step,
+            last_decision=last_decision,
+            memory_obj=memory_obj,
+            result_obj=result_obj,
+            linked_run=linked_run,
+            finished=finished,
+        )
+    except Exception:
+        pass
+        
 # ============================================================
 # Flow state helpers
 # ============================================================
@@ -1367,19 +1462,19 @@ def fail_flow(
 
 def capability_complete_flow_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
-    flow_id = str(payload.get("flow_id") or payload.get("root_event_id") or "").strip()
+    flow_id, root_event_id = _resolve_flow_ids(payload)
 
     if not flow_id:
         raise HTTPException(status_code=400, detail="complete_flow_demo missing flow_id")
 
     workspace_id = _resolve_workspace_id(req=req)
-    root_event_id = str(payload.get("root_event_id") or flow_id).strip() or flow_id
+    step_index = _resolve_flow_step_index(payload, 0)
 
-    flow_state_append_step(
+    _append_flow_step_safe(
         flow_id=flow_id,
         workspace_id=workspace_id,
         step_obj={
-            "step_index": payload.get("step_index"),
+            "step_index": step_index,
             "capability": "complete_flow_demo",
             "status": "done",
             "decision": "complete_flow",
@@ -1406,82 +1501,133 @@ def capability_complete_flow_demo(req: RunRequest, run_record_id: str) -> Dict[s
 
     return flow_result
 
-def capability_complete_flow(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    payload = _normalize_flow_keys(req.input or {})
+def capability_decision_router(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    raw_input = req.input or {}
+    if not isinstance(raw_input, dict):
+        raw_input = {}
 
-    flow_id = str(
-        payload.get("flow_id")
-        or payload.get("root_event_id")
-        or ""
-    ).strip()
+    payload = _normalize_flow_keys(raw_input)
+    flow_id, root_event_id = _resolve_flow_ids(payload)
 
     if not flow_id:
-        raise HTTPException(status_code=400, detail="complete_flow missing flow_id")
+        raise HTTPException(status_code=400, detail="decision_router missing flow_id")
 
     workspace_id = _resolve_workspace_id(req=req)
-    root_event_id = str(payload.get("root_event_id") or flow_id).strip() or flow_id
-    try:
-        step_index = int(
-        payload.get("step_index")
-        or payload.get("stepindex")
-        or 0
+    step_index = _resolve_flow_step_index(payload, 0)
+
+    state_snapshot = flow_state_get(flow_id, workspace_id=workspace_id)
+    state_obj = state_snapshot.get("state") or {}
+    steps = state_obj.get("steps") or []
+
+    http_exec_done_count = len(
+        [
+            s for s in steps
+            if isinstance(s, dict)
+            and s.get("capability") == "http_exec"
+            and s.get("status") == "done"
+        ]
     )
-    except Exception:
-        step_index = 0
 
-    goal = str(
-        payload.get("goal")
-        or payload.get("Goal")
-        or "finish"
-    ).strip()
+    if http_exec_done_count == 0:
+        decision = "send_first_probe"
+        reason = "no_http_exec_done_yet"
+        next_commands = [
+            {
+                "capability": "http_exec",
+                "priority": 1,
+                "input": {
+                    "url": "https://httpbin.org/get",
+                    "method": "GET",
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": step_index + 1,
+                    "goal": "first_probe",
+                },
+            }
+        ]
+        terminal = False
 
-    flow_state_append_step(
+    elif http_exec_done_count == 1:
+        decision = "send_second_probe"
+        reason = "one_http_exec_done"
+        next_commands = [
+            {
+                "capability": "http_exec",
+                "priority": 1,
+                "input": {
+                    "url": "https://httpbin.org/uuid",
+                    "method": "GET",
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": step_index + 1,
+                    "goal": "second_probe",
+                },
+            }
+        ]
+        terminal = False
+
+    else:
+        decision = "complete_flow"
+        reason = "enough_http_exec_done"
+        next_commands = [
+            {
+                "capability": "complete_flow",
+                "priority": 1,
+                "input": {
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": step_index + 1,
+                    "goal": "finish_flow",
+                },
+            }
+        ]
+        terminal = False
+
+    _append_flow_step_safe(
         flow_id=flow_id,
         workspace_id=workspace_id,
         step_obj={
             "step_index": step_index,
-            "capability": "complete_flow",
+            "capability": "decision_router",
             "status": "done",
-            "decision": "complete_flow",
-            "goal": goal,
+            "decision": decision,
+            "reason": reason,
+            "http_exec_done_count": http_exec_done_count,
             "run_record_id": run_record_id,
         },
     )
 
-    final_result = {
-        "ok": True,
-        "flow_id": flow_id,
-        "root_event_id": root_event_id,
-        "completed": True,
-        "final_status": "Completed",
-        "goal": goal,
-        "run_record_id": run_record_id,
-    }
-
-    complete_flow(
+    _update_flow_registry_safe(
         flow_id=flow_id,
         workspace_id=workspace_id,
-        result_obj=final_result,
-        last_decision="complete_flow",
+        status="Running",
+        current_step=step_index,
+        last_decision=decision,
+        memory_obj={
+            "http_exec_done_count": http_exec_done_count,
+            "last_reason": reason,
+        },
+        result_obj={
+            "last_decision_result": {
+                "decision": decision,
+                "reason": reason,
+            }
+        },
         linked_run=[run_record_id],
     )
 
-    try:
-        flow_update(
-            flow_id=flow_id,
-            workspace_id=workspace_id,
-            status="Completed",
-            current_step=step_index,
-            last_decision="complete_flow",
-            result_obj=final_result,
-            linked_run=[run_record_id],
-            finished=True,
-        )
-    except Exception:
-        pass
-
-    return final_result
-
+    return {
+        "ok": True,
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "decision": decision,
+        "reason": reason,
+        "http_exec_done_count": http_exec_done_count,
+        "next_commands": next_commands,
+        "terminal": terminal,
+        "run_record_id": run_record_id,
+    }
+    
 def capability_decision_router(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     raw_input = req.input or {}
 
@@ -1699,6 +1845,29 @@ def _extract_http_status_from_result(result_obj: Dict[str, Any]) -> Optional[int
 
     return None
 
+def _truncate_large_result_payload(result_obj: Dict[str, Any], max_len: int = 1200) -> Dict[str, Any]:
+    if not isinstance(result_obj, dict):
+        return result_obj
+
+    cleaned = dict(result_obj)
+
+    response_text = cleaned.get("response_text")
+    if isinstance(response_text, str) and len(response_text) > max_len:
+        cleaned["response_text"] = response_text[:max_len] + "...[truncated]"
+
+    response_json = cleaned.get("response_json")
+    if isinstance(response_json, str) and len(response_json) > max_len:
+        cleaned["response_json"] = response_json[:max_len] + "...[truncated]"
+
+    nested_response = cleaned.get("response")
+    if isinstance(nested_response, dict):
+        nested_copy = dict(nested_response)
+        nested_text = nested_copy.get("text")
+        if isinstance(nested_text, str) and len(nested_text) > max_len:
+            nested_copy["text"] = nested_text[:max_len] + "...[truncated]"
+        cleaned["response"] = nested_copy
+
+    return cleaned
 
 def _command_mark_running_best_effort(command_id: str, run_record_id: str, worker_name: str, idem: str) -> Dict[str, Any]:
     now = utc_now_iso()
@@ -1817,8 +1986,9 @@ def _command_lock_heartbeat(command_id: str, lock_token: str) -> None:
     
 def _command_mark_done_best_effort(command_id: str, run_record_id: str, result_obj: Dict[str, Any]) -> Dict[str, Any]:
     now = utc_now_iso()
-    result_json = json.dumps(result_obj, ensure_ascii=False)
-    http_status = _extract_http_status_from_result(result_obj)
+    safe_result_obj = _truncate_large_result_payload(result_obj)
+    result_json = json.dumps(safe_result_obj, ensure_ascii=False)
+    http_status = _extract_http_status_from_result(safe_result_obj)
 
     return _airtable_update_best_effort(
         COMMANDS_TABLE_NAME,
@@ -2670,24 +2840,19 @@ def capability_chain_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]
 
 def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
-
-    flow_id = str(
-        payload.get("flow_id")
-        or payload.get("root_event_id")
-        or ""
-    ).strip()
+    flow_id, root_event_id = _resolve_flow_ids(payload)
 
     if not flow_id:
         raise HTTPException(status_code=400, detail="decision_demo missing flow_id")
 
     workspace_id = _resolve_workspace_id(req=req)
-    root_event_id = str(payload.get("root_event_id") or flow_id).strip() or flow_id
+    goal = str(payload.get("goal") or "").strip()
 
     flow_get_or_create(
         flow_id=flow_id,
         root_event_id=root_event_id,
         workspace_id=workspace_id,
-        goal=str(payload.get("goal") or "").strip(),
+        goal=goal,
         linked_run=[run_record_id],
     )
 
@@ -2701,8 +2866,8 @@ def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, A
         and s.get("capability") == "http_exec"
         and s.get("status") == "done"
     ]
-
     http_exec_done_count = len(http_exec_done)
+    next_step_index = len(steps) + 1
 
     if http_exec_done_count == 0:
         decision = "send_http_ping"
@@ -2716,7 +2881,7 @@ def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, A
                     "method": "GET",
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
-                    "step_index": len(steps) + 1,
+                    "step_index": next_step_index,
                     "goal": "first_probe",
                 },
             }
@@ -2735,7 +2900,7 @@ def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, A
                     "method": "GET",
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
-                    "step_index": len(steps) + 1,
+                    "step_index": next_step_index,
                     "goal": "second_probe",
                 },
             }
@@ -2752,18 +2917,18 @@ def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, A
                 "input": {
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
-                    "step_index": len(steps) + 1,
+                    "step_index": next_step_index,
                     "goal": "complete_flow",
                 },
             }
         ]
         terminal = False
 
-    flow_state_append_step(
+    _append_flow_step_safe(
         flow_id=flow_id,
         workspace_id=workspace_id,
         step_obj={
-            "step_index": len(steps) + 1,
+            "step_index": next_step_index,
             "capability": "decision_demo",
             "status": "done",
             "decision": decision,
@@ -2772,11 +2937,11 @@ def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, A
         },
     )
 
-    flow_update(
+    _update_flow_registry_safe(
         flow_id=flow_id,
         workspace_id=workspace_id,
         status="Running",
-        current_step=len(steps) + 1,
+        current_step=next_step_index,
         last_decision=decision,
         memory_obj={
             "http_exec_done_count": http_exec_done_count,
@@ -3234,16 +3399,14 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
     result = capability_http_exec(normalized_req, run_record_id)
 
-    flow_id = str(payload.get("flow_id") or payload.get("root_event_id") or "").strip()
-    root_event_id = str(payload.get("root_event_id") or flow_id).strip() or flow_id
-    step_index = int(payload.get("step_index") or 0)
-    goal = str(payload.get("goal") or "").strip()
-
+    flow_id, root_event_id = _resolve_flow_ids(payload)
     next_commands: List[Dict[str, Any]] = []
 
     if flow_id:
-        # 1) enregistrer le step http_exec dans le flow_state
-        flow_state_append_step(
+        step_index = _resolve_flow_step_index(payload, 0)
+        goal = str(payload.get("goal") or "").strip()
+
+        _append_flow_step_safe(
             flow_id=flow_id,
             workspace_id=workspace_id,
             step_obj={
@@ -3260,7 +3423,6 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             },
         )
 
-        # 2) relire le vrai state après append
         current = flow_state_get(flow_id, workspace_id=workspace_id)
         state_obj = current.get("state") or {}
         steps = state_obj.get("steps") or []
@@ -3274,35 +3436,29 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             ]
         )
 
-        # 3) mise à jour registre flow
-        try:
-            flow_update(
-                flow_id=flow_id,
-                workspace_id=workspace_id,
-                status="Running",
-                current_step=step_index,
-                last_decision=f"http_exec_done:{goal or 'unknown'}",
-                memory_obj={
-                    "last_http_exec": {
-                        "goal": goal,
-                        "step_index": step_index,
-                        "status_code": result.get("status_code"),
-                        "ok": result.get("ok"),
-                    },
-                    "http_exec_done_count": http_exec_done_count,
-                    "steps_count": len(steps),
+        _update_flow_registry_safe(
+            flow_id=flow_id,
+            workspace_id=workspace_id,
+            status="Running",
+            current_step=step_index,
+            last_decision=f"http_exec_done:{goal or 'unknown'}",
+            memory_obj={
+                "last_http_exec": {
+                    "goal": goal,
+                    "step_index": step_index,
+                    "status_code": result.get("status_code"),
+                    "ok": result.get("ok"),
                 },
-                linked_run=[run_record_id],
-            )
-        except Exception:
-            pass
+                "http_exec_done_count": http_exec_done_count,
+                "steps_count": len(steps),
+            },
+            linked_run=[run_record_id],
+        )
 
-        # 4) réinjecter flow_id/root_event_id dans le résultat
         result["flow_id"] = flow_id
         result["root_event_id"] = root_event_id
         result["http_exec_done_count"] = http_exec_done_count
 
-        # 5) orchestration suivante
         if http_exec_done_count >= 2:
             next_commands = [
                 {
@@ -3316,7 +3472,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                     },
                 }
             ]
-        else:
+        elif goal in ("first_probe", "fetch_probe", "confirm_probe", "second_probe"):
             next_commands = [
                 {
                     "capability": "decision_demo",
@@ -3392,7 +3548,10 @@ CAPABILITIES = {
     "retry_queue": capability_retry_queue,
     "lock_recovery": capability_lock_recovery,
     "command_orchestrator": capability_command_orchestrator,
-    "event_engine": capability_event_engine,
+    "event_engine": lambda req, run_record_id: {
+    **process_events(limit=20),
+    "run_record_id": run_record_id,
+},
     "chain_demo": capability_chain_demo,
     "planner_demo": capability_planner_demo,
     "decision_demo": capability_decision_demo,
@@ -3417,52 +3576,64 @@ def root_head() -> Response:
 
 @app.get("/health")
 def health() -> Dict[str, Any]:
-    return {
-        "ok": True,
-        "app": APP_NAME,
-        "version": APP_VERSION,
-        "worker": WORKER_NAME,
-        "capabilities": sorted(list(CAPABILITIES.keys())),
-        "policies_loaded": bool(POLICIES),
-        "policy_keys": sorted(list(POLICIES.keys())) if isinstance(POLICIES, dict) else [],
-        "cors": {
-            "allow_origins": CORS_ALLOW_ORIGINS,
-            "allow_methods": CORS_ALLOW_METHODS,
-            "allow_headers": CORS_ALLOW_HEADERS,
-            "expose_headers": CORS_EXPOSE_HEADERS,
-            "allow_credentials": CORS_ALLOW_CREDENTIALS,
-        },
-        "dashboard_views": {
-            "system_runs_view": SYSTEM_RUNS_VIEW_NAME,
-            "commands_dashboard_view": COMMANDS_DASHBOARD_VIEW_NAME,
-            "sla_dashboard_view": SLA_DASHBOARD_VIEW_NAME,
-            "events_dashboard_view": EVENTS_DASHBOARD_VIEW_NAME,
-        },
-        "ts": utc_now_iso(),
-    }
-
+   return {
+       "ok": True,
+       "app": APP_NAME,
+       "version": APP_VERSION,
+       "worker": WORKER_NAME,
+       "internal_scheduler_enabled": INTERNAL_SCHEDULER_ENABLED,
+       "capabilities": sorted(list(CAPABILITIES.keys())),
+       "policies_loaded": bool(POLICIES),
+       "policy_keys": sorted(list(POLICIES.keys())) if isinstance(POLICIES, dict) else [],
+       "cors": {
+           "allow_origins": CORS_ALLOW_ORIGINS,
+           "allow_methods": CORS_ALLOW_METHODS,
+           "allow_headers": CORS_ALLOW_HEADERS,
+           "expose_headers": CORS_EXPOSE_HEADERS,
+           "allow_credentials": CORS_ALLOW_CREDENTIALS,
+       },
+       "dashboard_views": {
+           "system_runs_view": SYSTEM_RUNS_VIEW_NAME,
+           "commands_dashboard_view": COMMANDS_DASHBOARD_VIEW_NAME,
+           "sla_dashboard_view": SLA_DASHBOARD_VIEW_NAME,
+           "events_dashboard_view": EVENTS_DASHBOARD_VIEW_NAME,
+       },
+       "ts": utc_now_iso(),
+  }    
 
 @app.get("/health/score")
 def health_score() -> Dict[str, Any]:
     score = 100
     issues: List[str] = []
+
     if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
         score -= 50
         issues.append("airtable_env_missing")
+
+    if not INTERNAL_SCHEDULER_ENABLED:
+        issues.append("internal_scheduler_disabled")
+
     if RUN_SHARED_SECRET:
         issues.append("signature_enabled")
+
     if SCHEDULER_SECRET:
         issues.append("scheduler_secret_enabled")
+
     if not (HTTP_EXEC_ALLOWLIST_RAW or "").strip():
         issues.append("http_exec_disabled_no_allowlist")
-    if not (HTTP_EXEC_TARGETS_JSON or "").strip():
-        issues.append("http_exec_no_alias_targets")
+
     if TOOLCATALOG_ENFORCE_HTTP_EXEC:
         issues.append("toolcatalog_http_exec_enforced")
+
     if POLICIES:
         issues.append("policies_loaded")
-    return {"ok": True, "score": max(0, score), "issues": issues, "ts": utc_now_iso()}
 
+    return {
+        "ok": True,
+        "score": max(0, score),
+        "issues": issues,
+        "ts": utc_now_iso(),
+    }
 
 # ============================================================
 # Read-only endpoints
