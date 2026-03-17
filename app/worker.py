@@ -2669,27 +2669,6 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         except Exception as e:
             post_ops["escalation_engine"] = {"ok": False, "error": repr(e)}
 
-    inp2 = req.input or {}
-    post_ops: Dict[str, Any] = {}
-
-    if bool(inp2.get("run_retry_queue")):
-        try:
-            post_ops["retry_queue"] = capability_retry_queue(req, run_record_id)
-        except Exception as e:
-            post_ops["retry_queue"] = {"ok": False, "error": repr(e)}
-
-    if bool(inp2.get("run_lock_recovery")):
-        try:
-            post_ops["lock_recovery"] = capability_lock_recovery(req, run_record_id)
-        except Exception as e:
-            post_ops["lock_recovery"] = {"ok": False, "error": repr(e)}
-
-    if bool(inp2.get("run_escalation_engine")):
-        try:
-            post_ops["escalation_engine"] = capability_escalation_engine(req, run_record_id)
-        except Exception as e:
-            post_ops["escalation_engine"] = {"ok": False, "error": repr(e)}
-
     if bool(inp2.get("run_event_engine")):
         try:
             post_ops["event_engine"] = capability_event_engine(req, run_record_id)
@@ -3854,6 +3833,7 @@ def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, An
 def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
     workspace_id = _resolve_workspace_id(req=req)
+    next_commands: List[Dict[str, Any]] = []
 
     normalized_req = RunRequest.from_payload(
         {
