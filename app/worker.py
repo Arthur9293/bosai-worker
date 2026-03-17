@@ -3648,6 +3648,40 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
     flow_id, root_event_id = _resolve_flow_ids(payload)
     next_commands: List[Dict[str, Any]] = []
 
+    status_code = result.get("status_code")
+    goal = str(payload.get("goal") or "").strip()
+
+    if status_code is not None:
+        try:
+            status_code = int(status_code)
+        except Exception:
+            status_code = None
+
+    if flow_id and status_code is not None and status_code >= 400:
+        result["flow_id"] = flow_id
+        result["root_event_id"] = root_event_id
+
+        next_commands = [
+            {
+                "capability": "incident_router",
+                "priority": 2,
+                "input": {
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": _resolve_flow_step_index(payload, 0) + 1,
+                    "goal": "incident_after_http_failure",
+                    "reason": "probe_failed",
+                    "http_status": status_code,
+                    "failed_goal": goal,
+                    "failed_url": payload.get("url") or payload.get("http_target"),
+                },
+            }
+        ]
+
+        result["next_commands"] = next_commands
+        result["terminal"] = False
+        return result
+
     if flow_id:
         step_index = _resolve_flow_step_index(payload, 0)
         goal = str(payload.get("goal") or "").strip()
@@ -3718,19 +3752,6 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                     },
                 }
             ]
-        elif goal in ("incident_probe", "warning_probe", "sla_probe", "sla_warning_probe"):
-            next_commands = [
-                {
-                    "capability": "complete_flow_demo",
-                    "priority": 1,
-                    "input": {
-                        "flow_id": flow_id,
-                        "root_event_id": root_event_id,
-                        "step_index": step_index + 1,
-                        "goal": "router_closed_after_probe",
-                    },
-                }
-            ]
         else:
             next_commands = [
                 {
@@ -3744,6 +3765,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                     },
                 }
             ]
+
     if next_commands:
         result["next_commands"] = next_commands
         result["terminal"] = False
