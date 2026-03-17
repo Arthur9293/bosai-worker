@@ -3055,18 +3055,50 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
     ).strip()
 
     failed_goal = str(payload.get("failed_goal") or "retry_probe").strip()
-    failed_method = str(payload.get("failed_method") or "POST").strip().upper()
-    retry_count = int(payload.get("retry_count") or 0)
-    retry_max = int(payload.get("retry_max") or 2)
-    http_status = payload.get("http_status")
+    failed_method = str(payload.get("failed_method") or payload.get("method") or "POST").strip().upper()
     reason_in = str(payload.get("reason") or "http_failure").strip()
+
+    try:
+        retry_count = int(payload.get("retry_count") or 0)
+    except Exception:
+        retry_count = 0
+
+    try:
+        retry_max = int(payload.get("retry_max") or 2)
+    except Exception:
+        retry_max = 2
+
+    http_status_raw = payload.get("http_status")
+    try:
+        http_status = int(http_status_raw) if http_status_raw is not None else None
+    except Exception:
+        http_status = None
 
     decision = ""
     reason = ""
     next_commands: List[Dict[str, Any]] = []
     terminal = False
 
-    if retry_count < retry_max:
+    # 1) Si la requête précédente a finalement réussi, on ne retry PAS.
+    if http_status is not None and http_status < 400:
+        decision = "no_retry_needed"
+        reason = "http_success"
+
+        next_commands = [
+            {
+                "capability": "complete_flow_demo",
+                "priority": 1,
+                "input": {
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": step_index + 1,
+                    "goal": "success_no_retry",
+                },
+            }
+        ]
+
+    # 2) Sinon, si on a encore des retries disponibles, on relance http_exec.
+    elif retry_count < retry_max:
         decision = "retry_http_exec"
         reason = f"{reason_in}_retry_{retry_count + 1}_of_{retry_max}"
 
@@ -3094,6 +3126,8 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
                 },
             }
         ]
+
+    # 3) Sinon, retries épuisés -> incident_router
     else:
         decision = "retry_exhausted_to_incident"
         reason = "retry_limit_reached"
@@ -3111,6 +3145,7 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
                     "http_status": http_status,
                     "failed_goal": failed_goal,
                     "failed_url": failed_url,
+                    "failed_method": failed_method,
                     "retry_count": retry_count,
                     "retry_max": retry_max,
                 },
@@ -3138,7 +3173,7 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
     _update_flow_registry_safe(
         flow_id=flow_id,
         workspace_id=workspace_id,
-        status="Running",
+        status="Running" if decision != "no_retry_needed" else "Completed",
         current_step=step_index,
         last_decision=decision,
         memory_obj={
