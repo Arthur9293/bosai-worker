@@ -3037,6 +3037,147 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
         "terminal": terminal,
         "run_record_id": run_record_id,
     }
+
+def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    payload = _normalize_flow_keys(req.input or {})
+    flow_id, root_event_id = _resolve_flow_ids(payload)
+
+    if not flow_id:
+        raise HTTPException(status_code=400, detail="retry_router missing flow_id")
+
+    workspace_id = _resolve_workspace_id(req=req)
+    step_index = _resolve_flow_step_index(payload, 0)
+
+    failed_url = str(
+        payload.get("failed_url")
+        or payload.get("url")
+        or "https://httpbin.org/status/500"
+    ).strip()
+
+    failed_goal = str(payload.get("failed_goal") or "retry_probe").strip()
+    failed_method = str(payload.get("failed_method") or "POST").strip().upper()
+    retry_count = int(payload.get("retry_count") or 0)
+    retry_max = int(payload.get("retry_max") or 2)
+    http_status = payload.get("http_status")
+    reason_in = str(payload.get("reason") or "http_failure").strip()
+
+    decision = ""
+    reason = ""
+    next_commands: List[Dict[str, Any]] = []
+    terminal = False
+
+    if retry_count < retry_max:
+        decision = "retry_http_exec"
+        reason = f"{reason_in}_retry_{retry_count + 1}_of_{retry_max}"
+
+        next_commands = [
+            {
+                "capability": "http_exec",
+                "priority": 2,
+                "input": {
+                    "url": failed_url,
+                    "method": failed_method,
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": step_index + 1,
+                    "goal": failed_goal,
+                    "retry_count": retry_count + 1,
+                    "retry_max": retry_max,
+                    "body": {
+                        "flow_id": flow_id,
+                        "root_event_id": root_event_id,
+                        "retry_count": retry_count + 1,
+                        "retry_max": retry_max,
+                        "origin_reason": reason_in,
+                        "run_record_id": run_record_id,
+                    },
+                },
+            }
+        ]
+    else:
+        decision = "retry_exhausted_to_incident"
+        reason = "retry_limit_reached"
+
+        next_commands = [
+            {
+                "capability": "incident_router",
+                "priority": 3,
+                "input": {
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": step_index + 1,
+                    "goal": "incident_after_retry_exhausted",
+                    "reason": "retry_exhausted",
+                    "http_status": http_status,
+                    "failed_goal": failed_goal,
+                    "failed_url": failed_url,
+                    "retry_count": retry_count,
+                    "retry_max": retry_max,
+                },
+            }
+        ]
+
+    _append_flow_step_safe(
+        flow_id=flow_id,
+        workspace_id=workspace_id,
+        step_obj={
+            "step_index": step_index,
+            "capability": "retry_router",
+            "status": "done",
+            "decision": decision,
+            "reason": reason,
+            "retry_count": retry_count,
+            "retry_max": retry_max,
+            "failed_url": failed_url,
+            "failed_goal": failed_goal,
+            "http_status": http_status,
+            "run_record_id": run_record_id,
+        },
+    )
+
+    _update_flow_registry_safe(
+        flow_id=flow_id,
+        workspace_id=workspace_id,
+        status="Running",
+        current_step=step_index,
+        last_decision=decision,
+        memory_obj={
+            "retry_count": retry_count,
+            "retry_max": retry_max,
+            "failed_url": failed_url,
+            "failed_goal": failed_goal,
+            "http_status": http_status,
+            "last_reason": reason,
+        },
+        result_obj={
+            "retry_router_result": {
+                "decision": decision,
+                "reason": reason,
+                "retry_count": retry_count,
+                "retry_max": retry_max,
+                "failed_url": failed_url,
+                "failed_goal": failed_goal,
+                "http_status": http_status,
+            }
+        },
+        linked_run=[run_record_id],
+    )
+
+    return {
+        "ok": True,
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "decision": decision,
+        "reason": reason,
+        "retry_count": retry_count,
+        "retry_max": retry_max,
+        "failed_url": failed_url,
+        "failed_goal": failed_goal,
+        "http_status": http_status,
+        "next_commands": next_commands,
+        "terminal": terminal,
+        "run_record_id": run_record_id,
+    }
     
 def capability_sla_router(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
@@ -3701,17 +3842,20 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
         next_commands = [
             {
-                "capability": "incident_router",
+                "capability": "retry_router",
                 "priority": 2,
                 "input": {
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
                     "step_index": _resolve_flow_step_index(payload, 0) + 1,
-                    "goal": "incident_after_http_failure",
+                    "goal": "retry_after_http_failure",
                     "reason": "probe_failed",
                     "http_status": status_code,
                     "failed_goal": goal,
                     "failed_url": payload.get("url") or payload.get("http_target"),
+                    "failed_method": payload.get("method") or "POST",
+                    "retry_count": int(payload.get("retry_count") or 0),
+                    "retry_max": int(payload.get("retry_max") or 2),
                 },
             }
         ]
@@ -3719,7 +3863,6 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         result["next_commands"] = next_commands
         result["terminal"] = False
         return result
-
     if flow_id:
         step_index = _resolve_flow_step_index(payload, 0)
         goal = str(payload.get("goal") or "").strip()
@@ -3819,6 +3962,7 @@ EVENT_CAPABILITY_ALLOWLIST = {
     "decision_demo",
     "decision_router",
     "incident_router",
+    "retry_router",
     "sla_router",
     "complete_flow_demo",
     "complete_flow",
@@ -3831,6 +3975,7 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "decision_demo",
     "decision_router",
     "incident_router",
+    "retry_router",
     "sla_router",
     "complete_flow",
     "complete_flow_demo",
@@ -3933,6 +4078,7 @@ CAPABILITIES = {
     "complete_flow": capability_complete_flow,
     "complete_flow_demo": capability_complete_flow_demo,
     "incident_router": capability_incident_router,
+    "retry_router",
     "sla_router": capability_sla_router,
 }
   
