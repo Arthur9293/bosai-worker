@@ -2835,7 +2835,149 @@ def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, A
         "flow_id": flow_id,
         "root_event_id": root_event_id,
     }
+def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    payload = _normalize_flow_keys(req.input or {})
+    flow_id, root_event_id = _resolve_flow_ids(payload)
 
+    if not flow_id:
+        raise HTTPException(status_code=400, detail="incident_router missing flow_id")
+
+    workspace_id = _resolve_workspace_id(req=req)
+    step_index = _resolve_flow_step_index(payload, 0)
+    incident_type = str(payload.get("incident_type") or payload.get("type") or "generic_incident").strip()
+    severity = str(payload.get("severity") or "warning").strip().lower()
+    target_url = str(
+        payload.get("target_url")
+        or payload.get("url")
+        or "https://httpbin.org/post"
+    ).strip()
+
+    decision = ""
+    reason = ""
+    next_commands: List[Dict[str, Any]] = []
+    terminal = False
+
+    if severity in ("critical", "critique", "high"):
+        decision = "escalate_and_probe"
+        reason = "critical_incident_detected"
+        next_commands = [
+            {
+                "capability": "http_exec",
+                "priority": 2,
+                "input": {
+                    "url": target_url,
+                    "method": "POST",
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": step_index + 1,
+                    "goal": "incident_probe",
+                    "body": {
+                        "incident_type": incident_type,
+                        "severity": severity,
+                        "flow_id": flow_id,
+                        "root_event_id": root_event_id,
+                    },
+                },
+            },
+            {
+                "capability": "complete_flow_demo",
+                "priority": 1,
+                "input": {
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": step_index + 2,
+                    "goal": "incident_closed_after_probe",
+                },
+            },
+        ]
+    elif severity in ("warning", "medium", "surveillance"):
+        decision = "probe_then_continue"
+        reason = "warning_incident_detected"
+        next_commands = [
+            {
+                "capability": "http_exec",
+                "priority": 1,
+                "input": {
+                    "url": target_url,
+                    "method": "POST",
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": step_index + 1,
+                    "goal": "warning_probe",
+                    "body": {
+                        "incident_type": incident_type,
+                        "severity": severity,
+                        "flow_id": flow_id,
+                        "root_event_id": root_event_id,
+                    },
+                },
+            }
+        ]
+    else:
+        decision = "complete_flow"
+        reason = "low_severity_incident"
+        next_commands = [
+            {
+                "capability": "complete_flow_demo",
+                "priority": 1,
+                "input": {
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": step_index + 1,
+                    "goal": "incident_closed",
+                },
+            }
+        ]
+
+    _append_flow_step_safe(
+        flow_id=flow_id,
+        workspace_id=workspace_id,
+        step_obj={
+            "step_index": step_index,
+            "capability": "incident_router",
+            "status": "done",
+            "decision": decision,
+            "reason": reason,
+            "incident_type": incident_type,
+            "severity": severity,
+            "run_record_id": run_record_id,
+        },
+    )
+
+    _update_flow_registry_safe(
+        flow_id=flow_id,
+        workspace_id=workspace_id,
+        status="Running",
+        current_step=step_index,
+        last_decision=decision,
+        memory_obj={
+            "incident_type": incident_type,
+            "severity": severity,
+            "last_reason": reason,
+        },
+        result_obj={
+            "incident_router_result": {
+                "decision": decision,
+                "reason": reason,
+                "incident_type": incident_type,
+                "severity": severity,
+            }
+        },
+        linked_run=[run_record_id],
+    )
+
+    return {
+        "ok": True,
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "decision": decision,
+        "reason": reason,
+        "incident_type": incident_type,
+        "severity": severity,
+        "next_commands": next_commands,
+        "terminal": terminal,
+        "run_record_id": run_record_id,
+    }
 
 # ============================================================
 # Event helpers
@@ -3133,7 +3275,7 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         mapped_capability,
     )
 
-    if mapped_capability == "decision_demo":
+    if mapped_capability in ("decision_demo", "decision_router", "incident_router", "complete_flow", "complete_flow_demo"):
         if not str(command_input.get("flow_id") or "").strip():
             command_input["flow_id"] = event_record_id
         if not str(command_input.get("root_event_id") or "").strip():
@@ -3422,6 +3564,7 @@ EVENT_CAPABILITY_ALLOWLIST = {
     "planner_demo",
     "decision_demo",
     "decision_router",
+    "incident_router",
     "complete_flow_demo",
     "complete_flow",
 }
@@ -3432,6 +3575,7 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "planner_demo",
     "decision_demo",
     "decision_router",
+    "incident_router",
     "complete_flow",
     "complete_flow_demo",
     "flow_state_get",
@@ -3532,6 +3676,7 @@ CAPABILITIES = {
     "decision_router": capability_decision_router,
     "complete_flow": capability_complete_flow,
     "complete_flow_demo": capability_complete_flow_demo,
+    "incident_router": capability_incident_router,
 }
   
 # ============================================================
