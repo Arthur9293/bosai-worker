@@ -3970,6 +3970,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
         if goal_lower in ("create_incident", "alert_incident", "sla_probe", "sla_warning_probe"):
             next_commands = []
+
         elif http_exec_done_count >= 2:
             next_commands = [
                 {
@@ -3983,19 +3984,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                     },
                 }
             ]
-        else:
-            next_commands = [
-                {
-                    "capability": "decision_demo",
-                    "priority": 1,
-                    "input": {
-                        "flow_id": flow_id,
-                        "root_event_id": root_event_id,
-                        "step_index": step_index + 1,
-                        "goal": "continue_flow",
-                    },
-                }
-            ]
+
         else:
             next_commands = [
                 {
