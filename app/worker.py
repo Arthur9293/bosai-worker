@@ -2867,25 +2867,34 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
     step_index = _resolve_flow_step_index(payload, 0)
 
     reason = str(payload.get("reason") or "unknown").strip()
-    http_status = payload.get("http_status")
-    failed_goal = str(payload.get("failed_goal") or "").strip()
-    failed_url = str(payload.get("failed_url") or "").strip()
 
-    sla_status = str(payload.get("sla_status") or "").strip().lower()
+    raw_http_status = (
+        payload.get("http_status")
+        if payload.get("http_status") is not None
+        else payload.get("status_code")
+    )
+    if raw_http_status is None:
+        raw_http_status = payload.get("HTTP_Status")
+
+    failed_goal = str(payload.get("failed_goal") or payload.get("goal") or "").strip()
+    failed_url = str(
+        payload.get("failed_url")
+        or payload.get("url")
+        or payload.get("http_target")
+        or ""
+    ).strip()
+
+    sla_status = str(payload.get("sla_status") or payload.get("status") or "").strip().lower()
     severity = "low"
 
     try:
-        http_status = int(http_status) if http_status is not None else None
+        http_status = int(raw_http_status) if raw_http_status is not None else None
     except Exception:
         http_status = None
 
-    # =========================
-    # 🎯 DECISION LOGIC
-    # =========================
-
-    if http_status and http_status >= 500:
+    if http_status is not None and http_status >= 500:
         severity = "critical"
-    elif http_status and http_status >= 400:
+    elif http_status is not None and http_status >= 400:
         severity = "high"
     elif sla_status in ("breached", "escalated"):
         severity = "critical"
@@ -2898,12 +2907,8 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
     next_commands: List[Dict[str, Any]] = []
     terminal = False
 
-    # =========================
-    # 🚨 CRITICAL INCIDENT
-    # =========================
     if severity == "critical":
         decision = "incident_critical_escalation"
-
         next_commands = [
             {
                 "capability": "escalation_engine",
@@ -2915,17 +2920,15 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
                     "goal": "critical_escalation",
                     "reason": reason,
                     "http_status": http_status,
+                    "failed_goal": failed_goal,
                     "failed_url": failed_url,
+                    "sla_status": sla_status,
                 },
             }
         ]
 
-    # =========================
-    # ⚠️ HIGH INCIDENT
-    # =========================
     elif severity == "high":
         decision = "incident_high_escalation"
-
         next_commands = [
             {
                 "capability": "escalation_engine",
@@ -2937,17 +2940,15 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
                     "goal": "high_escalation",
                     "reason": reason,
                     "http_status": http_status,
+                    "failed_goal": failed_goal,
                     "failed_url": failed_url,
+                    "sla_status": sla_status,
                 },
             }
         ]
 
-    # =========================
-    # ⚠️ WARNING
-    # =========================
     elif severity == "medium":
         decision = "incident_warning_log_and_close"
-
         next_commands = [
             {
                 "capability": "complete_flow_demo",
@@ -2961,12 +2962,8 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
             }
         ]
 
-    # =========================
-    # ✅ LOW / OK
-    # =========================
     else:
         decision = "incident_noop_close"
-
         next_commands = [
             {
                 "capability": "complete_flow_demo",
@@ -2980,10 +2977,6 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
             }
         ]
 
-    # =========================
-    # 🧠 FLOW TRACKING
-    # =========================
-
     _append_flow_step_safe(
         flow_id=flow_id,
         workspace_id=workspace_id,
@@ -2995,7 +2988,9 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
             "severity": severity,
             "reason": reason,
             "http_status": http_status,
+            "failed_goal": failed_goal,
             "failed_url": failed_url,
+            "sla_status": sla_status,
             "run_record_id": run_record_id,
         },
     )
@@ -3011,20 +3006,24 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
                 "severity": severity,
                 "reason": reason,
                 "http_status": http_status,
+                "failed_goal": failed_goal,
+                "failed_url": failed_url,
+                "sla_status": sla_status,
             }
         },
         result_obj={
             "incident_router_result": {
                 "decision": decision,
                 "severity": severity,
+                "reason": reason,
+                "http_status": http_status,
+                "failed_goal": failed_goal,
+                "failed_url": failed_url,
+                "sla_status": sla_status,
             }
         },
         linked_run=[run_record_id],
     )
-
-    # =========================
-    # 📤 RESPONSE
-    # =========================
 
     return {
         "ok": True,
@@ -3033,6 +3032,10 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
         "decision": decision,
         "severity": severity,
         "reason": reason,
+        "http_status": http_status,
+        "failed_goal": failed_goal,
+        "failed_url": failed_url,
+        "sla_status": sla_status,
         "next_commands": next_commands,
         "terminal": terminal,
         "run_record_id": run_record_id,
