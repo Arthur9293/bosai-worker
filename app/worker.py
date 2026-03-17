@@ -2665,11 +2665,32 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         except Exception as e:
             post_ops["escalation_engine"] = {"ok": False, "error": repr(e)}
 
+    inp2 = req.input or {}
+    post_ops: Dict[str, Any] = {}
+
+    if bool(inp2.get("run_retry_queue")):
+        try:
+            post_ops["retry_queue"] = capability_retry_queue(req, run_record_id)
+        except Exception as e:
+            post_ops["retry_queue"] = {"ok": False, "error": repr(e)}
+
+    if bool(inp2.get("run_lock_recovery")):
+        try:
+            post_ops["lock_recovery"] = capability_lock_recovery(req, run_record_id)
+        except Exception as e:
+            post_ops["lock_recovery"] = {"ok": False, "error": repr(e)}
+
+    if bool(inp2.get("run_escalation_engine")):
+        try:
+            post_ops["escalation_engine"] = capability_escalation_engine(req, run_record_id)
+        except Exception as e:
+            post_ops["escalation_engine"] = {"ok": False, "error": repr(e)}
+
     if bool(inp2.get("run_event_engine")):
-    try:
-        post_ops["event_engine"] = capability_event_engine(req, run_record_id)
-    except Exception as e:
-        post_ops["event_engine"] = {"ok": False, "error": repr(e)}
+        try:
+            post_ops["event_engine"] = capability_event_engine(req, run_record_id)
+        except Exception as e:
+            post_ops["event_engine"] = {"ok": False, "error": repr(e)}
 
     if post_ops:
         result["post_ops"] = post_ops
