@@ -3571,6 +3571,70 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "flow_state_append_step",
 }
 
+def capability_complete_flow(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    payload = _normalize_flow_keys(req.input or {})
+
+    flow_id = str(
+        payload.get("flow_id")
+        or payload.get("root_event_id")
+        or ""
+    ).strip()
+
+    if not flow_id:
+        raise HTTPException(status_code=400, detail="complete_flow missing flow_id")
+
+    workspace_id = _resolve_workspace_id(req=req)
+    root_event_id = str(payload.get("root_event_id") or flow_id).strip() or flow_id
+    step_index = int(payload.get("step_index") or 0)
+    goal = str(payload.get("goal") or "finish").strip()
+
+    flow_state_append_step(
+        flow_id=flow_id,
+        workspace_id=workspace_id,
+        step_obj={
+            "step_index": step_index,
+            "capability": "complete_flow",
+            "status": "done",
+            "decision": "complete_flow",
+            "goal": goal,
+            "run_record_id": run_record_id,
+        },
+    )
+
+    final_result = {
+        "ok": True,
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "completed": True,
+        "final_status": "Completed",
+        "goal": goal,
+        "run_record_id": run_record_id,
+    }
+
+    complete_flow(
+        flow_id=flow_id,
+        workspace_id=workspace_id,
+        result_obj=final_result,
+        last_decision="complete_flow",
+        linked_run=[run_record_id],
+    )
+
+    try:
+        flow_update(
+            flow_id=flow_id,
+            workspace_id=workspace_id,
+            status="Completed",
+            current_step=step_index,
+            last_decision="complete_flow",
+            result_obj=final_result,
+            linked_run=[run_record_id],
+            finished=True,
+        )
+    except Exception:
+        pass
+
+    return final_result
+    
 def capability_event_engine(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     limit = 20
     try:
