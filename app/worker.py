@@ -4071,7 +4071,10 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
         goal_lower = goal.lower()
 
-        if goal_lower.startswith("incident_") or goal_lower.startswith("sla_"):
+       if (
+           "incident" in goal_lower
+           or "sla" in goal_lower
+       ):
             next_commands = [
                 {
                     "capability": "complete_flow_demo",
