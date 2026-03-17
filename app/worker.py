@@ -4069,7 +4069,22 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         result["root_event_id"] = root_event_id
         result["http_exec_done_count"] = http_exec_done_count
 
-        if http_exec_done_count >= 2:
+        goal_lower = goal.lower()
+
+        if goal_lower.startswith("incident_") or goal_lower.startswith("sla_"):
+            next_commands = [
+                {
+                    "capability": "complete_flow_demo",
+                    "priority": 1,
+                    "input": {
+                        "flow_id": flow_id,
+                        "root_event_id": root_event_id,
+                        "step_index": step_index + 1,
+                        "goal": "incident_flow_closed",
+                    },
+                }
+            ]
+        elif http_exec_done_count >= 2:
             next_commands = [
                 {
                     "capability": "complete_flow_demo",
