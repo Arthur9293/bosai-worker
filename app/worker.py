@@ -2331,11 +2331,15 @@ def _spawn_next_commands_from_result(
             errors.append(f"next_commands[{idx}] invalid_input")
             continue
 
+        cmd_input = _normalize_flow_keys(cmd_input)
+
         if resolved_flow_id and not str(cmd_input.get("flow_id") or "").strip():
             cmd_input["flow_id"] = resolved_flow_id
 
         if resolved_root_event_id and not str(cmd_input.get("root_event_id") or "").strip():
             cmd_input["root_event_id"] = resolved_root_event_id
+
+        cmd_input = _normalize_flow_keys(cmd_input)
 
         child_idem = f"{parent_idempotency_key}:next:{idx}:{capability}"
 
@@ -3964,7 +3968,9 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
         goal_lower = goal.lower()
 
-        if "incident" in goal_lower or "sla" in goal_lower:
+        if goal_lower in ("create_incident", "alert_incident", "sla_probe", "sla_warning_probe"):
+            next_commands = []
+        elif http_exec_done_count >= 2:
             next_commands = [
                 {
                     "capability": "complete_flow_demo",
@@ -3973,7 +3979,20 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                         "flow_id": flow_id,
                         "root_event_id": root_event_id,
                         "step_index": step_index + 1,
-                        "goal": "incident_flow_closed",
+                        "goal": "complete_flow",
+                    },
+                }
+            ]
+        else:
+            next_commands = [
+                {
+                    "capability": "decision_demo",
+                    "priority": 1,
+                    "input": {
+                        "flow_id": flow_id,
+                        "root_event_id": root_event_id,
+                        "step_index": step_index + 1,
+                        "goal": "continue_flow",
                     },
                 }
             ]
