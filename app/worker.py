@@ -4078,7 +4078,7 @@ CAPABILITIES = {
     "complete_flow": capability_complete_flow,
     "complete_flow_demo": capability_complete_flow_demo,
     "incident_router": capability_incident_router,
-    "retry_router",
+    "retry_router": capability_retry_router,
     "sla_router": capability_sla_router,
 }
   
