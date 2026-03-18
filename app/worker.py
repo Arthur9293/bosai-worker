@@ -190,14 +190,17 @@ app.add_middleware(
 _HTTP_SESSION = requests.Session()
 
 def bosai_scheduler_loop() -> None:
+    global SCHEDULER_LAST_TICK_AT, SCHEDULER_LAST_EVENT_RESULT, SCHEDULER_LAST_COMMAND_RESULT, SCHEDULER_LAST_ERROR
+
     while True:
         try:
-            print("[scheduler] tick")
+            SCHEDULER_LAST_TICK_AT = utc_now_iso()
+            SCHEDULER_LAST_ERROR = None
+            print(f"[scheduler] tick at {SCHEDULER_LAST_TICK_AT}")
 
             evt_run_record_id: Optional[str] = None
             cmd_run_record_id: Optional[str] = None
 
-            # 1) Event engine
             try:
                 evt_payload = {
                     "worker": WORKER_NAME,
@@ -209,6 +212,8 @@ def bosai_scheduler_loop() -> None:
                 evt_run_record_id, _ = create_system_run(req_evt)
 
                 evt_result = process_events(limit=20)
+                SCHEDULER_LAST_EVENT_RESULT = evt_result if isinstance(evt_result, dict) else {"raw": str(evt_result)}
+
                 if isinstance(evt_result, dict) and "run_record_id" not in evt_result:
                     evt_result["run_record_id"] = evt_run_record_id
 
@@ -216,6 +221,7 @@ def bosai_scheduler_loop() -> None:
                 print(f"[scheduler] event_engine result={evt_result}")
 
             except Exception as e:
+                SCHEDULER_LAST_ERROR = f"event_engine: {repr(e)}"
                 if evt_run_record_id:
                     try:
                         fail_system_run(evt_run_record_id, repr(e))
@@ -223,7 +229,6 @@ def bosai_scheduler_loop() -> None:
                         pass
                 print("scheduler event_engine error:", repr(e))
 
-            # 2) Command orchestrator
             try:
                 cmd_payload = {
                     "worker": WORKER_NAME,
@@ -239,6 +244,8 @@ def bosai_scheduler_loop() -> None:
                 cmd_run_record_id, _ = create_system_run(req_cmd)
 
                 cmd_result = capability_command_orchestrator(req_cmd, cmd_run_record_id)
+                SCHEDULER_LAST_COMMAND_RESULT = cmd_result if isinstance(cmd_result, dict) else {"raw": str(cmd_result)}
+
                 if isinstance(cmd_result, dict) and "run_record_id" not in cmd_result:
                     cmd_result["run_record_id"] = cmd_run_record_id
 
@@ -246,6 +253,7 @@ def bosai_scheduler_loop() -> None:
                 print(f"[scheduler] command_orchestrator result={cmd_result}")
 
             except Exception as e:
+                SCHEDULER_LAST_ERROR = f"command_orchestrator: {repr(e)}"
                 if cmd_run_record_id:
                     try:
                         fail_system_run(cmd_run_record_id, repr(e))
@@ -254,11 +262,24 @@ def bosai_scheduler_loop() -> None:
                 print("scheduler command_orchestrator error:", repr(e))
 
         except Exception as e:
+            SCHEDULER_LAST_ERROR = f"scheduler_crash: {repr(e)}"
             print("scheduler crash:", repr(e))
 
         time.sleep(10)
 
 
+@app.get("/health/scheduler")
+def health_scheduler() -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "internal_scheduler_enabled": INTERNAL_SCHEDULER_ENABLED,
+        "last_tick_at": SCHEDULER_LAST_TICK_AT,
+        "last_event_result": SCHEDULER_LAST_EVENT_RESULT,
+        "last_command_result": SCHEDULER_LAST_COMMAND_RESULT,
+        "last_error": SCHEDULER_LAST_ERROR,
+        "ts": utc_now_iso(),
+    }
+    
 @app.on_event("startup")
 def start_scheduler() -> None:
     if not INTERNAL_SCHEDULER_ENABLED:
