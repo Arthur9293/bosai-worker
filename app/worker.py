@@ -644,13 +644,35 @@ def _read_command_status(fields: Dict[str, Any]) -> str:
 
 def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     base = {}
+    parse_errors: List[Dict[str, Any]] = []
 
-    # 1) priorité aux JSON explicites
     for source_key in ("Input_JSON", "Command_JSON", "Command_Input_JSON"):
-        parsed = _json_load_maybe(fields.get(source_key))
-        if isinstance(parsed, dict) and parsed:
-            base = parsed
+        raw_val = fields.get(source_key)
+
+        if raw_val is None:
+            continue
+
+        if isinstance(raw_val, dict) and raw_val:
+            base = raw_val
             break
+
+        raw_text = str(raw_val).strip()
+        if not raw_text:
+            continue
+
+        try:
+            parsed = json.loads(raw_text)
+            if isinstance(parsed, dict) and parsed:
+                base = parsed
+                break
+        except Exception as e:
+            parse_errors.append(
+                {
+                    "source": source_key,
+                    "error": repr(e),
+                    "raw_preview": raw_text[:500],
+                }
+            )
 
     if not isinstance(base, dict):
         base = {}
@@ -679,6 +701,11 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
                 break
 
     base = _normalize_flow_keys(base)
+
+    if parse_errors:
+        print(f"[compose_command_input] parse_errors={json.dumps(parse_errors, ensure_ascii=False)}")
+        print(f"[compose_command_input] final_base={json.dumps(base, ensure_ascii=False)}")
+
     return base
     
 def _resolve_workspace_id(
