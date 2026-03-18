@@ -49,6 +49,8 @@ def _pick_policy_value(fields: Dict[str, Any], policy_type: str) -> Any:
             return value
 
     return None
+
+
 def get_policies() -> Dict[str, Any]:
     if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
         print("[policies] missing AIRTABLE env")
@@ -79,18 +81,17 @@ def get_policies() -> Dict[str, Any]:
             if enabled is False:
                 continue
 
-            name = str(fields.get("Name") or "").strip()
+            name = str(fields.get("Policy_Key") or "").strip()
+            if not name:
+                name = str(fields.get("Name") or "").strip()
             if not name:
                 name = str(fields.get("Policy") or "").strip()
             if not name:
                 name = str(fields.get("Key") or "").strip()
             if not name:
-                name = str(fields.get("Scope") or "").strip()
+                continue
 
             print("[policies] resolved name:", name)
-
-            if not name:
-                continue
 
             policy_type = str(fields.get("Type") or "").strip()
             value = _pick_policy_value(fields, policy_type)
@@ -108,5 +109,3 @@ def get_policies() -> Dict[str, Any]:
     except Exception as e:
         print("[policies] ERROR:", repr(e))
         return {}
-
-
