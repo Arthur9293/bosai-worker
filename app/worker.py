@@ -189,8 +189,17 @@ app.add_middleware(
 
 _HTTP_SESSION = requests.Session()
 
+SCHEDULER_LAST_TICK_AT: Optional[str] = None
+SCHEDULER_LAST_EVENT_RESULT: Dict[str, Any] = {}
+SCHEDULER_LAST_COMMAND_RESULT: Dict[str, Any] = {}
+SCHEDULER_LAST_ERROR: Optional[str] = None
+
+
 def bosai_scheduler_loop() -> None:
-    global SCHEDULER_LAST_TICK_AT, SCHEDULER_LAST_EVENT_RESULT, SCHEDULER_LAST_COMMAND_RESULT, SCHEDULER_LAST_ERROR
+    global SCHEDULER_LAST_TICK_AT
+    global SCHEDULER_LAST_EVENT_RESULT
+    global SCHEDULER_LAST_COMMAND_RESULT
+    global SCHEDULER_LAST_ERROR
 
     while True:
         try:
@@ -201,6 +210,7 @@ def bosai_scheduler_loop() -> None:
             evt_run_record_id: Optional[str] = None
             cmd_run_record_id: Optional[str] = None
 
+            # 1) Event engine
             try:
                 evt_payload = {
                     "worker": WORKER_NAME,
@@ -212,7 +222,9 @@ def bosai_scheduler_loop() -> None:
                 evt_run_record_id, _ = create_system_run(req_evt)
 
                 evt_result = process_events(limit=20)
-                SCHEDULER_LAST_EVENT_RESULT = evt_result if isinstance(evt_result, dict) else {"raw": str(evt_result)}
+                SCHEDULER_LAST_EVENT_RESULT = (
+                    evt_result if isinstance(evt_result, dict) else {"raw": str(evt_result)}
+                )
 
                 if isinstance(evt_result, dict) and "run_record_id" not in evt_result:
                     evt_result["run_record_id"] = evt_run_record_id
@@ -229,6 +241,7 @@ def bosai_scheduler_loop() -> None:
                         pass
                 print("scheduler event_engine error:", repr(e))
 
+            # 2) Command orchestrator
             try:
                 cmd_payload = {
                     "worker": WORKER_NAME,
@@ -244,7 +257,9 @@ def bosai_scheduler_loop() -> None:
                 cmd_run_record_id, _ = create_system_run(req_cmd)
 
                 cmd_result = capability_command_orchestrator(req_cmd, cmd_run_record_id)
-                SCHEDULER_LAST_COMMAND_RESULT = cmd_result if isinstance(cmd_result, dict) else {"raw": str(cmd_result)}
+                SCHEDULER_LAST_COMMAND_RESULT = (
+                    cmd_result if isinstance(cmd_result, dict) else {"raw": str(cmd_result)}
+                )
 
                 if isinstance(cmd_result, dict) and "run_record_id" not in cmd_result:
                     cmd_result["run_record_id"] = cmd_run_record_id
