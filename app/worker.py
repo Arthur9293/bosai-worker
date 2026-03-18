@@ -4644,32 +4644,48 @@ def process_events(limit: int = 50) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=50, minimum=1, maximum=100)
 
     formula = "OR({Status_select}='New',{Status_select}='Queued',{Status}='New',{Status}='Queued')"
+    view_name = (EVENTS_VIEW_NAME or "Queue").strip()
 
     try:
         records = airtable_list_filtered(
             EVENTS_TABLE_NAME,
             formula=formula,
-            view_name=None,
+            view_name=view_name,
             max_records=limit,
         )
         meta = {
             "ok": True,
             "table": EVENTS_TABLE_NAME,
-            "view": None,
-            "mode": "formula_only",
+            "view": view_name,
+            "mode": "formula_plus_view",
             "formula": formula,
         }
     except Exception as e:
-        records = []
-        meta = {
-            "ok": False,
-            "table": EVENTS_TABLE_NAME,
-            "view": None,
-            "mode": "formula_only_failed",
-            "formula": formula,
-            "error": repr(e),
-        }
-
+        try:
+            records = airtable_list_view(
+                EVENTS_TABLE_NAME,
+                view_name,
+                max_records=limit,
+            )
+            meta = {
+                "ok": True,
+                "table": EVENTS_TABLE_NAME,
+                "view": view_name,
+                "mode": "view_fallback",
+                "formula": formula,
+                "warning": repr(e),
+            }
+        except Exception as e2:
+            records = []
+            meta = {
+                "ok": False,
+                "table": EVENTS_TABLE_NAME,
+                "view": view_name,
+                "mode": "read_failed",
+                "formula": formula,
+                "error": repr(e2),
+                "previous_error": repr(e),
+            }
     print(f"[events/process] fetched={len(records)} meta={meta}")
 
     scanned = 0
