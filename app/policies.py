@@ -22,64 +22,27 @@ def _airtable_headers() -> Dict[str, str]:
     }
 
 
-def _coerce_value(value: Any) -> Any:
-    if isinstance(value, bool):
-        return value
+def _pick_policy_value(fields: Dict[str, Any], policy_type: str) -> Any:
+    t = str(policy_type or "").strip().lower()
 
-    if value is None:
-        return None
-
-    if isinstance(value, (int, float)):
-        return value
-
-    if isinstance(value, dict):
-        return value
-
-    if isinstance(value, list):
-        return value
-
-    s = str(value).strip()
-    if not s:
-        return None
-
-    lower = s.lower()
-    if lower in ("true", "yes", "on"):
-        return True
-    if lower in ("false", "no", "off"):
-        return False
-
-    try:
-        if "." in s:
-            return float(s)
-        return int(s)
-    except Exception:
-        pass
-
-    try:
-        parsed = json.loads(s)
-        return parsed
-    except Exception:
-        pass
-
-    return s
-
-
-def _extract_policy_value(fields: Dict[str, Any], policy_type: str) -> Any:
-    policy_type = str(policy_type or "").strip().lower()
-
-    if policy_type == "bool":
+    if t == "bool":
         return fields.get("Value_Bool")
-
-    if policy_type == "number":
+    if t == "number":
         return fields.get("Value_Number")
-
-    if policy_type == "text":
+    if t == "text":
         return fields.get("Value_Text")
+    if t == "json":
+        raw = fields.get("Value_JSON")
+        if isinstance(raw, dict):
+            return raw
+        if raw is None:
+            return None
+        try:
+            s = str(raw).strip()
+            return json.loads(s) if s else None
+        except Exception:
+            return raw
 
-    if policy_type == "json":
-        return fields.get("Value_JSON")
-
-    # fallback intelligent si Type est vide/mal renseigné
     for key in ("Value_Bool", "Value_Number", "Value_Text", "Value_JSON"):
         value = fields.get(key)
         if value not in (None, "", []):
@@ -116,11 +79,14 @@ def get_policies() -> Dict[str, Any]:
 
             name = str(fields.get("Name") or "").strip()
             if not name:
+                name = str(fields.get("Policy") or "").strip()
+            if not name:
+                name = str(fields.get("Key") or "").strip()
+            if not name:
                 continue
 
-            policy_type = str(fields.get("Type") or "").strip().lower()
-            raw_value = _extract_policy_value(fields, policy_type)
-            value = _coerce_value(raw_value)
+            policy_type = str(fields.get("Type") or "").strip()
+            value = _pick_policy_value(fields, policy_type)
 
             if value is None:
                 continue
