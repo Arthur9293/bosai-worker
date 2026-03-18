@@ -1,6 +1,4 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-PORT="${PORT:-8000}"
+#!/usr/bin/env sh
+set -eu
 
 exec python -m uvicorn app.worker:app --host 0.0.0.0 --port "$PORT"
