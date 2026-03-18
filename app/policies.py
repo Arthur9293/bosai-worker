@@ -1,3 +1,4 @@
+import json
 import os
 from typing import Any, Dict
 
@@ -24,12 +25,22 @@ def _airtable_headers() -> Dict[str, str]:
 def _coerce_value(value: Any) -> Any:
     if isinstance(value, bool):
         return value
+
     if value is None:
         return None
 
+    if isinstance(value, (int, float)):
+        return value
+
+    if isinstance(value, dict):
+        return value
+
+    if isinstance(value, list):
+        return value
+
     s = str(value).strip()
     if not s:
-        return ""
+        return None
 
     lower = s.lower()
     if lower in ("true", "yes", "on"):
@@ -42,7 +53,39 @@ def _coerce_value(value: Any) -> Any:
             return float(s)
         return int(s)
     except Exception:
-        return s
+        pass
+
+    try:
+        parsed = json.loads(s)
+        return parsed
+    except Exception:
+        pass
+
+    return s
+
+
+def _extract_policy_value(fields: Dict[str, Any], policy_type: str) -> Any:
+    policy_type = str(policy_type or "").strip().lower()
+
+    if policy_type == "bool":
+        return fields.get("Value_Bool")
+
+    if policy_type == "number":
+        return fields.get("Value_Number")
+
+    if policy_type == "text":
+        return fields.get("Value_Text")
+
+    if policy_type == "json":
+        return fields.get("Value_JSON")
+
+    # fallback intelligent si Type est vide/mal renseigné
+    for key in ("Value_Bool", "Value_Number", "Value_Text", "Value_JSON"):
+        value = fields.get(key)
+        if value not in (None, "", []):
+            return value
+
+    return None
 
 
 def get_policies() -> Dict[str, Any]:
@@ -75,8 +118,14 @@ def get_policies() -> Dict[str, Any]:
             if not name:
                 continue
 
-            raw_value = fields.get("Value")
-            policies[name] = _coerce_value(raw_value)
+            policy_type = str(fields.get("Type") or "").strip().lower()
+            raw_value = _extract_policy_value(fields, policy_type)
+            value = _coerce_value(raw_value)
+
+            if value is None:
+                continue
+
+            policies[name] = value
 
         return policies
 
