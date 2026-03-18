@@ -49,10 +49,9 @@ def _pick_policy_value(fields: Dict[str, Any], policy_type: str) -> Any:
             return value
 
     return None
-
-
 def get_policies() -> Dict[str, Any]:
     if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+        print("[policies] missing AIRTABLE env")
         return {}
 
     try:
@@ -68,10 +67,13 @@ def get_policies() -> Dict[str, Any]:
         response.raise_for_status()
 
         records = response.json().get("records", [])
+        print(f"[policies] fetched records: {len(records)}")
+
         policies: Dict[str, Any] = {}
 
         for rec in records:
             fields = rec.get("fields", {}) or {}
+            print("[policies] fields keys:", list(fields.keys()))
 
             enabled = fields.get("Enabled", True)
             if enabled is False:
@@ -83,17 +85,28 @@ def get_policies() -> Dict[str, Any]:
             if not name:
                 name = str(fields.get("Key") or "").strip()
             if not name:
+                name = str(fields.get("Scope") or "").strip()
+
+            print("[policies] resolved name:", name)
+
+            if not name:
                 continue
 
             policy_type = str(fields.get("Type") or "").strip()
             value = _pick_policy_value(fields, policy_type)
+
+            print("[policies] type/value:", policy_type, value)
 
             if value is None:
                 continue
 
             policies[name] = value
 
+        print("[policies] final keys:", list(policies.keys()))
         return policies
 
-    except Exception:
+    except Exception as e:
+        print("[policies] ERROR:", repr(e))
         return {}
+
+
