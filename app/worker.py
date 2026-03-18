@@ -4025,6 +4025,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
     
 EVENT_CAPABILITY_ALLOWLIST = {
     "http_exec",
+    "escalation_engine",
     "chain_demo",
     "planner_demo",
     "decision_demo",
@@ -4038,6 +4039,7 @@ EVENT_CAPABILITY_ALLOWLIST = {
 
 EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "http_exec",
+    "escalation_engine",
     "chain_demo",
     "planner_demo",
     "decision_demo",
