@@ -2949,6 +2949,58 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
     else:
         severity = "low"
 
+    incident_record_id = ""
+    incident_create_result: Dict[str, Any] = {"ok": False, "mode": "not_attempted"}
+
+    if severity in ("critical", "high", "medium"):
+        incident_fields_candidates = [
+            {
+                "Error_ID": flow_id,
+                "Name": failed_goal or reason or f"incident-{flow_id}",
+                "Statut_incident": "Nouveau",
+                "Source": "bosai-worker",
+                "Severity": severity,
+                "Linked_Run": [run_record_id],
+                "Workspace": workspace_id,
+                "Error_Message": reason,
+                "HTTP_Status": http_status,
+                "Failed_URL": failed_url,
+                "SLA_Status": sla_status,
+            },
+            {
+                "Error_ID": flow_id,
+                "Name": failed_goal or reason or f"incident-{flow_id}",
+                "Statut_incident": "Nouveau",
+                "Source": "bosai-worker",
+                "Severity": severity,
+                "Linked_Run": [run_record_id],
+                "Error_Message": reason,
+                "SLA_Status": sla_status,
+            },
+            {
+                "Error_ID": flow_id,
+                "Name": failed_goal or reason or f"incident-{flow_id}",
+                "Statut_incident": "Nouveau",
+                "Source": "bosai-worker",
+                "Severity": severity,
+                "Linked_Run": [run_record_id],
+            },
+            {
+                "Name": failed_goal or reason or f"incident-{flow_id}",
+                "Statut_incident": "Nouveau",
+                "Source": "bosai-worker",
+                "Severity": severity,
+            },
+        ]
+
+        incident_create_result = _airtable_create_best_effort(
+            LOGS_ERRORS_TABLE_NAME,
+            incident_fields_candidates,
+        )
+
+        if incident_create_result.get("ok"):
+            incident_record_id = str(incident_create_result.get("record_id") or "").strip()
+
     decision = ""
     next_commands: List[Dict[str, Any]] = []
     terminal = False
@@ -2969,6 +3021,7 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
                     "failed_goal": failed_goal,
                     "failed_url": failed_url,
                     "sla_status": sla_status,
+                    "incident_record_id": incident_record_id,
                 },
             }
         ]
@@ -2989,6 +3042,7 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
                     "failed_goal": failed_goal,
                     "failed_url": failed_url,
                     "sla_status": sla_status,
+                    "incident_record_id": incident_record_id,
                 },
             }
         ]
@@ -3037,6 +3091,7 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
             "failed_goal": failed_goal,
             "failed_url": failed_url,
             "sla_status": sla_status,
+            "incident_record_id": incident_record_id,
             "run_record_id": run_record_id,
         },
     )
@@ -3055,6 +3110,7 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
                 "failed_goal": failed_goal,
                 "failed_url": failed_url,
                 "sla_status": sla_status,
+                "incident_record_id": incident_record_id,
             }
         },
         result_obj={
@@ -3066,6 +3122,8 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
                 "failed_goal": failed_goal,
                 "failed_url": failed_url,
                 "sla_status": sla_status,
+                "incident_record_id": incident_record_id,
+                "incident_create_result": incident_create_result,
             }
         },
         linked_run=[run_record_id],
@@ -3085,6 +3143,8 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
         "next_commands": next_commands,
         "terminal": terminal,
         "run_record_id": run_record_id,
+        "incident_record_id": incident_record_id,
+        "incident_create_result": incident_create_result,
     }
 
 def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
