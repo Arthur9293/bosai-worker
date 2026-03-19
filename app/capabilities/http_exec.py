@@ -790,6 +790,12 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
                 "Tool_Mode", "tool_mode",
                 "Tool_Intent", "tool_intent",
                 "Approved", "approved",
+                "flow_id", "Flow_ID",
+                "root_event_id", "Root_Event_ID",
+                "step_index", "Step_Index",
+                "goal", "Goal",
+                "retry_count", "Retry_Count",
+                "retry_max", "Retry_Max",
             )
         ):
             inp = nested
@@ -806,7 +812,9 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
     local_timeout = float(HTTP_EXEC_TIMEOUT_SECONDS)
 
     if TOOLCATALOG_ENFORCE_HTTP_EXEC and tool_key:
-        tool_fields = _toolcatalog_enforce_or_raise(sess, req, tool_key, tool_mode, tool_intent, approved)
+        tool_fields = _toolcatalog_enforce_or_raise(
+            sess, req, tool_key, tool_mode, tool_intent, approved
+        )
 
         args_obj = {}
         if isinstance(extracted.get("json_body"), dict):
@@ -814,7 +822,9 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
         _toolcatalog_minimal_args_check(tool_fields, args_obj)
 
         if TOOLCATALOG_OVERRIDE_HTTP:
-            url_final, method_final, headers_final, timeout_s = _toolcatalog_apply_overrides(tool_fields, extracted)
+            url_final, method_final, headers_final, timeout_s = _toolcatalog_apply_overrides(
+                tool_fields, extracted
+            )
             extracted["raw_target"] = url_final
             extracted["method"] = method_final
             extracted["headers"] = headers_final
@@ -919,6 +929,8 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
                     "input": {
                         "flow_id": flow_id,
                         "root_event_id": root_event_id,
+                        "step_index": step_index + 1,
+                        "goal": "incident_after_http_failure",
                         "reason": reason,
                         "http_status": status_code,
                         "failed_url": url,
@@ -936,7 +948,7 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
                     "input": {
                         "flow_id": flow_id,
                         "root_event_id": root_event_id,
-                        "step_index": step_index,
+                        "step_index": step_index + 1,
                         "goal": "retry_after_http_failure",
                         "reason": reason,
                         "http_status": status_code,
@@ -957,7 +969,9 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
             "authorization_present": ("Authorization" in secret_headers),
             "apikey_present": ("apikey" in secret_headers),
         }
-        sec_diag["supabase_mode_detected"] = ("apikey" in secret_headers and "Authorization" in secret_headers)
+        sec_diag["supabase_mode_detected"] = (
+            "apikey" in secret_headers and "Authorization" in secret_headers
+        )
 
         return {
             "ok": True,
@@ -983,6 +997,8 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
             "diagnostics": {
                 "secrets": sec_diag,
             },
+            "flow_id": flow_id or None,
+            "root_event_id": root_event_id or None,
             "note": "HTTP call skipped (dry_run).",
         }
 
@@ -1056,6 +1072,12 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
         break
 
     if resp is None:
+        next_commands = _build_failure_next_commands(
+            status_code=None,
+            reason=last_err or "request_failed",
+            failed_goal=goal,
+        )
+
         return {
             "ok": False,
             "run_record_id": run_record_id,
@@ -1076,11 +1098,17 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
             "response_text": None,
             "flow_id": flow_id or None,
             "root_event_id": root_event_id or None,
-            "next_commands": _build_failure_next_commands(
-                status_code=None,
-                reason=last_err or "request_failed",
-                failed_goal=goal,
-            ),
+            "next_commands": next_commands,
+            "terminal": False if next_commands else True,
+            "spawn_summary": {
+                "ok": True,
+                "spawned": len(next_commands),
+                "skipped": 0,
+                "errors": [],
+                "flow_id": flow_id or None,
+                "root_event_id": root_event_id or None,
+                "max_depth": 10,
+            },
         }
 
     status = int(resp.status_code)
@@ -1098,8 +1126,16 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
             text_preview = None
 
     ok = 200 <= status < 300
+    next_commands: List[Dict[str, Any]] = []
 
-    result = {
+    if not ok:
+        next_commands = _build_failure_next_commands(
+            status_code=status,
+            reason="http_failure",
+            failed_goal=goal,
+        )
+
+    return {
         "ok": ok,
         "run_record_id": run_record_id,
         "host": meta["host"],
@@ -1124,13 +1160,15 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
         "response_text": (text_preview[:2000] if text_preview else None),
         "flow_id": flow_id or None,
         "root_event_id": root_event_id or None,
+        "next_commands": next_commands,
+        "terminal": False if next_commands else True,
+        "spawn_summary": {
+            "ok": True,
+            "spawned": len(next_commands),
+            "skipped": 0,
+            "errors": [],
+            "flow_id": flow_id or None,
+            "root_event_id": root_event_id or None,
+            "max_depth": 10,
+        },
     }
-
-    if not ok:
-        result["next_commands"] = _build_failure_next_commands(
-            status_code=status,
-            reason="http_failure",
-            failed_goal=goal,
-        )
-
-    return result
