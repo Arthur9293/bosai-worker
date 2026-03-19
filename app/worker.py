@@ -3982,7 +3982,6 @@ def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, An
         "run_record_id": run_record_id,
     }
     
-
 def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
     workspace_id = _resolve_workspace_id(req=req)
@@ -4100,21 +4099,11 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         result["http_exec_done_count"] = http_exec_done_count
 
         goal_lower = goal.lower()
-        payload_json = payload.get("json") if isinstance(payload.get("json"), dict) else {}
-        tool_intent = str(
-            payload.get("Tool_Intent")
-            or payload.get("tool_intent")
-            or payload_json.get("Tool_Intent")
-            or payload_json.get("tool_intent")
-            or ""
-        ).strip().lower()
-        event_type = str(payload_json.get("type") or "").strip().lower()
 
-        if (
-            goal_lower in ("create_incident", "alert_incident", "sla_probe", "sla_warning_probe")
-            or tool_intent == "escalate_incident"
-            or event_type == "incident_escalation"
-        ):
+        if goal_lower in ("create_incident", "alert_incident", "sla_probe", "sla_warning_probe"):
+            next_commands = []
+
+        elif goal_lower == "escalation_send":
             next_commands = [
                 {
                     "capability": "complete_flow_demo",
