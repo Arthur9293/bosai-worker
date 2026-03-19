@@ -881,6 +881,76 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
     if raw_data is not None and json_body is not None:
         raise HTTPException(status_code=400, detail="HTTP_EXEC use json/body OR data, not both.")
 
+    flow_id = str(_pick_first(inp.get("flow_id"), inp.get("Flow_ID")) or "").strip()
+    root_event_id = str(_pick_first(inp.get("root_event_id"), inp.get("Root_Event_ID")) or "").strip()
+    step_index_raw = _pick_first(inp.get("step_index"), inp.get("Step_Index"), 0)
+    goal = str(_pick_first(inp.get("goal"), inp.get("Goal")) or "").strip()
+    retry_count_raw = _pick_first(inp.get("retry_count"), inp.get("Retry_Count"), 0)
+    retry_max_flow_raw = _pick_first(inp.get("retry_max"), inp.get("Retry_Max"), 2)
+
+    try:
+        step_index = int(step_index_raw or 0)
+    except Exception:
+        step_index = 0
+
+    try:
+        retry_count_flow = int(retry_count_raw or 0)
+    except Exception:
+        retry_count_flow = 0
+
+    try:
+        retry_max_flow = int(retry_max_flow_raw or 2)
+    except Exception:
+        retry_max_flow = 2
+
+    def _build_failure_next_commands(
+        *,
+        status_code: Optional[int],
+        reason: str,
+        failed_goal: str = "",
+    ) -> List[Dict[str, Any]]:
+        next_commands: List[Dict[str, Any]] = []
+
+        if flow_id or root_event_id:
+            next_commands.append(
+                {
+                    "capability": "incident_router",
+                    "priority": 1,
+                    "input": {
+                        "flow_id": flow_id,
+                        "root_event_id": root_event_id,
+                        "reason": reason,
+                        "http_status": status_code,
+                        "failed_url": url,
+                        "failed_method": method,
+                        "failed_goal": failed_goal,
+                        "run_record_id": run_record_id,
+                    },
+                }
+            )
+
+            next_commands.append(
+                {
+                    "capability": "retry_router",
+                    "priority": 2,
+                    "input": {
+                        "flow_id": flow_id,
+                        "root_event_id": root_event_id,
+                        "step_index": step_index,
+                        "goal": "retry_after_http_failure",
+                        "reason": reason,
+                        "http_status": status_code,
+                        "failed_url": url,
+                        "failed_method": method,
+                        "failed_goal": failed_goal,
+                        "retry_count": retry_count_flow,
+                        "retry_max": retry_max_flow,
+                    },
+                }
+            )
+
+        return next_commands
+
     if dry_run:
         sec_diag = _diagnose_secret_keys(merged_secret_keys)
         sec_diag["headers_injected"] = {
@@ -1004,6 +1074,13 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
             "response_headers": {},
             "response_json": None,
             "response_text": None,
+            "flow_id": flow_id or None,
+            "root_event_id": root_event_id or None,
+            "next_commands": _build_failure_next_commands(
+                status_code=None,
+                reason=last_err or "request_failed",
+                failed_goal=goal,
+            ),
         }
 
     status = int(resp.status_code)
@@ -1021,7 +1098,8 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
             text_preview = None
 
     ok = 200 <= status < 300
-    return {
+
+    result = {
         "ok": ok,
         "run_record_id": run_record_id,
         "host": meta["host"],
@@ -1044,4 +1122,15 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
         },
         "response_json": parsed_json,
         "response_text": (text_preview[:2000] if text_preview else None),
+        "flow_id": flow_id or None,
+        "root_event_id": root_event_id or None,
     }
+
+    if not ok:
+        result["next_commands"] = _build_failure_next_commands(
+            status_code=status,
+            reason="http_failure",
+            failed_goal=goal,
+        )
+
+    return result
