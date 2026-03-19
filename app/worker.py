@@ -1527,6 +1527,14 @@ def fail_flow(
 
 def capability_complete_flow_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
+        command_id = (
+        payload.get("command_id")
+        or payload.get("linked_command_id")
+        or payload.get("command_record_id")
+        or getattr(req, "command_id", None)
+        or ""
+    )
+    command_id = str(command_id).strip()
     flow_id, root_event_id = _resolve_flow_ids(payload)
 
     if not flow_id:
@@ -3001,6 +3009,8 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
                 "Flow_ID": flow_id,
                 "Root_Event_ID": root_event_id,
                 "Run_ID": run_record_id,
+                "Command_ID": command_id,
+                "Linked_Command": [command_id] if command_id else [],
                 "Name": failed_goal or reason or f"incident-{flow_id}",
                 "Statut_incident": "Nouveau",
                 "Source": "bosai-worker",
@@ -3012,41 +3022,45 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
                 "HTTP_Status": http_status,
                 "Failed_URL": failed_url,
                 "SLA_Status": sla_status,
-           },
-           {
-                "Error_ID": flow_id,
-                "Flow_ID": flow_id,
-                "Root_Event_ID": root_event_id,
-                "Run_ID": run_record_id,
-                "Name": failed_goal or reason or f"incident-{flow_id}",
-                "Statut_incident": "Nouveau",
-                "Source": "bosai-worker",
-                "Incident_Source": "incident_router",
-                "Severity": severity,
-                "Linked_Run": [run_record_id] if run_record_id else [],
-                "Error_Message": reason,
-                "SLA_Status": sla_status,
-           },
-           {
-                "Error_ID": flow_id,
-                "Flow_ID": flow_id,
-                "Root_Event_ID": root_event_id,
-                "Run_ID": run_record_id,
-                "Name": failed_goal or reason or f"incident-{flow_id}",
-                "Statut_incident": "Nouveau",
-                "Source": "bosai-worker",
-                "Incident_Source": "incident_router",
-                "Severity": severity,
-                "Linked_Run": [run_record_id] if run_record_id else [],
-           },
-           {
-                "Name": failed_goal or reason or f"incident-{flow_id}",
-                "Statut_incident": "Nouveau",
-                "Source": "bosai-worker",
-                "Incident_Source": "incident_router",
-                "Severity": severity,
+            },   
+            {
+                 "Error_ID": flow_id,
+                 "Flow_ID": flow_id,
+                 "Root_Event_ID": root_event_id,
+                 "Run_ID": run_record_id,
+                 "Command_ID": command_id,
+                 "Linked_Command": [command_id] if command_id else [],
+                 "Name": failed_goal or reason or f"incident-{flow_id}",
+                 "Statut_incident": "Nouveau",
+                 "Source": "bosai-worker",
+                 "Incident_Source": "incident_router",
+                 "Severity": severity,
+                 "Linked_Run": [run_record_id] if run_record_id else [],
+                 "Error_Message": reason,
+                 "SLA_Status": sla_status,
             },
-        ]        
+            {
+                 "Error_ID": flow_id,
+                 "Flow_ID": flow_id,
+                 "Root_Event_ID": root_event_id,
+                 "Run_ID": run_record_id,
+                 "Command_ID": command_id,
+                 "Linked_Command": [command_id] if command_id else [],
+                 "Name": failed_goal or reason or f"incident-{flow_id}",
+                 "Statut_incident": "Nouveau",
+                 "Source": "bosai-worker",
+                 "Incident_Source": "incident_router",
+                 "Severity": severity,
+                 "Linked_Run": [run_record_id] if run_record_id else [],
+             },
+             {
+                 "Name": failed_goal or reason or f"incident-{flow_id}",
+                 "Statut_incident": "Nouveau",
+                 "Source": "bosai-worker",
+                 "Incident_Source": "incident_router",
+                 "Severity": severity,
+             },
+        ]               
         incident_create_result = _airtable_create_best_effort(
             LOGS_ERRORS_TABLE_NAME,
             incident_fields_candidates,
