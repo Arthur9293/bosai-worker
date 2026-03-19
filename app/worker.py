@@ -1527,7 +1527,7 @@ def fail_flow(
 
 def capability_complete_flow_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
-        command_id = (
+    command_id = (
         payload.get("command_id")
         or payload.get("linked_command_id")
         or payload.get("command_record_id")
