@@ -117,19 +117,39 @@ def capability_escalation_dispatch(
             errors.append(f"{log_id}: missing ESCALATION_HTTP_TARGET (no command created)")
             continue
 
+        # Build stable flow context for escalation command
+        flow_id = str(
+            fields.get("Flow_ID")
+            or fields.get("flow_id")
+            or fields.get("Root_Event_ID")
+            or fields.get("root_event_id")
+            or f"esc-flow:{log_id}"
+        ).strip()
+
+        root_event_id = str(
+            fields.get("Root_Event_ID")
+            or fields.get("root_event_id")
+            or flow_id
+        ).strip()
+
         # Build command input for http_exec
         payload = {
             "source": "bosai-worker",
             "type": "incident_escalation",
             "log_record_id": log_id,
             "run_record_id": run_record_id,
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
             "fields": fields,  # keep raw for Make / downstream
             "ts": utc_now_iso(),
         }
 
         cmd_input: Dict[str, Any] = {
             "http_target": http_target,
+            "url": http_target,
             "method": http_method,
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
             "json": payload,
         }
 
@@ -150,7 +170,11 @@ def capability_escalation_dispatch(
                 "Status_select": "Queued",
                 "Idempotency_Key": idem,
                 "Command_JSON": _json_dumps(cmd_input),
+                "Input_JSON": _json_dumps(cmd_input),
                 "Linked_Run": [run_record_id],
+                "Flow_ID": flow_id,
+                "Root_Event_ID": root_event_id,
+                "Workspace_ID": str(fields.get("Workspace_ID") or "production").strip() or "production",
             }
             cmd_id = airtable_create(commands_table_name, cmd_fields)
 
@@ -161,11 +185,9 @@ def capability_escalation_dispatch(
                     "Escalation_Queued_At": utc_now_iso(),
                     "Linked_Run": [run_record_id],
                 }
-                # optional link
                 update_fields["Escalation_Command"] = [cmd_id]
                 airtable_update(logs_errors_table_name, log_id, update_fields)
             except Exception as e:
-                # still consider queued since command exists
                 try:
                     airtable_update(logs_errors_table_name, log_id, {"Escalation_Last_Error": repr(e)})
                 except Exception:
@@ -180,7 +202,6 @@ def capability_escalation_dispatch(
                 airtable_update(logs_errors_table_name, log_id, {"Escalation_Last_Error": repr(e)})
             except Exception:
                 pass
-
     return {
         "ok": True,
         "mode": mode,
