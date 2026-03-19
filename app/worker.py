@@ -5078,8 +5078,24 @@ def get_command_detail(record_id: str) -> Dict[str, Any]:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"command_detail_failed: {repr(e)}")
+    raise HTTPException(status_code=500, detail=f"command_detail_failed: {repr(e)}")
+    
+@app.post("/internal/escalate")
+async def internal_escalate(request: Request) -> Dict[str, Any]:
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.")
 
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be an object.")
+
+    return {
+        "ok": True,
+        "message": "incident_escalated",
+        "received": payload,
+        "ts": utc_now_iso(),
+    }
 
 @app.get("/runs/{record_id}")
 def get_run_detail(record_id: str) -> Dict[str, Any]:
