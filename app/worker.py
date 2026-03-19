@@ -2325,7 +2325,6 @@ def _infer_root_event_id(fields: Dict[str, Any], parent_idempotency_key: str) ->
 
     return ""
     
-
 def _spawn_next_commands_from_result(
     parent_command_id: str,
     parent_idempotency_key: str,
@@ -2333,6 +2332,7 @@ def _spawn_next_commands_from_result(
     result_obj: Dict[str, Any],
     root_event_id: str = "",
 ) -> Dict[str, Any]:
+
     if not isinstance(result_obj, dict):
         return {"ok": True, "spawned": 0, "skipped": 0, "errors": []}
 
@@ -2356,40 +2356,47 @@ def _spawn_next_commands_from_result(
     skipped = 0
     errors: List[str] = []
 
-resolved_flow_id = str(
-    result_obj.get("flow_id")
-    or result_obj.get("root_event_id")
-    or root_event_id
-    or ""
-).strip()
+    # =========================
+    # Resolve flow IDs
+    # =========================
+    resolved_flow_id = str(
+        result_obj.get("flow_id")
+        or result_obj.get("root_event_id")
+        or root_event_id
+        or ""
+    ).strip()
 
-resolved_root_event_id = str(
-    result_obj.get("root_event_id")
-    or root_event_id
-    or resolved_flow_id
-    or ""
-).strip()
+    resolved_root_event_id = str(
+        result_obj.get("root_event_id")
+        or root_event_id
+        or resolved_flow_id
+        or ""
+    ).strip()
 
-if not resolved_flow_id and isinstance(result_obj, dict):
-    previous = result_obj.get("previous")
-    if isinstance(previous, dict):
-        resolved_flow_id = str(
-            previous.get("flow_id")
-            or previous.get("root_event_id")
-            or ""
-        ).strip()
+    if not resolved_flow_id:
+        previous = result_obj.get("previous")
+        if isinstance(previous, dict):
+            resolved_flow_id = str(
+                previous.get("flow_id")
+                or previous.get("root_event_id")
+                or ""
+            ).strip()
 
-if not resolved_root_event_id and isinstance(result_obj, dict):
-    previous = result_obj.get("previous")
-    if isinstance(previous, dict):
-        resolved_root_event_id = str(
-            previous.get("root_event_id")
-            or previous.get("flow_id")
-            or resolved_flow_id
-            or ""
-        ).strip()
+    if not resolved_root_event_id:
+        previous = result_obj.get("previous")
+        if isinstance(previous, dict):
+            resolved_root_event_id = str(
+                previous.get("root_event_id")
+                or previous.get("flow_id")
+                or resolved_flow_id
+                or ""
+            ).strip()
 
+    # =========================
+    # Spawn next commands
+    # =========================
     for idx, item in enumerate(next_commands, start=1):
+
         if not isinstance(item, dict):
             skipped += 1
             errors.append(f"next_commands[{idx}] invalid_item")
@@ -2479,6 +2486,9 @@ if not resolved_root_event_id and isinstance(result_obj, dict):
         else:
             errors.append(f"next_commands[{idx}] create_failed:{create_res.get('error')}")
 
+    # =========================
+    # Final return (CORRECT INDENT)
+    # =========================
     return {
         "ok": True,
         "spawned": spawned,
