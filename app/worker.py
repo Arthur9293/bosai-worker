@@ -2356,19 +2356,38 @@ def _spawn_next_commands_from_result(
     skipped = 0
     errors: List[str] = []
 
-    resolved_flow_id = str(
-        result_obj.get("flow_id")
-        or result_obj.get("root_event_id")
-        or root_event_id
-        or ""
-    ).strip()
+resolved_flow_id = str(
+    result_obj.get("flow_id")
+    or result_obj.get("root_event_id")
+    or root_event_id
+    or ""
+).strip()
 
-    resolved_root_event_id = str(
-        result_obj.get("root_event_id")
-        or root_event_id
-        or resolved_flow_id
-        or ""
-    ).strip()
+resolved_root_event_id = str(
+    result_obj.get("root_event_id")
+    or root_event_id
+    or resolved_flow_id
+    or ""
+).strip()
+
+if not resolved_flow_id and isinstance(result_obj, dict):
+    previous = result_obj.get("previous")
+    if isinstance(previous, dict):
+        resolved_flow_id = str(
+            previous.get("flow_id")
+            or previous.get("root_event_id")
+            or ""
+        ).strip()
+
+if not resolved_root_event_id and isinstance(result_obj, dict):
+    previous = result_obj.get("previous")
+    if isinstance(previous, dict):
+        resolved_root_event_id = str(
+            previous.get("root_event_id")
+            or previous.get("flow_id")
+            or resolved_flow_id
+            or ""
+        ).strip()
 
     for idx, item in enumerate(next_commands, start=1):
         if not isinstance(item, dict):
