@@ -29,6 +29,8 @@ def capability_escalation_dispatch(
     airtable_list_view,
     airtable_create,
     airtable_update,
+    lock_acquire,
+    lock_release,
     http_timeout_seconds: float,
     logs_errors_table_name: str,
     logs_errors_view_name: str,
@@ -50,7 +52,10 @@ def capability_escalation_dispatch(
     else:
         only_breached = _safe_bool(only_breached)
 
-    cmd_cap = (os.getenv("ESCALATION_COMMAND_CAPABILITY", "internal_escalate") or "internal_escalate").strip()
+    cmd_cap = (
+        os.getenv("ESCALATION_COMMAND_CAPABILITY", "internal_escalate")
+        or "internal_escalate"
+    ).strip()
 
     http_target = (os.getenv("ESCALATION_HTTP_TARGET", "") or "").strip()
     http_method = (os.getenv("ESCALATION_HTTP_METHOD", "POST") or "POST").strip().upper()
@@ -142,7 +147,20 @@ def capability_escalation_dispatch(
 
         idem = f"esc:{log_id}:{run_record_id}"
 
+        lock_key = f"esc-lock:{log_id}"
+        lock_acquired = False
+
         try:
+            lock_acquired = lock_acquire(
+                lock_key,
+                owner=run_record_id,
+                ttl_seconds=60,
+            )
+
+            if not lock_acquired:
+                skipped += 1
+                continue
+
             cmd_fields: Dict[str, Any] = {
                 "Capability": cmd_cap,
                 "Status_select": "Queued",
@@ -157,7 +175,6 @@ def capability_escalation_dispatch(
 
             cmd_id = airtable_create(commands_table_name, cmd_fields)
 
-            # 🔥 PATCH PRO
             try:
                 queued_at = utc_now_iso()
 
@@ -238,6 +255,13 @@ def capability_escalation_dispatch(
             except Exception:
                 pass
 
+        finally:
+            if lock_acquired:
+                try:
+                    lock_release(lock_key, owner=run_record_id)
+                except Exception:
+                    pass
+
     return {
         "ok": True,
         "mode": mode,
@@ -261,6 +285,8 @@ def run(
     airtable_list_view,
     airtable_create,
     airtable_update,
+    lock_acquire,
+    lock_release,
     http_timeout_seconds: float,
     logs_errors_table_name: str,
     logs_errors_view_name: str,
@@ -273,6 +299,8 @@ def run(
         airtable_list_view=airtable_list_view,
         airtable_create=airtable_create,
         airtable_update=airtable_update,
+        lock_acquire=lock_acquire,
+        lock_release=lock_release,
         http_timeout_seconds=http_timeout_seconds,
         logs_errors_table_name=logs_errors_table_name,
         logs_errors_view_name=logs_errors_view_name,
