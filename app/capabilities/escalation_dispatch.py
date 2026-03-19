@@ -132,7 +132,7 @@ def capability_escalation_dispatch(
             or flow_id
         ).strip()
 
-        # Build command input for http_exec
+                # Build command input for http_exec
         payload = {
             "source": "bosai-worker",
             "type": "incident_escalation",
@@ -140,20 +140,20 @@ def capability_escalation_dispatch(
             "run_record_id": run_record_id,
             "flow_id": flow_id,
             "root_event_id": root_event_id,
-            "fields": fields,  # keep raw for Make / downstream
+            "fields": fields,
             "ts": utc_now_iso(),
         }
 
         cmd_input: Dict[str, Any] = {
-            "http_target": http_target,
             "url": http_target,
+            "http_target": http_target,
             "method": http_method,
             "flow_id": flow_id,
             "root_event_id": root_event_id,
+            "goal": "escalation_send",
             "json": payload,
         }
 
-        # optional ToolCatalog governance fields
         if tool_key:
             cmd_input["Tool_Key"] = tool_key
         if tool_mode:
@@ -162,7 +162,7 @@ def capability_escalation_dispatch(
             cmd_input["Tool_Intent"] = tool_intent
 
         idem = f"esc:{log_id}:{run_record_id}"
-
+        
         # Create command record
         try:
             cmd_fields: Dict[str, Any] = {
