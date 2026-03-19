@@ -923,21 +923,24 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
 
         if flow_id or root_event_id:
             next_commands.append(
-                {
-                    "capability": "incident_router",
-                    "priority": 1,
-                    "input": {
-                        "flow_id": flow_id,
-                        "root_event_id": root_event_id,
-                        "step_index": step_index + 1,
-                        "goal": "incident_after_http_failure",
-                        "reason": reason,
-                        "http_status": status_code,
-                        "failed_url": url,
-                        "failed_method": method,
-                        "failed_goal": failed_goal,
-                        "run_record_id": run_record_id,
-                    },
+               {
+                   "capability": "incident_router",
+                   "priority": 1,
+                   "input": {
+                       "flow_id": flow_id,
+                       "root_event_id": root_event_id,
+                       "step_index": step_index + 1,
+                       "goal": "incident_after_http_failure",
+                       "reason": reason,
+                       "http_status": status_code,
+                       "failed_url": url,
+                       "failed_method": method,
+                       "failed_goal": failed_goal,
+                       "run_record_id": run_record_id,
+                       "workspace_id": "production",
+                       "severity": "high",
+                       "incident_type": "http_failure",
+                   },
                 }
             )
 
