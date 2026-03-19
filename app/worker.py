@@ -5067,7 +5067,7 @@ def get_command_detail(record_id: str) -> Dict[str, Any]:
     except HTTPException:
         raise
     except Exception as e:
-    raise HTTPException(status_code=500, detail=f"command_detail_failed: {repr(e)}")
+        raise HTTPException(status_code=500, detail=f"command_detail_failed: {repr(e)}")
     
 @app.post("/internal/escalate")
 async def internal_escalate(request: Request) -> Dict[str, Any]:
