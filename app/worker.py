@@ -2782,12 +2782,13 @@ def capability_escalation_engine(req: RunRequest, run_record_id: str) -> Dict[st
         airtable_list_view=airtable_list_view,
         airtable_create=airtable_create,
         airtable_update=airtable_update,
+        lock_acquire=lock_acquire,
+        lock_release=lock_release,
         http_timeout_seconds=HTTP_TIMEOUT_SECONDS,
         logs_errors_table_name=LOGS_ERRORS_TABLE_NAME,
         logs_errors_view_name=LOGS_ERRORS_VIEW_NAME,
         commands_table_name=COMMANDS_TABLE_NAME,
     )
-
 
 def capability_internal_escalate_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     return capability_internal_escalate(
