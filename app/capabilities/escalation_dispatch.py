@@ -2,13 +2,16 @@
 import os
 import json
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+
 def _json_dumps(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False)
+
 
 def _safe_bool(v: Any) -> bool:
     if v is True:
@@ -16,6 +19,7 @@ def _safe_bool(v: Any) -> bool:
     if v in (1, "1", "true", "True", "yes", "Yes"):
         return True
     return False
+
 
 def capability_escalation_dispatch(
     req,
@@ -31,16 +35,16 @@ def capability_escalation_dispatch(
     commands_table_name: str,
 ) -> Dict[str, Any]:
     """
-    Reads Logs_Erreurs (Active) and creates Commands (Queued) for Breached incidents.
-    SAFE / best-effort:
-      - If formulas fail or fields are missing, it falls back and skips safely.
-      - If already Escalation_Queued, it skips.
-      - Writes back flags best-effort.
+    Reads Logs_Erreurs (Active) and creates Commands (Queued) for breached incidents.
+
+    Internal escalation mode:
+      - Creates Commands with capability = internal_escalate
+      - Does NOT call the external webhook directly from this dispatcher
+      - Marks Escalation_Queued best-effort on the incident record
     """
 
     inp = req.input or {}
 
-    # limit
     env_limit = int((os.getenv("ESCALATION_DISPATCH_LIMIT", "50") or "50").strip())
     limit = int(inp.get("limit", env_limit) or env_limit)
     if limit <= 0:
@@ -54,19 +58,15 @@ def capability_escalation_dispatch(
     else:
         only_breached = _safe_bool(only_breached)
 
-    # command config
-    cmd_cap = (os.getenv("ESCALATION_COMMAND_CAPABILITY", "http_exec") or "http_exec").strip()
+    # Switched to internal escalation
+    cmd_cap = (os.getenv("ESCALATION_COMMAND_CAPABILITY", "internal_escalate") or "internal_escalate").strip()
+
+    # Kept for fallback payload enrichment if needed
     http_target = (os.getenv("ESCALATION_HTTP_TARGET", "") or "").strip()
     http_method = (os.getenv("ESCALATION_HTTP_METHOD", "POST") or "POST").strip().upper()
 
-    tool_key = (os.getenv("ESCALATION_TOOL_KEY", "") or "").strip()
-    tool_mode = (os.getenv("ESCALATION_TOOL_MODE", "") or "").strip()
-    tool_intent = (os.getenv("ESCALATION_TOOL_INTENT", "") or "").strip()
-
     view_name = (req.view or logs_errors_view_name or "Active").strip()
 
-    # Prefer formula
-    # NOTE: Escalation_Queued checkbox may not exist; formula can error → fallback.
     if only_breached:
         formula = "AND({SLA_Status}='Breached',OR({Escalation_Queued}=0,{Escalation_Queued}=BLANK()))"
     else:
@@ -100,24 +100,14 @@ def capability_escalation_dispatch(
             skipped += 1
             continue
 
-        # filter in-code (fallback-safe)
-        if only_breached:
-            if str(fields.get("SLA_Status", "")).strip() != "Breached":
-                skipped += 1
-                continue
+        if only_breached and str(fields.get("SLA_Status", "")).strip() != "Breached":
+            skipped += 1
+            continue
 
         if _safe_bool(fields.get("Escalation_Queued")):
             skipped += 1
             continue
 
-        # Guard: if no http_target configured, we can still mark queued,
-        # but better to create a command ONLY if target exists.
-        if not http_target:
-            failed += 1
-            errors.append(f"{log_id}: missing ESCALATION_HTTP_TARGET (no command created)")
-            continue
-
-        # Build stable flow context for escalation command
         flow_id = str(
             fields.get("Flow_ID")
             or fields.get("flow_id")
@@ -132,7 +122,6 @@ def capability_escalation_dispatch(
             or flow_id
         ).strip()
 
-                # Build command input for http_exec
         payload = {
             "source": "bosai-worker",
             "type": "incident_escalation",
@@ -145,25 +134,24 @@ def capability_escalation_dispatch(
         }
 
         cmd_input: Dict[str, Any] = {
-            "url": http_target,
-            "http_target": http_target,
-            "method": http_method,
             "flow_id": flow_id,
             "root_event_id": root_event_id,
+            "step_index": 1,
             "goal": "escalation_send",
-            "json": payload,
+            "reason": "sla_breached_internal_escalation",
+            "severity": "critical",
+            "log_record_id": log_id,
+            "incident_record_id": log_id,
+            "http_status": fields.get("HTTP_Status") or 500,
+            "failed_goal": str(fields.get("Name") or "incident_escalation").strip(),
+            "failed_url": str(fields.get("Endpoint_URL") or http_target or "").strip(),
+            "sla_status": str(fields.get("SLA_Status") or "").strip(),
+            "method": http_method,
+            "payload": payload,
         }
 
-        if tool_key:
-            cmd_input["Tool_Key"] = tool_key
-        if tool_mode:
-            cmd_input["Tool_Mode"] = tool_mode
-        if tool_intent:
-            cmd_input["Tool_Intent"] = tool_intent
-
         idem = f"esc:{log_id}:{run_record_id}"
-        
-        # Create command record
+
         try:
             cmd_fields: Dict[str, Any] = {
                 "Capability": cmd_cap,
@@ -176,20 +164,32 @@ def capability_escalation_dispatch(
                 "Root_Event_ID": root_event_id,
                 "Workspace_ID": str(fields.get("Workspace_ID") or "production").strip() or "production",
             }
+
             cmd_id = airtable_create(commands_table_name, cmd_fields)
 
-            # Update log record best-effort
             try:
                 update_fields: Dict[str, Any] = {
                     "Escalation_Queued": True,
                     "Escalation_Queued_At": utc_now_iso(),
                     "Linked_Run": [run_record_id],
                 }
-                update_fields["Escalation_Command"] = [cmd_id]
-                airtable_update(logs_errors_table_name, log_id, update_fields)
+
+                # selon ton schéma Airtable, un seul de ces champs peut exister
+                try:
+                    update_fields["Escalation_Command"] = [cmd_id]
+                    airtable_update(logs_errors_table_name, log_id, update_fields)
+                except Exception:
+                    update_fields.pop("Escalation_Command", None)
+                    update_fields["Escalation_Command_ID"] = cmd_id
+                    airtable_update(logs_errors_table_name, log_id, update_fields)
+
             except Exception as e:
                 try:
-                    airtable_update(logs_errors_table_name, log_id, {"Escalation_Last_Error": repr(e)})
+                    airtable_update(
+                        logs_errors_table_name,
+                        log_id,
+                        {"Escalation_Last_Error": repr(e)},
+                    )
                 except Exception:
                     pass
 
@@ -199,9 +199,14 @@ def capability_escalation_dispatch(
             failed += 1
             errors.append(f"{log_id}: {repr(e)}")
             try:
-                airtable_update(logs_errors_table_name, log_id, {"Escalation_Last_Error": repr(e)})
+                airtable_update(
+                    logs_errors_table_name,
+                    log_id,
+                    {"Escalation_Last_Error": repr(e)},
+                )
             except Exception:
                 pass
+
     return {
         "ok": True,
         "mode": mode,
@@ -215,6 +220,8 @@ def capability_escalation_dispatch(
         "run_record_id": run_record_id,
         "ts": utc_now_iso(),
     }
+
+
 def run(
     req,
     run_record_id: str,
