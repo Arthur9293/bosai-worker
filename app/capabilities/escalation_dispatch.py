@@ -2,7 +2,7 @@
 import os
 import json
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 def utc_now_iso() -> str:
@@ -34,14 +34,6 @@ def capability_escalation_dispatch(
     logs_errors_view_name: str,
     commands_table_name: str,
 ) -> Dict[str, Any]:
-    """
-    Reads Logs_Erreurs (Active) and creates Commands (Queued) for breached incidents.
-
-    Internal escalation mode:
-      - Creates Commands with capability = internal_escalate
-      - Does NOT call the external webhook directly from this dispatcher
-      - Marks Escalation_Queued best-effort on the incident record
-    """
 
     inp = req.input or {}
 
@@ -58,10 +50,8 @@ def capability_escalation_dispatch(
     else:
         only_breached = _safe_bool(only_breached)
 
-    # Switched to internal escalation
     cmd_cap = (os.getenv("ESCALATION_COMMAND_CAPABILITY", "internal_escalate") or "internal_escalate").strip()
 
-    # Kept for fallback payload enrichment if needed
     http_target = (os.getenv("ESCALATION_HTTP_TARGET", "") or "").strip()
     http_method = (os.getenv("ESCALATION_HTTP_METHOD", "POST") or "POST").strip().upper()
 
@@ -167,21 +157,62 @@ def capability_escalation_dispatch(
 
             cmd_id = airtable_create(commands_table_name, cmd_fields)
 
+            # 🔥 PATCH PRO
             try:
-                update_fields: Dict[str, Any] = {
-                    "Escalation_Queued": True,
-                    "Escalation_Queued_At": utc_now_iso(),
-                    "Linked_Run": [run_record_id],
-                }
+                queued_at = utc_now_iso()
 
-                # selon ton schéma Airtable, un seul de ces champs peut exister
-                try:
-                    update_fields["Escalation_Command"] = [cmd_id]
-                    airtable_update(logs_errors_table_name, log_id, update_fields)
-                except Exception:
-                    update_fields.pop("Escalation_Command", None)
-                    update_fields["Escalation_Command_ID"] = cmd_id
-                    airtable_update(logs_errors_table_name, log_id, update_fields)
+                update_candidates: List[Dict[str, Any]] = [
+                    {
+                        "Escalation_Queued": True,
+                        "Escalation_Queued_At": queued_at,
+                        "Escalation_Command_ID": cmd_id,
+                        "Linked_Run": [run_record_id],
+                        "Statut_incident": "Escalated",
+                        "Escalation_Sent": True,
+                    },
+                    {
+                        "Escalation_Queued": True,
+                        "Escalation_Queued_At": queued_at,
+                        "Escalation_Command_ID": cmd_id,
+                        "Linked_Run": [run_record_id],
+                        "Escalation_Sent": True,
+                    },
+                    {
+                        "Escalation_Queued": True,
+                        "Escalation_Queued_At": queued_at,
+                        "Escalation_Command_ID": cmd_id,
+                        "Linked_Run": [run_record_id],
+                    },
+                    {
+                        "Escalation_Queued": True,
+                        "Escalation_Queued_At": queued_at,
+                        "Escalation_Command_ID": cmd_id,
+                    },
+                    {
+                        "Escalation_Queued": True,
+                    },
+                ]
+
+                updated = False
+                last_error: Optional[str] = None
+
+                for candidate in update_candidates:
+                    try:
+                        airtable_update(logs_errors_table_name, log_id, candidate)
+                        updated = True
+                        break
+                    except Exception as e:
+                        last_error = repr(e)
+
+                if not updated and last_error:
+                    try:
+                        airtable_update(
+                            logs_errors_table_name,
+                            log_id,
+                            {"Escalation_Last_Error": last_error},
+                        )
+                    except Exception:
+                        pass
 
             except Exception as e:
                 try:
