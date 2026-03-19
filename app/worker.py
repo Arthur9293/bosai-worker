@@ -678,17 +678,18 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         base = {}
 
     field_alias_map = {
-        "url": ("url", "URL", "http_target", "Http_Target"),
-        "http_target": ("http_target", "Http_Target", "URL", "url"),
-        "method": ("method", "HTTP_Method", "Http_Method"),
-        "headers": ("headers", "HTTP_Headers_JSON"),
-        "body": ("body", "HTTP_Payload_JSON"),
-        "timeout": ("timeout",),
-        "flow_id": ("flow_id", "flowid", "flowId", "Flow_ID"),
-        "root_event_id": ("root_event_id", "rooteventid", "rootEventId", "Root_Event_ID"),
-        "step_index": ("step_index", "stepindex", "stepIndex", "Step_Index"),
-        "goal": ("goal", "Goal"),
-    }
+    "url": ("url", "URL", "http_target", "Http_Target"),
+    "http_target": ("http_target", "Http_Target", "URL", "url"),
+    "method": ("method", "HTTP_Method", "Http_Method"),
+    "headers": ("headers", "HTTP_Headers_JSON"),
+    "body": ("body", "HTTP_Payload_JSON"),
+    "json": ("json", "JSON", "Payload_JSON"),
+    "timeout": ("timeout",),
+    "flow_id": ("flow_id", "flowid", "flowId", "Flow_ID"),
+    "root_event_id": ("root_event_id", "rooteventid", "rootEventId", "Root_Event_ID"),
+    "step_index": ("step_index", "stepindex", "stepIndex", "Step_Index"),
+    "goal": ("goal", "Goal"),
+}
 
     for target_key, aliases in field_alias_map.items():
         if target_key in base and base.get(target_key) not in (None, ""):
