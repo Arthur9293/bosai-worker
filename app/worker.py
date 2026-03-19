@@ -22,6 +22,7 @@ from app.capabilities.escalation_dispatch import capability_escalation_dispatch
 from app.capabilities.health_tick import run as capability_health_tick
 from app.capabilities.http_exec import capability_http_exec
 from app.policies import get_policies
+from app.capabilities.internal_escalate import capability_internal_escalate
 
 
 # ============================================================
@@ -2786,6 +2787,16 @@ def capability_escalation_engine(req: RunRequest, run_record_id: str) -> Dict[st
         logs_errors_view_name=LOGS_ERRORS_VIEW_NAME,
         commands_table_name=COMMANDS_TABLE_NAME,
     )
+
+
+def capability_internal_escalate_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    return capability_internal_escalate(
+        req,
+        run_record_id,
+        airtable_update=airtable_update,
+        logs_errors_table_name=LOGS_ERRORS_TABLE_NAME,
+    )
+    
 def capability_chain_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     return {
         "ok": True,
@@ -4156,6 +4167,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 EVENT_CAPABILITY_ALLOWLIST = {
     "http_exec",
     "escalation_engine",
+    "internal_escalate",
     "chain_demo",
     "planner_demo",
     "decision_demo",
@@ -4170,6 +4182,7 @@ EVENT_CAPABILITY_ALLOWLIST = {
 EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "http_exec",
     "escalation_engine",
+    "internal_escalate",
     "chain_demo",
     "planner_demo",
     "decision_demo",
@@ -4259,6 +4272,7 @@ CAPABILITIES = {
     "health_tick": capability_health_tick,
     "commands_tick": capability_commands_tick,
     "escalation_engine": capability_escalation_engine,
+    "internal_escalate": capability_internal_escalate_wrapped,
     "http_exec": capability_http_exec_wrapped,
     "state_get": capability_state_get,
     "state_put": capability_state_put,
