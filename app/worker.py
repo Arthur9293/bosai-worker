@@ -4100,9 +4100,33 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         result["http_exec_done_count"] = http_exec_done_count
 
         goal_lower = goal.lower()
+        payload_json = payload.get("json") if isinstance(payload.get("json"), dict) else {}
+        tool_intent = str(
+            payload.get("Tool_Intent")
+            or payload.get("tool_intent")
+            or payload_json.get("Tool_Intent")
+            or payload_json.get("tool_intent")
+            or ""
+        ).strip().lower()
+        event_type = str(payload_json.get("type") or "").strip().lower()
 
-        if goal_lower in ("create_incident", "alert_incident", "sla_probe", "sla_warning_probe"):
-            next_commands = []
+        if (
+            goal_lower in ("create_incident", "alert_incident", "sla_probe", "sla_warning_probe")
+            or tool_intent == "escalate_incident"
+            or event_type == "incident_escalation"
+        ):
+            next_commands = [
+                {
+                    "capability": "complete_flow_demo",
+                    "priority": 1,
+                    "input": {
+                        "flow_id": flow_id,
+                        "root_event_id": root_event_id,
+                        "step_index": step_index + 1,
+                        "goal": "escalation_sent",
+                    },
+                }
+            ]
 
         elif http_exec_done_count >= 2:
             next_commands = [
