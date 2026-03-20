@@ -773,6 +773,7 @@ def _merge_secret_keys(request_keys: List[str], tool_fields: Optional[Dict[str, 
 # ============================================================
 
 def capability_http_exec(req: Any, run_record_id: str, session: Optional[requests.Session] = None) -> Dict[str, Any]:
+    print("🔥 HTTP_EXEC CALLED 🔥")
     sess = session or requests.Session()
 
     inp = getattr(req, "input", None) or {}
