@@ -4182,14 +4182,19 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                     },
                 }
             ]
+        if next_commands:
+            result["next_commands"] = next_commands
+            result["terminal"] = False
+        else:
+            result["terminal"] = True
 
-    if next_commands:
-        result["next_commands"] = next_commands
-        result["terminal"] = False
-    else:
-        result["terminal"] = True
+        print(
+            "[worker.wrapper] http_exec result next_commands =",
+            [x.get("capability") for x in (result.get("next_commands") or [])]
+            if isinstance(result, dict) else "not_dict"
+        )
 
-    return result
+        return result
     
 EVENT_CAPABILITY_ALLOWLIST = {
     "http_exec",
