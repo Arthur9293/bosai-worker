@@ -914,7 +914,7 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
     except Exception:
         retry_max_flow = 2
 
-    def _build_failure_next_commands(
+        def _build_failure_next_commands(
         *,
         status_code: Optional[int],
         reason: str,
@@ -922,28 +922,33 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
     ) -> List[Dict[str, Any]]:
         next_commands: List[Dict[str, Any]] = []
 
-        if flow_id or root_event_id:
-            next_commands.append(
-               {
-                   "capability": "incident_router",
-                   "priority": 1,
-                   "input": {
-                       "flow_id": flow_id,
-                       "root_event_id": root_event_id,
-                       "step_index": step_index + 1,
-                       "goal": "incident_after_http_failure",
-                       "reason": reason,
-                       "http_status": status_code,
-                       "failed_url": url,
-                       "failed_method": method,
-                       "failed_goal": failed_goal,
-                       "run_record_id": run_record_id,
-                       "workspace_id": "production",
-                       "severity": "high",
-                       "incident_type": "http_failure",
-                   },
-                }
-            )
+        if not (flow_id or root_event_id):
+            print("[http_exec] no flow context -> no next_commands")
+            return next_commands
+
+        next_commands.append(
+            {
+                "capability": "retry_router",
+                "priority": 2,
+                "input": {
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": step_index + 1,
+                    "goal": "retry_after_http_failure",
+                    "reason": reason,
+                    "http_status": status_code,
+                    "failed_url": url,
+                    "failed_method": method,
+                    "failed_goal": failed_goal or goal,
+                    "retry_count": retry_count_flow,
+                    "retry_max": retry_max_flow,
+                },
+            }
+        )
+
+        print("[http_exec] failure_next_commands =", [x.get("capability") for x in next_commands])
+        print("🔥 VERSION RETRY-ONLY 🔥")
+        return next_commands
 
             next_commands.append(
                 {
