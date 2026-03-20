@@ -1083,6 +1083,7 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
             reason=last_err or "request_failed",
             failed_goal=goal,
         )
+        print("[http_exec] failure_next_commands(resp_none) =", [x.get("capability") for x in next_commands])
 
         return {
             "ok": False,
@@ -1140,6 +1141,7 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
             reason="http_failure",
             failed_goal=goal,
         )
+        print("[http_exec] failure_next_commands(http_failure) =", [x.get("capability") for x in next_commands])
 
     return {
         "ok": ok,
