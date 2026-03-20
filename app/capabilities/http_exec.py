@@ -964,6 +964,7 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
                 }
             )
 
+        print("[http_exec] failure_next_commands =", [x.get("capability") for x in next_commands])
         return next_commands
 
     if dry_run:
