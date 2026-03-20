@@ -3261,7 +3261,7 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
         or ""
     ).strip()
     
-    if not failed_url:
+if not failed_url:
     raise HTTPException(status_code=400, detail="retry_router missing failed_url/url/http_target")
     
     failed_goal = str(payload.get("failed_goal") or "retry_probe").strip()
