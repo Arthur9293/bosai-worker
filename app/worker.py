@@ -2447,19 +2447,43 @@ def _spawn_next_commands_from_result(
             skipped += 1
             continue
 
-        # 🔥 GARDE-FOU CRITIQUE
+        # =========================
+        # Critical fallback for http_exec
+        # =========================
         if capability == "http_exec":
-            if not cmd_input.get("url"):
-                fallback_url = (
-                    payload.get("failed_url")
-                    or payload.get("url")
-                )   
-                if fallback_url:
-                    cmd_input["url"] = fallback_url
+            previous = result_obj.get("previous") if isinstance(result_obj.get("previous"), dict) else {}
+
+            fallback_url = str(
+                cmd_input.get("url")
+                or cmd_input.get("http_target")
+                or cmd_input.get("failed_url")
+                or result_obj.get("failed_url")
+                or result_obj.get("url")
+                or previous.get("failed_url")
+                or previous.get("url")
+                or ""
+            ).strip()
+
+            if fallback_url:
+                cmd_input["url"] = fallback_url
+                cmd_input["http_target"] = fallback_url
+
+            fallback_method = str(
+                cmd_input.get("method")
+                or cmd_input.get("failed_method")
+                or result_obj.get("failed_method")
+                or result_obj.get("method")
+                or previous.get("failed_method")
+                or previous.get("method")
+                or "POST"
+            ).strip().upper()
+
+            cmd_input["method"] = fallback_method
 
         flat_http_target = str(
             cmd_input.get("url")
             or cmd_input.get("http_target")
+            or cmd_input.get("failed_url")
             or ""
         ).strip()
 
@@ -2518,13 +2542,14 @@ def _spawn_next_commands_from_result(
                 },
             ],
         )
+
         if create_res.get("ok"):
             spawned += 1
         else:
             errors.append(f"next_commands[{idx}] create_failed:{create_res.get('error')}")
 
     # =========================
-    # Final return (CORRECT INDENT)
+    # Final return
     # =========================
     return {
         "ok": True,
