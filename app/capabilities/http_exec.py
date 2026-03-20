@@ -949,31 +949,7 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
         print("[http_exec] failure_next_commands =", [x.get("capability") for x in next_commands])
         print("🔥 VERSION RETRY-ONLY 🔥")
         return next_commands
-
-            next_commands.append(
-                {
-                    "capability": "retry_router",
-                    "priority": 2,
-                    "input": {
-                        "flow_id": flow_id,
-                        "root_event_id": root_event_id,
-                        "step_index": step_index + 1,
-                        "goal": "retry_after_http_failure",
-                        "reason": reason,
-                        "http_status": status_code,
-                        "failed_url": url,
-                        "failed_method": method,
-                        "failed_goal": failed_goal,
-                        "retry_count": retry_count_flow,
-                        "retry_max": retry_max_flow,
-                    },
-                }
-            )
-
-        print("[http_exec] failure_next_commands =", [x.get("capability") for x in next_commands])
-        print("🔥 VERSION WITH INCIDENT ROUTER 🔥")
-        return next_commands
-
+            
     if dry_run:
         sec_diag = _diagnose_secret_keys(merged_secret_keys)
         sec_diag["headers_injected"] = {
