@@ -2447,6 +2447,17 @@ def _spawn_next_commands_from_result(
             skipped += 1
             continue
 
+        flat_http_target = str(
+            cmd_input.get("url")
+            or cmd_input.get("http_target")
+            or ""
+        ).strip()
+
+        flat_http_method = str(
+            cmd_input.get("method")
+            or "POST"
+        ).strip().upper()
+
         create_res = _airtable_create_best_effort(
             COMMANDS_TABLE_NAME,
             [
@@ -2461,6 +2472,8 @@ def _spawn_next_commands_from_result(
                     "Root_Event_ID": resolved_root_event_id,
                     "Step_Index": current_depth + idx,
                     "Flow_ID": resolved_flow_id,
+                    "http_target": flat_http_target,
+                    "HTTP_Method": flat_http_method,
                 },
                 {
                     "Capability": capability,
@@ -2471,6 +2484,8 @@ def _spawn_next_commands_from_result(
                     "Workspace_ID": workspace_id,
                     "Parent_Command_ID": parent_command_id,
                     "Flow_ID": resolved_flow_id,
+                    "http_target": flat_http_target,
+                    "HTTP_Method": flat_http_method,
                 },
                 {
                     "Capability": capability,
@@ -2479,6 +2494,8 @@ def _spawn_next_commands_from_result(
                     "Input_JSON": json.dumps(cmd_input, ensure_ascii=False),
                     "Idempotency_Key": child_idem,
                     "Workspace_ID": workspace_id,
+                    "http_target": flat_http_target,
+                    "HTTP_Method": flat_http_method,
                 },
                 {
                     "Capability": capability,
@@ -2486,10 +2503,11 @@ def _spawn_next_commands_from_result(
                     "Priority": priority,
                     "Input_JSON": json.dumps(cmd_input, ensure_ascii=False),
                     "Idempotency_Key": child_idem,
+                    "http_target": flat_http_target,
+                    "HTTP_Method": flat_http_method,
                 },
             ],
         )
-
         if create_res.get("ok"):
             spawned += 1
         else:
