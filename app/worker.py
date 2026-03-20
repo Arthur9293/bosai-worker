@@ -2459,6 +2459,41 @@ def _spawn_next_commands_from_result(
         if resolved_root_event_id and not str(cmd_input.get("root_event_id") or "").strip():
             cmd_input["root_event_id"] = resolved_root_event_id
 
+        # =========================================
+        # HTTP fallback propagation
+        # =========================================
+        if capability == "http_exec":
+            fallback_url = str(
+                cmd_input.get("url")
+                or cmd_input.get("http_target")
+                or result_obj.get("failed_url")
+                or result_obj.get("url")
+                or ""
+            ).strip()
+
+            fallback_method = str(
+                cmd_input.get("method")
+                or result_obj.get("failed_method")
+                or result_obj.get("method")
+                or "GET"
+            ).strip().upper()
+
+            fallback_goal = str(
+                cmd_input.get("goal")
+                or result_obj.get("failed_goal")
+                or result_obj.get("goal")
+                or "retry_probe"
+            ).strip()
+
+            if fallback_url and not str(cmd_input.get("url") or "").strip():
+                cmd_input["url"] = fallback_url
+
+            if fallback_method and not str(cmd_input.get("method") or "").strip():
+                cmd_input["method"] = fallback_method
+
+            if fallback_goal and not str(cmd_input.get("goal") or "").strip():
+                cmd_input["goal"] = fallback_goal
+
         cmd_input = _normalize_flow_keys(cmd_input)
 
         child_idem = f"{parent_idempotency_key}:next:{idx}:{capability}"
@@ -2468,45 +2503,16 @@ def _spawn_next_commands_from_result(
             skipped += 1
             continue
 
-        # =========================
-        # HTTP EXEC SAFE FLATTENING
-        # =========================
-        flat_http_target = ""
-        flat_http_method = ""
+        flat_http_target = str(
+            cmd_input.get("url")
+            or cmd_input.get("http_target")
+            or ""
+        ).strip()
 
-        if capability == "http_exec":
-            # 1) URL / target
-            flat_http_target = str(
-                cmd_input.get("url")
-                or cmd_input.get("http_target")
-                or cmd_input.get("URL")
-                or ""
-            ).strip()
-
-            # 2) fallback depuis le résultat parent si absent
-            if not flat_http_target:
-                flat_http_target = str(
-                    result_obj.get("failed_url")
-                    or result_obj.get("url")
-                    or ""
-                ).strip()
-
-            if flat_http_target:
-                cmd_input["url"] = flat_http_target
-
-            # 3) méthode
-            flat_http_method = str(
-                cmd_input.get("method")
-                or cmd_input.get("http_method")
-                or result_obj.get("failed_method")
-                or result_obj.get("method")
-                or "GET"
-            ).strip().upper()
-
-            if flat_http_method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
-                flat_http_method = "GET"
-
-            cmd_input["method"] = flat_http_method
+        flat_http_method = str(
+            cmd_input.get("method")
+            or "GET"
+        ).strip().upper()
 
         create_res = _airtable_create_best_effort(
             COMMANDS_TABLE_NAME,
@@ -2544,15 +2550,6 @@ def _spawn_next_commands_from_result(
                     "Input_JSON": json.dumps(cmd_input, ensure_ascii=False),
                     "Idempotency_Key": child_idem,
                     "Workspace_ID": workspace_id,
-                    "http_target": flat_http_target,
-                    "HTTP_Method": flat_http_method,
-                },
-                {
-                    "Capability": capability,
-                    "Status_select": "Queued",
-                    "Priority": priority,
-                    "Input_JSON": json.dumps(cmd_input, ensure_ascii=False),
-                    "Idempotency_Key": child_idem,
                     "http_target": flat_http_target,
                     "HTTP_Method": flat_http_method,
                 },
