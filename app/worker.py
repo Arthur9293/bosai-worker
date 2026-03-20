@@ -2447,6 +2447,16 @@ def _spawn_next_commands_from_result(
             skipped += 1
             continue
 
+        # 🔥 GARDE-FOU CRITIQUE
+        if capability == "http_exec":
+            if not cmd_input.get("url"):
+                fallback_url = (
+                    payload.get("failed_url")
+                    or payload.get("url")
+                )   
+                if fallback_url:
+                    cmd_input["url"] = fallback_url
+
         flat_http_target = str(
             cmd_input.get("url")
             or cmd_input.get("http_target")
