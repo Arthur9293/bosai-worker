@@ -2354,7 +2354,7 @@ def _infer_root_event_id(fields: Dict[str, Any], parent_idempotency_key: str) ->
             return str(parts[1] or "").strip()
 
     return ""
-    
+
 def _spawn_next_commands_from_result(
     parent_command_id: str,
     parent_idempotency_key: str,
@@ -2469,49 +2469,44 @@ def _spawn_next_commands_from_result(
             continue
 
         # =========================
-        # Critical fallback for http_exec
+        # HTTP EXEC SAFE FLATTENING
         # =========================
-        if capability == "http_exec":
-            previous = result_obj.get("previous") if isinstance(result_obj.get("previous"), dict) else {}
+        flat_http_target = ""
+        flat_http_method = ""
 
-            fallback_url = str(
+        if capability == "http_exec":
+            # 1) URL / target
+            flat_http_target = str(
                 cmd_input.get("url")
                 or cmd_input.get("http_target")
-                or cmd_input.get("failed_url")
-                or result_obj.get("failed_url")
-                or result_obj.get("url")
-                or previous.get("failed_url")
-                or previous.get("url")
+                or cmd_input.get("URL")
                 or ""
             ).strip()
 
-            if fallback_url:
-                cmd_input["url"] = fallback_url
-                cmd_input["http_target"] = fallback_url
+            # 2) fallback depuis le résultat parent si absent
+            if not flat_http_target:
+                flat_http_target = str(
+                    result_obj.get("failed_url")
+                    or result_obj.get("url")
+                    or ""
+                ).strip()
 
-            fallback_method = str(
+            if flat_http_target:
+                cmd_input["url"] = flat_http_target
+
+            # 3) méthode
+            flat_http_method = str(
                 cmd_input.get("method")
-                or cmd_input.get("failed_method")
+                or cmd_input.get("http_method")
                 or result_obj.get("failed_method")
                 or result_obj.get("method")
-                or previous.get("failed_method")
-                or previous.get("method")
-                or "POST"
+                or "GET"
             ).strip().upper()
 
-            cmd_input["method"] = fallback_method
+            if flat_http_method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
+                flat_http_method = "GET"
 
-        flat_http_target = str(
-            cmd_input.get("url")
-            or cmd_input.get("http_target")
-            or cmd_input.get("failed_url")
-            or ""
-        ).strip()
-
-        flat_http_method = str(
-            cmd_input.get("method")
-            or "POST"
-        ).strip().upper()
+            cmd_input["method"] = flat_http_method
 
         create_res = _airtable_create_best_effort(
             COMMANDS_TABLE_NAME,
@@ -2561,6 +2556,13 @@ def _spawn_next_commands_from_result(
                     "http_target": flat_http_target,
                     "HTTP_Method": flat_http_method,
                 },
+                {
+                    "Capability": capability,
+                    "Status_select": "Queued",
+                    "Priority": priority,
+                    "Input_JSON": json.dumps(cmd_input, ensure_ascii=False),
+                    "Idempotency_Key": child_idem,
+                },
             ],
         )
 
@@ -2569,9 +2571,6 @@ def _spawn_next_commands_from_result(
         else:
             errors.append(f"next_commands[{idx}] create_failed:{create_res.get('error')}")
 
-    # =========================
-    # Final return
-    # =========================
     return {
         "ok": True,
         "spawned": spawned,
@@ -2581,6 +2580,7 @@ def _spawn_next_commands_from_result(
         "root_event_id": resolved_root_event_id,
         "max_depth": CHAIN_MAX_DEPTH,
     }
+
     
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     max_cmds = int(req.max_commands or 0) or 5
