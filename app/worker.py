@@ -644,7 +644,7 @@ def _read_command_status(fields: Dict[str, Any]) -> str:
     return str(fields.get("Status_select", fields.get("Status", "")) or "").strip()
 
 def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
-    base = {}
+    base: Dict[str, Any] = {}
     parse_errors: List[Dict[str, Any]] = []
 
     for source_key in ("Input_JSON", "Command_JSON", "Command_Input_JSON"):
@@ -653,44 +653,65 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         if raw_val is None:
             continue
 
-        if isinstance(raw_val, dict) and raw_val:
-            base = raw_val
-            break
+        parsed: Dict[str, Any] = {}
 
-        raw_text = str(raw_val).strip()
-        if not raw_text:
+        if isinstance(raw_val, dict):
+            parsed = raw_val
+        else:
+            raw_text = str(raw_val).strip()
+            if not raw_text:
+                continue
+
+            try:
+                obj = json.loads(raw_text)
+                if isinstance(obj, dict):
+                    parsed = obj
+            except Exception as e:
+                parse_errors.append(
+                    {
+                        "source": source_key,
+                        "error": repr(e),
+                        "raw_preview": raw_text[:500],
+                    }
+                )
+                continue
+
+        if not isinstance(parsed, dict) or not parsed:
             continue
 
-        try:
-            parsed = json.loads(raw_text)
-            if isinstance(parsed, dict) and parsed:
-                base = parsed
-                break
-        except Exception as e:
-            parse_errors.append(
-                {
-                    "source": source_key,
-                    "error": repr(e),
-                    "raw_preview": raw_text[:500],
-                }
-            )
+        # IMPORTANT:
+        # si le JSON est une enveloppe {"capability": "...", "input": {...}}
+        # on extrait seulement le bloc input
+        if isinstance(parsed.get("input"), dict) and parsed.get("input"):
+            base = parsed.get("input") or {}
+        else:
+            base = parsed
+
+        if isinstance(base, dict) and base:
+            break
 
     if not isinstance(base, dict):
         base = {}
 
     field_alias_map = {
-    "url": ("url", "URL", "http_target", "Http_Target"),
-    "http_target": ("http_target", "Http_Target", "URL", "url"),
-    "method": ("method", "HTTP_Method", "Http_Method"),
-    "headers": ("headers", "HTTP_Headers_JSON"),
-    "body": ("body", "HTTP_Payload_JSON"),
-    "json": ("json", "JSON", "Payload_JSON"),
-    "timeout": ("timeout",),
-    "flow_id": ("flow_id", "flowid", "flowId", "Flow_ID"),
-    "root_event_id": ("root_event_id", "rooteventid", "rootEventId", "Root_Event_ID"),
-    "step_index": ("step_index", "stepindex", "stepIndex", "Step_Index"),
-    "goal": ("goal", "Goal"),
-}
+        "url": ("url", "URL", "http_target", "Http_Target"),
+        "http_target": ("http_target", "Http_Target", "URL", "url"),
+        "method": ("method", "HTTP_Method", "Http_Method"),
+        "headers": ("headers", "HTTP_Headers_JSON"),
+        "body": ("body", "HTTP_Payload_JSON"),
+        "json": ("json", "JSON", "Payload_JSON"),
+        "timeout": ("timeout",),
+        "flow_id": ("flow_id", "flowid", "flowId", "Flow_ID"),
+        "root_event_id": ("root_event_id", "rooteventid", "rootEventId", "Root_Event_ID"),
+        "step_index": ("step_index", "stepindex", "stepIndex", "Step_Index"),
+        "goal": ("goal", "Goal"),
+        "retry_count": ("retry_count", "retrycount", "Retry_Count"),
+        "retry_max": ("retry_max", "retrymax", "Retry_Max"),
+        "failed_url": ("failed_url", "failedurl", "Failed_URL"),
+        "failed_method": ("failed_method", "failedmethod", "Failed_Method"),
+        "failed_goal": ("failed_goal", "failedgoal", "Failed_Goal"),
+        "http_status": ("http_status", "httpstatus", "HTTP_Status"),
+    }
 
     for target_key, aliases in field_alias_map.items():
         if target_key in base and base.get(target_key) not in (None, ""):
@@ -706,7 +727,7 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
 
     if parse_errors:
         print(f"[compose_command_input] parse_errors={json.dumps(parse_errors, ensure_ascii=False)}")
-        print(f"[compose_command_input] final_base={json.dumps(base, ensure_ascii=False)}")
+    print(f"[compose_command_input] final_base={json.dumps(base, ensure_ascii=False)}")
 
     return base
     
