@@ -914,7 +914,7 @@ def capability_http_exec(req: Any, run_record_id: str, session: Optional[request
     except Exception:
         retry_max_flow = 2
 
-        def _build_failure_next_commands(
+    def _build_failure_next_commands(
         *,
         status_code: Optional[int],
         reason: str,
