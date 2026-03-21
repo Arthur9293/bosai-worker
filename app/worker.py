@@ -4400,58 +4400,13 @@ def _create_incident_log_record(incident_payload: Dict[str, Any]) -> Dict[str, A
         # try increasingly minimal / alternative schemas
         # ------------------------------------------------------------
         candidates = [
-            # Candidate A: current EP&DS/BOSAI-style fields
             {
-                "Name": incident_name,
-                "Statut incident": "Nouveau",
-                "Diagnostic IA": incident_diag,
-                "Action IA": incident_action,
-            },
-            # Candidate B: same + severity if available
-            {
-                "Name": incident_name,
-                "Statut incident": "Nouveau",
-                "Diagnostic IA": incident_diag,
-                "Action IA": incident_action,
-                "Urgence IA": severity_label,
-            },
-            # Candidate C: generic incident fields
-            {
-                "Name": incident_name,
-                "Status": "Open",
-                "Diagnostic": incident_diag,
-                "Action": incident_action,
-            },
-            # Candidate D: generic + severity
-            {
-                "Name": incident_name,
-                "Status": "Open",
-                "Diagnostic": incident_diag,
-                "Action": incident_action,
-                "Severity": "High" if http_status is not None and http_status >= 500 else "Medium",
-            },
-            # Candidate E: with payload JSON
-            {
-                "Name": incident_name,
-                "Statut incident": "Nouveau",
-                "Diagnostic IA": incident_diag,
-                "Action IA": incident_action,
-                "Payload_JSON": raw_payload_json,
-            },
-            # Candidate F: with résumé if supported
-            {
-                "Name": incident_name,
-                "Statut incident": "Nouveau",
-                "Diagnostic IA": incident_diag,
-                "Action IA": incident_action,
-                "Résumé": raw_payload_json,
-            },
-            # Candidate G: ultra-minimal fallback
-            {
-                "Name": incident_name,
-            },
+                "Name": "TEST INCIDENT"
+            }
         ]
 
+        print("[DEBUG incident] table =", LOGS_ERREURS_TABLE_NAME)
+        print("[DEBUG incident] candidates =", candidates)
         create_res = _airtable_create_best_effort(LOGS_ERREURS_TABLE_NAME, candidates)
 
         if not create_res.get("ok"):
@@ -4460,18 +4415,7 @@ def _create_incident_log_record(incident_payload: Dict[str, Any]) -> Dict[str, A
                 "error": create_res.get("error"),
                 "debug": {
                     "table": LOGS_ERREURS_TABLE_NAME,
-                    "incident_name": incident_name,
-                    "flow_id": flow_id,
-                    "root_event_id": root_event_id,
-                    "goal": goal,
-                    "reason": reason,
-                    "http_status": http_status,
-                    "original_capability": original_capability,
-                    "failed_url": failed_url,
-                    "failed_method": failed_method,
-                    "retry_count": retry_count,
-                    "retry_max": retry_max,
-                    "candidates_tried": candidates,
+                    "candidates": candidates,
                 },
             }
 
