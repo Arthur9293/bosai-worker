@@ -4678,15 +4678,15 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                "Idempotency_Key": f"decision-engine:{flow_id}:{next_capability}:{incident_result.get('reason')}",
             }
 
-            if workspace_id:
-                spawn_fields["Workspace_ID"] = workspace_id
-            if flow_id:
-                spawn_fields["Flow_ID"] = flow_id
-            if root_event_id:
-                spawn_fields["Root_Event_ID"] = root_event_id
+        if workspace_id:
+            spawn_fields["Workspace_ID"] = workspace_id
+        if flow_id:
+            spawn_fields["Flow_ID"] = flow_id
+        if root_event_id:
+            spawn_fields["Root_Event_ID"] = root_event_id
 
-            _airtable_create(COMMANDS_TABLE_NAME, spawn_fields)
-
+        _airtable_create(COMMANDS_TABLE_NAME, spawn_fields)
+        
     return result
 
     # ------------------------------------------------------------
