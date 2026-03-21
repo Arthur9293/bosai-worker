@@ -58,6 +58,11 @@ def get_policies() -> Dict[str, Any]:
         return {}
 
     try:
+        print("[DEBUG POLICIES]")
+        print("BASE_ID =", AIRTABLE_BASE_ID)
+        print("TABLE =", POLICIES_TABLE_NAME)
+        print("VIEW =", POLICIES_VIEW_NAME)
+        print("URL =", _airtable_url(POLICIES_TABLE_NAME))
         response = requests.get(
             _airtable_url(POLICIES_TABLE_NAME),
             headers=_airtable_headers(),
