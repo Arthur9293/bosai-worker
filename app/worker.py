@@ -6087,11 +6087,14 @@ def get_incidents():
                 "incidents": [],
                 "ts": datetime.now(timezone.utc).isoformat(),
             }
+            print("[AIRTABLE GET] table =", LOGS_ERREURS_TABLE_NAME)
+            print("[AIRTABLE GET] view =", LOGS_ERREURS_VIEW_NAME or "Active")
+            print("[AIRTABLE GET] url =", _airtable_url(LOGS_ERREURS_TABLE_NAME))
 
         response = requests.get(
             _airtable_url(LOGS_ERRORS_TABLE_NAME),
             headers={"Authorization": f"Bearer {AIRTABLE_API_KEY}", "Accept": "application/json"},
-            params={"view": LOGS_ERRORS_VIEW_NAME or "Active", "maxRecords": 50},
+            params={"maxRecords": 50},
             timeout=20,
         )
         response.raise_for_status()
