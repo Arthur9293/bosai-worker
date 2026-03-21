@@ -428,18 +428,29 @@ def _airtable_headers() -> Dict[str, str]:
     }
 
 
-def airtable_create(table_name: str, fields: Dict[str, Any]) -> str:
-    _require_airtable()
-    r = _HTTP_SESSION.post(
-        _airtable_url(table_name),
-        headers=_airtable_headers(),
+def _airtable_create(table_name: str, fields: Dict[str, Any]) -> str:
+    url = _airtable_url(table_name)
+    headers = _airtable_headers()
+
+    print("[AIRTABLE CREATE DEBUG REAL] table_name =", table_name)
+    print("[AIRTABLE CREATE DEBUG REAL] url =", url)
+    print("[AIRTABLE CREATE DEBUG REAL] field_keys =", list(fields.keys()) if isinstance(fields, dict) else type(fields))
+    print("[AIRTABLE CREATE DEBUG REAL] fields =", fields)
+
+    r = _http_session.post(
+        url,
+        headers=headers,
         json={"fields": fields},
         timeout=HTTP_TIMEOUT_SECONDS,
     )
-    if r.status_code >= 300:
-        raise HTTPException(status_code=500, detail=f"Airtable create failed: {r.status_code} {r.text}")
-    return r.json()["id"]
 
+    print("[AIRTABLE CREATE DEBUG REAL] status_code =", r.status_code)
+    print("[AIRTABLE CREATE DEBUG REAL] response_text =", r.text)
+
+    if r.status_code != 200:
+        raise HTTPException(status_code=500, detail=f"Airtable create failed: {r.status_code} {r.text}")
+
+    return r.json()["id"]
 
 def airtable_update(table_name: str, record_id: str, fields: Dict[str, Any]) -> None:
     _require_airtable()
