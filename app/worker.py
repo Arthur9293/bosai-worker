@@ -8,7 +8,9 @@ import time
 import traceback
 import uuid
 from dotenv import load_dotenv
-load_dotenv()
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, "..", ".env"))
 
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
