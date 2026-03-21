@@ -4657,20 +4657,25 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             "incident_record_id": incident_result.get("incident_record_id"),
         }
 
-        decision_result = capability_decision_engine(decision_input)
+    decision_result = capability_decision_engine(decision_input)
 
-        for next_cmd in decision_result.get("next_commands", []):
-            next_capability = next_cmd.get("capability")
-            next_input = next_cmd.get("input", {})
-            next_priority = int(next_cmd.get("priority") or 2)
+    for next_cmd in decision_result.get("next_commands", []):
+        next_capability = next_cmd.get("capability")
+        next_input = next_cmd.get("input", {}) or {}
+        next_priority = int(next_cmd.get("priority") or 2)
 
-            spawn_fields = {
-                "Name": f"{next_capability} from decision_engine",
-                "Capability": next_capability,
-                "Status_select": "Queued",
-                "Priority": next_priority,
-                "Input_JSON": json.dumps(next_input, ensure_ascii=False),
-                "Idempotency_Key": f"decision-engine:{flow_id}:{next_capability}:{incident_result.get('reason')}",
+    if next_capability == "http_exec":
+        if not next_input.get("url"):
+            print("[spawn] skipped http_exec without url:", next_input)
+            continue
+
+        spawn_fields = {
+               "Name": f"{next_capability} from decision_engine",
+               "Capability": next_capability,
+               "Status_select": "Queued",
+               "Priority": next_priority,
+               "Input_JSON": json.dumps(next_input, ensure_ascii=False),
+               "Idempotency_Key": f"decision-engine:{flow_id}:{next_capability}:{incident_result.get('reason')}",
             }
 
             if workspace_id:
