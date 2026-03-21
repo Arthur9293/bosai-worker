@@ -4672,16 +4672,26 @@ def capability_retry_router_wrapped(req: RunRequest, run_record_id: str) -> Dict
     workspace_id = _resolve_workspace_id(req=req)
 
     flow_id, root_event_id = _resolve_flow_ids(payload)
+    step_index = int(payload.get("step_index") or 0)
 
     retry_count = int(payload.get("retry_count") or 0)
     retry_max = int(payload.get("retry_max") or 3)
-    step_index = int(payload.get("step_index") or 0)
 
     goal = str(payload.get("goal") or "").strip()
     original_capability = str(payload.get("original_capability") or "http_exec").strip()
 
-    retry_reason = str(payload.get("retry_reason") or payload.get("error_code") or "unknown").strip()
-    last_error = payload.get("error") or payload.get("response_status") or payload.get("status_code")
+    retry_reason = str(
+        payload.get("retry_reason")
+        or payload.get("error_code")
+        or "unknown"
+    ).strip()
+
+    last_error = (
+        payload.get("error")
+        or payload.get("last_error")
+        or payload.get("response_status")
+        or payload.get("status_code")
+    )
 
     next_commands: List[Dict[str, Any]] = []
 
@@ -4692,9 +4702,15 @@ def capability_retry_router_wrapped(req: RunRequest, run_record_id: str) -> Dict
         next_retry_count = retry_count + 1
 
         retry_input = dict(payload)
+        retry_input["flow_id"] = flow_id
+        retry_input["root_event_id"] = root_event_id
         retry_input["retry_count"] = next_retry_count
+        retry_input["retry_max"] = retry_max
         retry_input["step_index"] = step_index + 1
-        retry_input["goal"] = goal or "retry_http_exec"
+        retry_input["goal"] = "retry_http_exec"
+        retry_input["original_capability"] = original_capability
+        retry_input["retry_reason"] = retry_reason
+        retry_input["last_error"] = last_error
 
         # cleanup router-only fields if present
         retry_input.pop("next_capability", None)
@@ -4702,10 +4718,6 @@ def capability_retry_router_wrapped(req: RunRequest, run_record_id: str) -> Dict
         retry_input.pop("next_commands", None)
         retry_input.pop("terminal", None)
         retry_input.pop("spawn_summary", None)
-
-        # keep explicit original capability trace
-        retry_input["original_capability"] = original_capability
-        retry_input["retry_reason"] = retry_reason
 
         next_commands.append(
             {
@@ -4731,14 +4743,9 @@ def capability_retry_router_wrapped(req: RunRequest, run_record_id: str) -> Dict
             "retry_reason": retry_reason,
             "last_error": last_error,
             "decision": "retry",
+            "goal": goal,
             "terminal": False,
             "next_commands": next_commands,
-            "spawn_summary": {
-                "ok": True,
-                "spawned": len(next_commands),
-                "skipped": 0,
-                "errors": [],
-            },
         }
 
     # ------------------------------------------------------------
@@ -4780,14 +4787,9 @@ def capability_retry_router_wrapped(req: RunRequest, run_record_id: str) -> Dict
         "retry_reason": retry_reason,
         "last_error": last_error,
         "decision": "stop_and_escalate",
+        "goal": goal,
         "terminal": True,
         "next_commands": next_commands,
-        "spawn_summary": {
-            "ok": True,
-            "spawned": len(next_commands),
-            "skipped": 0,
-            "errors": [],
-        },
     }
     
 EVENT_CAPABILITY_ALLOWLIST = {
