@@ -4622,7 +4622,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         except Exception:
             status_code = None
 
-    if (result.get("ok") is False) or (isinstance(status_code, int) and status_code >= 400):
+if (result.get("ok") is False) or (isinstance(status_code, int) and status_code >= 400):
     incident_input = {
         "flow_id": flow_id,
         "root_event_id": root_event_id,
