@@ -25,6 +25,7 @@ from app.capabilities.health_tick import run as capability_health_tick
 from app.capabilities.http_exec import capability_http_exec
 from app.policies import get_policies
 from app.capabilities.internal_escalate import capability_internal_escalate
+from app.capabilities.incident_router import run as capability_incident_router
 
 
 # ============================================================
