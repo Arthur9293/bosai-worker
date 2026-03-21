@@ -1787,6 +1787,12 @@ def create_command_record(
     if parent_run_id:
         fields["Parent_Run_ID"] = parent_run_id
 
+    print("[AIRTABLE CREATE DEBUG PRE] entering create")
+    print("[AIRTABLE CREATE DEBUG PRE] table_name =", table_name)
+    print("[AIRTABLE CREATE DEBUG PRE] BASE_ID =", BASE_ID)
+    print("[AIRTABLE CREATE DEBUG PRE] AIRTABLE_API_URL =", AIRTABLE_API_URL)
+    print("[AIRTABLE CREATE DEBUG PRE] fields keys =", list(fields.keys()) if isinstance(fields, dict) else type(fields))
+
     url = f"{AIRTABLE_API_URL}/{BASE_ID}/{quote(table_name)}"
     headers = airtable_headers()
 
