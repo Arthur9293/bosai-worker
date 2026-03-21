@@ -9,9 +9,6 @@ import traceback
 import uuid
 from dotenv import load_dotenv
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(BASE_DIR, "..", ".env"))
-
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
@@ -34,8 +31,13 @@ from app.capabilities.internal_escalate import capability_internal_escalate
 # Env / settings
 # ============================================================
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, "..", ".env"))
+
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY", "").strip()
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID", "").strip()
+POLICIES_TABLE_NAME = os.getenv("POLICIES_TABLE_NAME", "Policies").strip()
+POLICIES_VIEW_NAME = os.getenv("POLICIES_VIEW_NAME", "Active").strip()
 
 SYSTEM_RUNS_TABLE_NAME = os.getenv("SYSTEM_RUNS_TABLE_NAME", "System_Runs").strip()
 COMMANDS_TABLE_NAME = os.getenv("COMMANDS_TABLE_NAME", "Commands").strip()
