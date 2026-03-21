@@ -4340,7 +4340,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         }
     )
 
-    result = capability_http_exec(normalized_req, run_record_id)
+    result = capability_http_exec(input_data=payload)
 
     flow_id, root_event_id = _resolve_flow_ids(payload)
     next_commands: List[Dict[str, Any]] = []
@@ -5290,10 +5290,8 @@ async def run(request: Request, response: Response) -> RunResponse:
                 detail=f"Unsupported capability: {req.capability}",
             )
 
-        input_data = getattr(req, "input", None) or {}
-
-        result_obj = fn(input_data=input_data)
-
+        result_obj = fn(req, run_record_id)
+        
         if isinstance(result_obj, dict) and "run_record_id" not in result_obj:
             result_obj["run_record_id"] = run_record_id
 
