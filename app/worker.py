@@ -4860,7 +4860,6 @@ if (result.get("ok") is False) or (isinstance(status_code, int) and status_code 
             if isinstance(result, dict) else "not_dict"
         )
 
-    return result
 
 def capability_retry_router_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
