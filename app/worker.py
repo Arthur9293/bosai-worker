@@ -1727,6 +1727,54 @@ def capability_decision_router(req: RunRequest, run_record_id: str) -> Dict[str,
 # Command queue helpers
 # ============================================================
 
+def create_command_record(
+    capability: str,
+    priority: int = 1,
+    input_data: Optional[Dict[str, Any]] = None,
+    workspace_id: Optional[str] = None,
+    parent_run_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not capability:
+        raise ValueError("capability is required")
+
+    payload = input_data or {}
+
+    flow_id = str(payload.get("flow_id") or "").strip()
+    root_event_id = str(payload.get("root_event_id") or "").strip()
+
+    command_id = f"cmd_{uuid.uuid4().hex[:12]}"
+    idem_key = f"spawn:{capability}:{flow_id or 'no_flow'}:{uuid.uuid4().hex[:10]}"
+
+    fields: Dict[str, Any] = {
+        "Command_ID": command_id,
+        "Capability": capability,
+        "Status": "Queued",
+        "Priority": int(priority or 1),
+        "Input_JSON": json.dumps(payload, ensure_ascii=False),
+        "Idempotency_Key": idem_key,
+    }
+
+    if workspace_id:
+        fields["Workspace_ID"] = workspace_id
+    if flow_id:
+        fields["Flow_ID"] = flow_id
+    if root_event_id:
+        fields["Root_Event_ID"] = root_event_id
+    if parent_run_id:
+        fields["Parent_Run_ID"] = parent_run_id
+
+    url = f"{AIRTABLE_API_URL}/{BASE_ID}/{quote(COMMANDS_TABLE_NAME)}"
+    headers = airtable_headers()
+
+    resp = requests.post(
+        url,
+        headers=headers,
+        json={"fields": fields},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
 def _new_lock_token() -> str:
     return uuid.uuid4().hex
 
