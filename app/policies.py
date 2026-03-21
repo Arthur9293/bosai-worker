@@ -4,23 +4,10 @@ from typing import Any, Dict
 from urllib.parse import quote
 
 import requests
+from dotenv import load_dotenv
 
 
-AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY", "").strip()
-AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID", "").strip()
-POLICIES_TABLE_NAME = os.getenv("POLICIES_TABLE_NAME", "Policies").strip()
-POLICIES_VIEW_NAME = os.getenv("POLICIES_VIEW_NAME", "Active").strip()
-
-
-def _airtable_url(table_name: str) -> str:
-    return f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{quote(table_name)}"
-
-
-def _airtable_headers() -> Dict[str, str]:
-    return {
-        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
-        "Content-Type": "application/json",
-    }
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _pick_policy_value(fields: Dict[str, Any], policy_type: str) -> Any:
@@ -53,21 +40,34 @@ def _pick_policy_value(fields: Dict[str, Any], policy_type: str) -> Any:
 
 
 def get_policies() -> Dict[str, Any]:
-    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+    load_dotenv(os.path.join(BASE_DIR, "..", ".env"), override=True)
+
+    airtable_api_key = os.getenv("AIRTABLE_API_KEY", "").strip()
+    airtable_base_id = os.getenv("AIRTABLE_BASE_ID", "").strip()
+    policies_table_name = os.getenv("POLICIES_TABLE_NAME", "Policies").strip()
+    policies_view_name = os.getenv("POLICIES_VIEW_NAME", "Active").strip()
+
+    if not airtable_api_key or not airtable_base_id:
         print("[policies] missing AIRTABLE env")
         return {}
 
+    url = f"https://api.airtable.com/v0/{airtable_base_id}/{quote(policies_table_name)}"
+
     try:
         print("[DEBUG POLICIES]")
-        print("BASE_ID =", AIRTABLE_BASE_ID)
-        print("TABLE =", POLICIES_TABLE_NAME)
-        print("VIEW =", POLICIES_VIEW_NAME)
-        print("URL =", _airtable_url(POLICIES_TABLE_NAME))
+        print("BASE_ID =", airtable_base_id)
+        print("TABLE =", policies_table_name)
+        print("VIEW =", policies_view_name)
+        print("URL =", url)
+
         response = requests.get(
-            _airtable_url(POLICIES_TABLE_NAME),
-            headers=_airtable_headers(),
+            url,
+            headers={
+                "Authorization": f"Bearer {airtable_api_key}",
+                "Content-Type": "application/json",
+            },
             params={
-                "view": POLICIES_VIEW_NAME,
+                "view": policies_view_name,
                 "maxRecords": 100,
             },
             timeout=20,
@@ -81,7 +81,6 @@ def get_policies() -> Dict[str, Any]:
 
         for rec in records:
             fields = rec.get("fields", {}) or {}
-            print("[policies] fields keys:", list(fields.keys()))
 
             enabled = fields.get("Enabled", True)
             if enabled is False:
@@ -97,12 +96,8 @@ def get_policies() -> Dict[str, Any]:
             if not name:
                 continue
 
-            print("[policies] resolved name:", name)
-
             policy_type = str(fields.get("Type") or "").strip()
             value = _pick_policy_value(fields, policy_type)
-
-            print("[policies] type/value:", policy_type, value)
 
             if value is None:
                 continue
