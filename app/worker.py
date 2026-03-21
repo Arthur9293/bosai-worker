@@ -1790,12 +1790,20 @@ def create_command_record(
     url = f"{AIRTABLE_API_URL}/{BASE_ID}/{quote(COMMANDS_TABLE_NAME)}"
     headers = airtable_headers()
 
+    print("[AIRTABLE CREATE DEBUG] table_name =", table_name)
+    print("[AIRTABLE CREATE DEBUG] url =", url)
+    print("[AIRTABLE CREATE DEBUG] fields =", fields)
+
     resp = requests.post(
         url,
         headers=headers,
         json={"fields": fields},
         timeout=20,
     )
+
+    print("[AIRTABLE CREATE DEBUG] status_code =", resp.status_code)
+    print("[AIRTABLE CREATE DEBUG] response_text =", resp.text)
+    
     resp.raise_for_status()
     return resp.json()
 
