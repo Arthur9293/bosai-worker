@@ -4367,55 +4367,11 @@ def _create_incident_log_record(incident_payload: Dict[str, Any]) -> Dict[str, A
 
         candidates = [
             {
-                "Name": f"Incident {goal or reason or 'unknown'}",
-                "Diagnostic IA": error_text or reason,
-                "Action IA": f"Triggered by {original_capability or 'unknown_capability'}",
+                "Name": f"Incident {goal or 'unknown'}",
                 "Statut incident": "Nouveau",
-                "Urgence IA": "Critique" if http_status and int(http_status) >= 500 else "Moyen",
-                "Résumé": json.dumps(
-                    {
-                        "flow_id": flow_id,
-                        "root_event_id": root_event_id,
-                        "goal": goal,
-                        "reason": reason,
-                        "original_capability": original_capability,
-                        "failed_url": failed_url,
-                        "failed_method": failed_method,
-                        "retry_count": retry_count,
-                        "retry_max": retry_max,
-                        "http_status": http_status,
-                        "incident_key": incident_key,
-                        "workspace_id": workspace_id,
-                        "run_record_id": run_record_id,
-                    },
-                    ensure_ascii=False,
-                ),
-            },
-            {
-                "Name": f"Incident {goal or reason or 'unknown'}",
-                "Diagnostic": error_text or reason,
-                "Action": f"Triggered by {original_capability or 'unknown_capability'}",
-                "Status": "Open",
-                "Severity": "High" if http_status and int(http_status) >= 500 else "Medium",
-                "Payload_JSON": json.dumps(
-                    {
-                        "flow_id": flow_id,
-                        "root_event_id": root_event_id,
-                        "goal": goal,
-                        "reason": reason,
-                        "original_capability": original_capability,
-                        "failed_url": failed_url,
-                        "failed_method": failed_method,
-                        "retry_count": retry_count,
-                        "retry_max": retry_max,
-                        "http_status": http_status,
-                        "incident_key": incident_key,
-                        "workspace_id": workspace_id,
-                        "run_record_id": run_record_id,
-                    },
-                    ensure_ascii=False,
-                ),
-            },
+                "Diagnostic IA": error_text or reason,
+                "Action IA": f"{original_capability or 'unknown_capability'} failed",
+            }
         ]
 
         create_res = _airtable_create_best_effort(LOGS_ERREURS_TABLE_NAME, candidates)
@@ -4423,6 +4379,22 @@ def _create_incident_log_record(incident_payload: Dict[str, Any]) -> Dict[str, A
             return {
                 "ok": False,
                 "error": create_res.get("error"),
+                "debug": {
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "goal": goal,
+                    "reason": reason,
+                    "original_capability": original_capability,
+                    "failed_url": failed_url,
+                    "failed_method": failed_method,
+                    "retry_count": retry_count,
+                    "retry_max": retry_max,
+                    "http_status": http_status,
+                    "incident_key": incident_key,
+                    "workspace_id": workspace_id,
+                    "run_record_id": run_record_id,
+                    "candidates": candidates,
+                },
             }
 
         return {
