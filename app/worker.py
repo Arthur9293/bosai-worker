@@ -1787,13 +1787,13 @@ def create_command_record(
     if parent_run_id:
         fields["Parent_Run_ID"] = parent_run_id
 
-    url = f"{AIRTABLE_API_URL}/{BASE_ID}/{quote(COMMANDS_TABLE_NAME)}"
+    url = f"{AIRTABLE_API_URL}/{BASE_ID}/{quote(table_name)}"
     headers = airtable_headers()
 
     print("[AIRTABLE CREATE DEBUG] table_name =", table_name)
     print("[AIRTABLE CREATE DEBUG] url =", url)
     print("[AIRTABLE CREATE DEBUG] fields =", fields)
-
+    
     resp = requests.post(
         url,
         headers=headers,
