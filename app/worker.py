@@ -26,6 +26,7 @@ from app.capabilities.http_exec import capability_http_exec
 from app.policies import get_policies
 from app.capabilities.internal_escalate import capability_internal_escalate
 from app.capabilities.incident_router import run as capability_incident_router
+from app.capabilities.decision_engine import run as capability_decision_engine
 
 
 # ============================================================
@@ -5106,6 +5107,7 @@ EVENT_CAPABILITY_ALLOWLIST = {
     "sla_router",
     "complete_flow_demo",
     "complete_flow",
+    "decision_engine",
 }
 
 EXECUTABLE_CAPABILITY_ALLOWLIST = {
@@ -5124,6 +5126,7 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "flow_state_get",
     "flow_state_put",
     "flow_state_append_step",
+    "decision_engine"
 }
 
 def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
@@ -5376,6 +5379,7 @@ CAPABILITIES = {
     "decision_router": capability_decision_router_wrapped,
     "incident_router": capability_incident_router_wrapped,
     "sla_router": capability_sla_router,
+    "decision_engine": capability_decision_engine,
 }
   
 # ============================================================
