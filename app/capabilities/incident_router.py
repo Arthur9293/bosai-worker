@@ -69,5 +69,5 @@ def run(input_data: Dict[str, Any] | None = None) -> Dict[str, Any]:
         "retry_count": retry_count,
         "retry_max": retry_max,
         "next_commands": next_commands,
-        "terminal": decision in ("escalate", "log_only"),
+        "terminal": False,
     }
