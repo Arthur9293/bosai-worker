@@ -3256,8 +3256,8 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
             incident_fields_candidates,
         )
 
-        if incident_create_result.get("ok"):
-            incident_record_id = str(incident_create_result.get("record_id") or "").strip()
+    if incident_create_result.get("ok"):
+        incident_record_id = str(incident_create_result.get("record_id") or "").strip()
 
     decision = ""
     next_commands: List[Dict[str, Any]] = []
