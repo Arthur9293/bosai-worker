@@ -4362,38 +4362,116 @@ def _create_incident_log_record(incident_payload: Dict[str, Any]) -> Dict[str, A
         incident_key = str(incident_payload.get("incident_key") or "").strip()
 
         http_status = incident_payload.get("http_status")
+        try:
+            http_status = int(http_status) if http_status is not None else None
+        except Exception:
+            http_status = None
+
         retry_count = int(incident_payload.get("retry_count") or 0)
         retry_max = int(incident_payload.get("retry_max") or 0)
 
-        candidates = [
+        incident_name = f"Incident {goal or reason or 'unknown'}"
+        incident_diag = error_text or reason or "Unknown incident"
+        incident_action = f"{original_capability or 'unknown_capability'} failed"
+        severity_label = "Critique" if http_status is not None and http_status >= 500 else "Moyen"
+
+        raw_payload_json = json.dumps(
             {
-                "Name": f"Incident {goal or 'unknown'}",
+                "flow_id": flow_id,
+                "root_event_id": root_event_id,
+                "goal": goal,
+                "reason": reason,
+                "error": error_text,
+                "original_capability": original_capability,
+                "failed_url": failed_url,
+                "failed_method": failed_method,
+                "retry_count": retry_count,
+                "retry_max": retry_max,
+                "http_status": http_status,
+                "incident_key": incident_key,
+                "workspace_id": workspace_id,
+                "run_record_id": run_record_id,
+            },
+            ensure_ascii=False,
+        )
+
+        # ------------------------------------------------------------
+        # Safe field candidates:
+        # try increasingly minimal / alternative schemas
+        # ------------------------------------------------------------
+        candidates = [
+            # Candidate A: current EP&DS/BOSAI-style fields
+            {
+                "Name": incident_name,
                 "Statut incident": "Nouveau",
-                "Diagnostic IA": error_text or reason,
-                "Action IA": f"{original_capability or 'unknown_capability'} failed",
-            }
+                "Diagnostic IA": incident_diag,
+                "Action IA": incident_action,
+            },
+            # Candidate B: same + severity if available
+            {
+                "Name": incident_name,
+                "Statut incident": "Nouveau",
+                "Diagnostic IA": incident_diag,
+                "Action IA": incident_action,
+                "Urgence IA": severity_label,
+            },
+            # Candidate C: generic incident fields
+            {
+                "Name": incident_name,
+                "Status": "Open",
+                "Diagnostic": incident_diag,
+                "Action": incident_action,
+            },
+            # Candidate D: generic + severity
+            {
+                "Name": incident_name,
+                "Status": "Open",
+                "Diagnostic": incident_diag,
+                "Action": incident_action,
+                "Severity": "High" if http_status is not None and http_status >= 500 else "Medium",
+            },
+            # Candidate E: with payload JSON
+            {
+                "Name": incident_name,
+                "Statut incident": "Nouveau",
+                "Diagnostic IA": incident_diag,
+                "Action IA": incident_action,
+                "Payload_JSON": raw_payload_json,
+            },
+            # Candidate F: with résumé if supported
+            {
+                "Name": incident_name,
+                "Statut incident": "Nouveau",
+                "Diagnostic IA": incident_diag,
+                "Action IA": incident_action,
+                "Résumé": raw_payload_json,
+            },
+            # Candidate G: ultra-minimal fallback
+            {
+                "Name": incident_name,
+            },
         ]
 
         create_res = _airtable_create_best_effort(LOGS_ERREURS_TABLE_NAME, candidates)
+
         if not create_res.get("ok"):
             return {
                 "ok": False,
                 "error": create_res.get("error"),
                 "debug": {
+                    "table": LOGS_ERREURS_TABLE_NAME,
+                    "incident_name": incident_name,
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
                     "goal": goal,
                     "reason": reason,
+                    "http_status": http_status,
                     "original_capability": original_capability,
                     "failed_url": failed_url,
                     "failed_method": failed_method,
                     "retry_count": retry_count,
                     "retry_max": retry_max,
-                    "http_status": http_status,
-                    "incident_key": incident_key,
-                    "workspace_id": workspace_id,
-                    "run_record_id": run_record_id,
-                    "candidates": candidates,
+                    "candidates_tried": candidates,
                 },
             }
 
