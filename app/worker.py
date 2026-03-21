@@ -3557,7 +3557,7 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
             }
         ]
 
-    # 4) retry possible -> on relance http_exec UNE SEULE FOIS par passage
+       # 4) retry possible -> on relance http_exec UNE SEULE FOIS par passage
     elif retry_count < retry_max:
         next_retry_count = retry_count + 1
         retry_delay_seconds = min(60, 2 ** retry_count)
@@ -3577,14 +3577,15 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
                     "step_index": step_index + 1,
-                    "goal": failed_goal,
+                    "goal": failed_goal or "retry_after_http_failure",
+                    "reason": reason,
+                    "origin_reason": reason_in,
                     "retry_count": next_retry_count,
                     "retry_max": retry_max,
                     "retry_delay_seconds": retry_delay_seconds,
-                    "origin_reason": reason_in,
                     "failed_url": failed_url,
                     "failed_method": failed_method,
-                    "failed_goal": failed_goal,
+                    "failed_goal": failed_goal or "retry_after_http_failure",
                     "body": {
                         "flow_id": flow_id,
                         "root_event_id": root_event_id,
@@ -3597,7 +3598,6 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
                 },
             }
         ]
-
     # 5) retry épuisé -> incident
     else:
         decision = "retry_exhausted_to_incident"
