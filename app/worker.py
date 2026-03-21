@@ -1800,11 +1800,11 @@ def create_command_record(
 
     print("[AIRTABLE CREATE DEBUG PRE] entering create")
     print("[AIRTABLE CREATE DEBUG PRE] table_name =", table_name)
-    print("[AIRTABLE CREATE DEBUG PRE] BASE_ID =", BASE_ID)
     print("[AIRTABLE CREATE DEBUG PRE] AIRTABLE_API_URL =", AIRTABLE_API_URL)
     print("[AIRTABLE CREATE DEBUG PRE] fields keys =", list(fields.keys()) if isinstance(fields, dict) else type(fields))
-
-    url = f"{AIRTABLE_API_URL}/{BASE_ID}/{quote(table_name)}"
+    print("[AIRTABLE CREATE DEBUG PRE] AIRTABLE_BASE_ID =", AIRTABLE_BASE_ID)
+    
+    url = f"{AIRTABLE_API_URL}/{AIRTABLE_BASE_ID}/{quote(table_name)}"
     headers = airtable_headers()
 
     print("[AIRTABLE CREATE DEBUG] table_name =", table_name)
