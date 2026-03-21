@@ -5292,10 +5292,7 @@ async def run(request: Request, response: Response) -> RunResponse:
 
         input_data = getattr(req, "input", None) or {}
 
-        result_obj = fn(
-            input_data=input_data,
-            run_record_id=run_record_id,
-        )
+        result_obj = fn(input_data=input_data)
 
         if isinstance(result_obj, dict) and "run_record_id" not in result_obj:
             result_obj["run_record_id"] = run_record_id
