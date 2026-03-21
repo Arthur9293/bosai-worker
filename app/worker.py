@@ -4347,7 +4347,94 @@ def _create_command_from_next_command(
         "idempotency_key": effective_idempotency_key,
         "parent_run_id": parent_run_id,
     }
+def _create_incident_log_record(incident_payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        flow_id = str(incident_payload.get("flow_id") or "").strip()
+        root_event_id = str(incident_payload.get("root_event_id") or "").strip()
+        goal = str(incident_payload.get("goal") or "").strip()
+        reason = str(incident_payload.get("reason") or "").strip()
+        error_text = str(incident_payload.get("error") or "").strip()
+        original_capability = str(incident_payload.get("original_capability") or "").strip()
+        failed_url = str(incident_payload.get("failed_url") or "").strip()
+        failed_method = str(incident_payload.get("failed_method") or "").strip()
+        workspace_id = str(incident_payload.get("workspace_id") or "").strip()
+        run_record_id = str(incident_payload.get("run_record_id") or "").strip()
+        incident_key = str(incident_payload.get("incident_key") or "").strip()
 
+        http_status = incident_payload.get("http_status")
+        retry_count = int(incident_payload.get("retry_count") or 0)
+        retry_max = int(incident_payload.get("retry_max") or 0)
+
+        candidates = [
+            {
+                "Name": f"Incident {goal or reason or 'unknown'}",
+                "Diagnostic IA": error_text or reason,
+                "Action IA": f"Triggered by {original_capability or 'unknown_capability'}",
+                "Statut incident": "Nouveau",
+                "Urgence IA": "Critique" if http_status and int(http_status) >= 500 else "Moyen",
+                "Résumé": json.dumps(
+                    {
+                        "flow_id": flow_id,
+                        "root_event_id": root_event_id,
+                        "goal": goal,
+                        "reason": reason,
+                        "original_capability": original_capability,
+                        "failed_url": failed_url,
+                        "failed_method": failed_method,
+                        "retry_count": retry_count,
+                        "retry_max": retry_max,
+                        "http_status": http_status,
+                        "incident_key": incident_key,
+                        "workspace_id": workspace_id,
+                        "run_record_id": run_record_id,
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+            {
+                "Name": f"Incident {goal or reason or 'unknown'}",
+                "Diagnostic": error_text or reason,
+                "Action": f"Triggered by {original_capability or 'unknown_capability'}",
+                "Status": "Open",
+                "Severity": "High" if http_status and int(http_status) >= 500 else "Medium",
+                "Payload_JSON": json.dumps(
+                    {
+                        "flow_id": flow_id,
+                        "root_event_id": root_event_id,
+                        "goal": goal,
+                        "reason": reason,
+                        "original_capability": original_capability,
+                        "failed_url": failed_url,
+                        "failed_method": failed_method,
+                        "retry_count": retry_count,
+                        "retry_max": retry_max,
+                        "http_status": http_status,
+                        "incident_key": incident_key,
+                        "workspace_id": workspace_id,
+                        "run_record_id": run_record_id,
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+
+        create_res = _airtable_create_best_effort(LOGS_ERREURS_TABLE_NAME, candidates)
+        if not create_res.get("ok"):
+            return {
+                "ok": False,
+                "error": create_res.get("error"),
+            }
+
+        return {
+            "ok": True,
+            "record_id": str(create_res.get("record_id") or "").strip(),
+        }
+
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": repr(e),
+        }
 
 def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
@@ -4986,6 +5073,156 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "flow_state_append_step",
 }
 
+def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    payload = _normalize_flow_keys(req.input or {})
+    workspace_id = _resolve_workspace_id(req=req)
+
+    flow_id, root_event_id = _resolve_flow_ids(payload)
+    step_index = _resolve_flow_step_index(payload, 0)
+
+    goal = str(payload.get("goal") or "").strip()
+    reason = str(payload.get("reason") or payload.get("retry_reason") or "unknown").strip()
+    error_text = str(payload.get("error") or payload.get("last_error") or "").strip()
+
+    original_capability = str(payload.get("original_capability") or "").strip()
+    failed_url = str(payload.get("failed_url") or payload.get("url") or payload.get("http_target") or "").strip()
+    failed_method = str(payload.get("failed_method") or payload.get("method") or "").strip()
+
+    retry_count = int(payload.get("retry_count") or 0)
+    retry_max = int(payload.get("retry_max") or 0)
+
+    http_status = payload.get("http_status") or payload.get("status_code")
+    try:
+        http_status = int(http_status) if http_status is not None else None
+    except Exception:
+        http_status = None
+
+    incident_key = "|".join(
+        [
+            flow_id or "no_flow",
+            root_event_id or "no_root",
+            original_capability or "no_cap",
+            failed_method or "no_method",
+            failed_url or "no_url",
+            str(http_status or "no_status"),
+            reason or "no_reason",
+        ]
+    )
+
+    incident_payload = {
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "step_index": step_index,
+        "goal": goal,
+        "reason": reason,
+        "error": error_text,
+        "original_capability": original_capability,
+        "failed_url": failed_url,
+        "failed_method": failed_method,
+        "retry_count": retry_count,
+        "retry_max": retry_max,
+        "http_status": http_status,
+        "workspace_id": workspace_id,
+        "run_record_id": run_record_id,
+        "incident_key": incident_key,
+    }
+
+    create_res = _create_incident_log_record(incident_payload)
+
+    next_commands: List[Dict[str, Any]] = []
+
+    # étape suivante simple: escalade interne / ou flow completion
+    next_commands.append(
+        {
+            "capability": "internal_escalate",
+            "priority": req.priority,
+            "input": {
+                "flow_id": flow_id,
+                "root_event_id": root_event_id,
+                "step_index": step_index + 1,
+                "goal": "incident_escalation",
+                "reason": reason,
+                "error": error_text,
+                "original_capability": original_capability,
+                "failed_url": failed_url,
+                "failed_method": failed_method,
+                "retry_count": retry_count,
+                "retry_max": retry_max,
+                "http_status": http_status,
+                "incident_record_id": create_res.get("record_id"),
+                "workspace_id": workspace_id,
+            },
+            "terminal": False,
+        }
+    )
+
+    _append_flow_step_safe(
+        flow_id=flow_id,
+        workspace_id=workspace_id,
+        step_obj={
+            "step_index": step_index,
+            "capability": "incident_router",
+            "status": "done",
+            "goal": goal,
+            "reason": reason,
+            "http_status": http_status,
+            "failed_url": failed_url,
+            "failed_method": failed_method,
+            "incident_record_id": create_res.get("record_id"),
+            "run_record_id": run_record_id,
+        },
+    )
+
+    _update_flow_registry_safe(
+        flow_id=flow_id,
+        workspace_id=workspace_id,
+        status="Running",
+        current_step=step_index,
+        last_decision="incident_created",
+        memory_obj={
+            "last_incident": {
+                "goal": goal,
+                "reason": reason,
+                "http_status": http_status,
+                "failed_url": failed_url,
+                "incident_record_id": create_res.get("record_id"),
+            }
+        },
+        result_obj={
+            "incident_router_result": {
+                "ok": bool(create_res.get("ok")),
+                "record_id": create_res.get("record_id"),
+                "reason": reason,
+                "http_status": http_status,
+            }
+        },
+        linked_run=[run_record_id],
+    )
+
+    return {
+        "ok": True,
+        "capability": "incident_router",
+        "status": "incident_created" if create_res.get("ok") else "incident_create_failed",
+        "run_record_id": run_record_id,
+        "workspace_id": workspace_id,
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "step_index": step_index,
+        "goal": goal,
+        "reason": reason,
+        "error": error_text,
+        "original_capability": original_capability,
+        "failed_url": failed_url,
+        "failed_method": failed_method,
+        "retry_count": retry_count,
+        "retry_max": retry_max,
+        "http_status": http_status,
+        "incident_record_id": create_res.get("record_id"),
+        "incident_create_ok": bool(create_res.get("ok")),
+        "next_commands": next_commands,
+        "terminal": False,
+    }
+    
 def capability_complete_flow(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
     flow_id, root_event_id = _resolve_flow_ids(payload)
@@ -5084,6 +5321,7 @@ CAPABILITIES = {
     "retry_router": capability_retry_router,
     "retry_router": capability_retry_router_wrapped,
     "decision_router": capability_decision_router_wrapped,
+    "incident_router": capability_incident_router_wrapped,
     "sla_router": capability_sla_router,
 }
   
