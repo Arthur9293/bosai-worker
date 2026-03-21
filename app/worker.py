@@ -439,7 +439,7 @@ def _airtable_create(table_name: str, fields: Dict[str, Any]) -> str:
     url = _airtable_url(table_name)
     headers = _airtable_headers()
 
-    r = _http_session.post(
+    r = requests.post(
         url,
         headers=headers,
         json={"fields": fields},
@@ -449,7 +449,10 @@ def _airtable_create(table_name: str, fields: Dict[str, Any]) -> str:
     print(f"[AIRTABLE] create = {table_name} ({r.status_code})")
 
     if r.status_code >= 300:
-        raise HTTPException(status_code=500, detail=f"Airtable create failed: {r.status_code} {r.text}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Airtable create failed: {r.status_code} {r.text}",
+        )
 
     return r.json()["id"]
     
