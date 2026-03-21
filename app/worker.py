@@ -241,13 +241,15 @@ def bosai_scheduler_loop() -> None:
                 print(f"[scheduler] event_engine result={evt_result}")
 
             except Exception as e:
+                import traceback
                 SCHEDULER_LAST_ERROR = f"event_engine: {repr(e)}"
                 if evt_run_record_id:
                     try:
                         fail_system_run(evt_run_record_id, repr(e))
                     except Exception:
                         pass
-                print("scheduler event_engine error:", repr(e))
+                print("[scheduler] event_engine error:", repr(e))
+                traceback.print_exc()
 
             # 2) Command orchestrator
             try:
@@ -275,20 +277,29 @@ def bosai_scheduler_loop() -> None:
                 finish_system_run(cmd_run_record_id, "Done", cmd_result)
                 print(f"[scheduler] command_orchestrator result={cmd_result}")
 
-            except Exception as e:
-                SCHEDULER_LAST_ERROR = f"command_orchestrator: {repr(e)}"
-                if cmd_run_record_id:
-                    try:
-                        fail_system_run(cmd_run_record_id, repr(e))
-                    except Exception:
-                        pass
-                print("scheduler command_orchestrator error:", repr(e))
+           except Exception as e:
+               import traceback
+               SCHEDULER_LAST_ERROR = f"event_engine: {repr(e)}"
+               if evt_run_record_id:
+                   try:
+                       fail_system_run(evt_run_record_id, repr(e))
+                   except Exception:
+                       pass
+               print("[scheduler] event_engine error:", repr(e))
+               traceback.print_exc()
+        
+           except Exception as e:
+               import traceback
+               SCHEDULER_LAST_ERROR = f"command_orchestrator: {repr(e)}"
+               if cmd_run_record_id:
+                   try:
+                       fail_system_run(cmd_run_record_id, repr(e))
+                except Exception:
+                    pass
+               print("[scheduler] command_orchestrator error:", repr(e))
+               traceback.print_exc()
 
-        except Exception as e:
-            SCHEDULER_LAST_ERROR = f"scheduler_crash: {repr(e)}"
-            print("scheduler crash:", repr(e))
-
-        time.sleep(10)
+           time.sleep(10)
 
 
 @app.get("/health/scheduler")
