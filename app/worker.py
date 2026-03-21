@@ -2854,6 +2854,14 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
     return result
 
 def capability_escalation_engine(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    def _lock_acquire_adapter(lock_key: str, owner: str = "", holder: str = "", *args, **kwargs):
+        chosen_holder = str(owner or holder or getattr(req, "worker", "") or "escalation_engine").strip()
+        return lock_acquire(lock_key, chosen_holder)
+
+    def _lock_release_adapter(lock_key: str, owner: str = "", holder: str = "", *args, **kwargs):
+        chosen_holder = str(owner or holder or getattr(req, "worker", "") or "escalation_engine").strip()
+        return lock_release(lock_key, chosen_holder)
+
     return capability_escalation_dispatch(
         req,
         run_record_id,
@@ -2861,8 +2869,8 @@ def capability_escalation_engine(req: RunRequest, run_record_id: str) -> Dict[st
         airtable_list_view=airtable_list_view,
         airtable_create=airtable_create,
         airtable_update=airtable_update,
-        lock_acquire=lock_acquire,
-        lock_release=lock_release,
+        lock_acquire=_lock_acquire_adapter,
+        lock_release=_lock_release_adapter,
         http_timeout_seconds=HTTP_TIMEOUT_SECONDS,
         logs_errors_table_name=LOGS_ERRORS_TABLE_NAME,
         logs_errors_view_name=LOGS_ERRORS_VIEW_NAME,
