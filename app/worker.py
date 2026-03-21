@@ -420,7 +420,6 @@ def _require_airtable() -> None:
 def _airtable_url(table_name: str) -> str:
     return f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{quote(table_name)}"
 
-
 def _airtable_headers() -> Dict[str, str]:
     return {
         "Authorization": f"Bearer {AIRTABLE_API_KEY}",
@@ -432,10 +431,10 @@ def _airtable_create(table_name: str, fields: Dict[str, Any]) -> str:
     url = _airtable_url(table_name)
     headers = _airtable_headers()
 
-    print("[AIRTABLE CREATE DEBUG REAL] table_name =", table_name)
-    print("[AIRTABLE CREATE DEBUG REAL] url =", url)
-    print("[AIRTABLE CREATE DEBUG REAL] field_keys =", list(fields.keys()) if isinstance(fields, dict) else type(fields))
-    print("[AIRTABLE CREATE DEBUG REAL] fields =", fields)
+    print(">>> REAL CREATE ACTIVE")
+    print(">>> REAL TABLE =", table_name)
+    print(">>> REAL URL =", url)
+    print(">>> REAL AIRTABLE_BASE_ID =", AIRTABLE_BASE_ID)
 
     r = requests.post(
         url,
@@ -444,8 +443,8 @@ def _airtable_create(table_name: str, fields: Dict[str, Any]) -> str:
         timeout=HTTP_TIMEOUT_SECONDS,
     )
 
-    print("[AIRTABLE CREATE DEBUG REAL] status_code =", r.status_code)
-    print("[AIRTABLE CREATE DEBUG REAL] response_text =", r.text)
+    print(">>> REAL STATUS =", r.status_code)
+    print(">>> REAL TEXT =", r.text)
 
     if r.status_code != 200:
         raise HTTPException(status_code=500, detail=f"Airtable create failed: {r.status_code} {r.text}")
