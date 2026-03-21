@@ -3033,6 +3033,13 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
     workspace_id = _resolve_workspace_id(req=req)
     step_index = _resolve_flow_step_index(payload, 0)
 
+    command_id = str(
+        payload.get("command_id")
+        or payload.get("parent_command_id")
+        or payload.get("Command_ID")
+        or ""
+    ).strip()
+
     reason = str(payload.get("reason") or "unknown").strip()
 
     raw_http_status = (
@@ -3050,6 +3057,12 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
         or payload.get("http_target")
         or ""
     ).strip()
+
+    failed_method = str(
+        payload.get("failed_method")
+        or payload.get("method")
+        or "GET"
+    ).strip().upper()
 
     sla_status = str(payload.get("sla_status") or payload.get("status") or "").strip().lower()
     severity = "low"
@@ -3073,7 +3086,7 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
     incident_record_id = ""
     incident_create_result: Dict[str, Any] = {"ok": False, "mode": "not_attempted"}
 
-    if severity in ("critical", "high", "medium"):     
+    if severity in ("critical", "high", "medium"):
         incident_fields_candidates = [
             {
                 "Error_ID": flow_id,
@@ -3092,46 +3105,48 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
                 "Error_Message": reason,
                 "HTTP_Status": http_status,
                 "Failed_URL": failed_url,
+                "Failed_Method": failed_method,
                 "SLA_Status": sla_status,
-            },   
-            {
-                 "Error_ID": flow_id,
-                 "Flow_ID": flow_id,
-                 "Root_Event_ID": root_event_id,
-                 "Run_ID": run_record_id,
-                 "Command_ID": command_id,
-                 "Linked_Command": [command_id] if command_id else [],
-                 "Name": failed_goal or reason or f"incident-{flow_id}",
-                 "Statut_incident": "Nouveau",
-                 "Source": "bosai-worker",
-                 "Incident_Source": "incident_router",
-                 "Severity": severity,
-                 "Linked_Run": [run_record_id] if run_record_id else [],
-                 "Error_Message": reason,
-                 "SLA_Status": sla_status,
             },
             {
-                 "Error_ID": flow_id,
-                 "Flow_ID": flow_id,
-                 "Root_Event_ID": root_event_id,
-                 "Run_ID": run_record_id,
-                 "Command_ID": command_id,
-                 "Linked_Command": [command_id] if command_id else [],
-                 "Name": failed_goal or reason or f"incident-{flow_id}",
-                 "Statut_incident": "Nouveau",
-                 "Source": "bosai-worker",
-                 "Incident_Source": "incident_router",
-                 "Severity": severity,
-                 "Linked_Run": [run_record_id] if run_record_id else [],
-             },
-             {
-                 "Name": failed_goal or reason or f"incident-{flow_id}",
-                 "Statut_incident": "Nouveau",
-                 "Source": "bosai-worker",
-                 "Incident_Source": "incident_router",
-                 "Severity": severity,
-             },
-        ]               
+                "Error_ID": flow_id,
+                "Flow_ID": flow_id,
+                "Root_Event_ID": root_event_id,
+                "Run_ID": run_record_id,
+                "Command_ID": command_id,
+                "Linked_Command": [command_id] if command_id else [],
+                "Name": failed_goal or reason or f"incident-{flow_id}",
+                "Statut_incident": "Nouveau",
+                "Source": "bosai-worker",
+                "Incident_Source": "incident_router",
+                "Severity": severity,
+                "Linked_Run": [run_record_id] if run_record_id else [],
+                "Error_Message": reason,
+                "SLA_Status": sla_status,
+            },
+            {
+                "Error_ID": flow_id,
+                "Flow_ID": flow_id,
+                "Root_Event_ID": root_event_id,
+                "Run_ID": run_record_id,
+                "Command_ID": command_id,
+                "Linked_Command": [command_id] if command_id else [],
+                "Name": failed_goal or reason or f"incident-{flow_id}",
+                "Statut_incident": "Nouveau",
+                "Source": "bosai-worker",
+                "Incident_Source": "incident_router",
+                "Severity": severity,
+                "Linked_Run": [run_record_id] if run_record_id else [],
+            },
+            {
+                "Name": failed_goal or reason or f"incident-{flow_id}",
+                "Statut_incident": "Nouveau",
+                "Source": "bosai-worker",
+                "Incident_Source": "incident_router",
+                "Severity": severity,
+            },
+        ]
+
         incident_create_result = _airtable_create_best_effort(
             LOGS_ERRORS_TABLE_NAME,
             incident_fields_candidates,
@@ -3159,8 +3174,10 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
                     "http_status": http_status,
                     "failed_goal": failed_goal,
                     "failed_url": failed_url,
+                    "failed_method": failed_method,
                     "sla_status": sla_status,
                     "incident_record_id": incident_record_id,
+                    "command_id": command_id,
                 },
             }
         ]
@@ -3180,8 +3197,10 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
                     "http_status": http_status,
                     "failed_goal": failed_goal,
                     "failed_url": failed_url,
+                    "failed_method": failed_method,
                     "sla_status": sla_status,
                     "incident_record_id": incident_record_id,
+                    "command_id": command_id,
                 },
             }
         ]
@@ -3229,8 +3248,10 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
             "http_status": http_status,
             "failed_goal": failed_goal,
             "failed_url": failed_url,
+            "failed_method": failed_method,
             "sla_status": sla_status,
             "incident_record_id": incident_record_id,
+            "command_id": command_id,
             "run_record_id": run_record_id,
         },
     )
@@ -3248,8 +3269,10 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
                 "http_status": http_status,
                 "failed_goal": failed_goal,
                 "failed_url": failed_url,
+                "failed_method": failed_method,
                 "sla_status": sla_status,
                 "incident_record_id": incident_record_id,
+                "command_id": command_id,
             }
         },
         result_obj={
@@ -3260,8 +3283,10 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
                 "http_status": http_status,
                 "failed_goal": failed_goal,
                 "failed_url": failed_url,
+                "failed_method": failed_method,
                 "sla_status": sla_status,
                 "incident_record_id": incident_record_id,
+                "command_id": command_id,
                 "incident_create_result": incident_create_result,
             }
         },
@@ -3278,10 +3303,12 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
         "http_status": http_status,
         "failed_goal": failed_goal,
         "failed_url": failed_url,
+        "failed_method": failed_method,
         "sla_status": sla_status,
         "next_commands": next_commands,
         "terminal": terminal,
         "run_record_id": run_record_id,
+        "command_id": command_id,
         "incident_record_id": incident_record_id,
         "incident_create_result": incident_create_result,
     }
