@@ -2862,7 +2862,11 @@ def capability_escalation_engine(req: RunRequest, run_record_id: str) -> Dict[st
         chosen_holder = str(owner or holder or getattr(req, "worker", "") or "escalation_engine").strip()
         return lock_release(lock_key, chosen_holder)
 
-    return capability_escalation_dispatch(
+    payload = _normalize_flow_keys(req.input or {})
+    flow_id, root_event_id = _resolve_flow_ids(payload)
+    step_index = _resolve_flow_step_index(payload, 0)
+
+    dispatch_result = capability_escalation_dispatch(
         req,
         run_record_id,
         airtable_list_filtered=airtable_list_filtered,
@@ -2876,6 +2880,98 @@ def capability_escalation_engine(req: RunRequest, run_record_id: str) -> Dict[st
         logs_errors_view_name=LOGS_ERRORS_VIEW_NAME,
         commands_table_name=COMMANDS_TABLE_NAME,
     )
+
+    if not isinstance(dispatch_result, dict):
+        return {
+            "ok": False,
+            "run_record_id": run_record_id,
+            "error": "invalid_escalation_dispatch_result",
+            "terminal": True,
+            "next_commands": [],
+        }
+
+    dispatch_ok = bool(dispatch_result.get("ok"))
+    dispatch_mode = str(dispatch_result.get("mode") or "").strip().lower()
+    dispatch_errors = dispatch_result.get("errors") or []
+    spawn_summary = dispatch_result.get("spawn_summary") or {}
+
+    escalation_command_id = str(
+        dispatch_result.get("escalation_command_id")
+        or dispatch_result.get("command_id")
+        or ""
+    ).strip()
+
+    # Cas 1 : escalade bien traitée -> on ferme le flow proprement
+    if dispatch_ok and dispatch_mode in ("formula", "view", "active", "scan", "dispatch", "processed", ""):
+        return {
+            "ok": True,
+            "flow_id": flow_id or None,
+            "root_event_id": root_event_id or None,
+            "decision": "escalation_sent_and_close",
+            "run_record_id": run_record_id,
+            "escalation_command_id": escalation_command_id or None,
+            "dispatch_result": dispatch_result,
+            "next_commands": [
+                {
+                    "capability": "complete_flow_demo",
+                    "priority": 1,
+                    "input": {
+                        "flow_id": flow_id,
+                        "root_event_id": root_event_id,
+                        "step_index": step_index + 1,
+                        "goal": "incident_escalated_and_closed",
+                        "reason": "escalation_sent",
+                        "run_record_id": run_record_id,
+                        "escalation_command_id": escalation_command_id,
+                    },
+                }
+            ],
+            "terminal": False,
+            "spawn_summary": spawn_summary,
+            "errors": dispatch_errors[:10] if isinstance(dispatch_errors, list) else [],
+        }
+
+    # Cas 2 : pas d’escalade utile mais pas de crash -> fermeture propre
+    if dispatch_ok:
+        return {
+            "ok": True,
+            "flow_id": flow_id or None,
+            "root_event_id": root_event_id or None,
+            "decision": "escalation_noop_close",
+            "run_record_id": run_record_id,
+            "dispatch_result": dispatch_result,
+            "next_commands": [
+                {
+                    "capability": "complete_flow_demo",
+                    "priority": 1,
+                    "input": {
+                        "flow_id": flow_id,
+                        "root_event_id": root_event_id,
+                        "step_index": step_index + 1,
+                        "goal": "incident_closed_without_escalation",
+                        "reason": "escalation_noop",
+                        "run_record_id": run_record_id,
+                    },
+                }
+            ],
+            "terminal": False,
+            "spawn_summary": spawn_summary,
+            "errors": dispatch_errors[:10] if isinstance(dispatch_errors, list) else [],
+        }
+
+    # Cas 3 : échec réel du moteur d’escalade -> on remonte l’erreur sans boucler
+    return {
+        "ok": False,
+        "flow_id": flow_id or None,
+        "root_event_id": root_event_id or None,
+        "decision": "escalation_failed",
+        "run_record_id": run_record_id,
+        "dispatch_result": dispatch_result,
+        "next_commands": [],
+        "terminal": True,
+        "spawn_summary": spawn_summary,
+        "errors": dispatch_errors[:10] if isinstance(dispatch_errors, list) else [],
+    }
 
 def capability_internal_escalate_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     return capability_internal_escalate(
