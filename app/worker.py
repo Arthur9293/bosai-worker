@@ -863,7 +863,7 @@ def _airtable_create_best_effort(table_name: str, candidates: List[Dict[str, Any
             print("[AIRTABLE CREATE] table =", table_name)
             print("[AIRTABLE CREATE] trying fields =", fields)
 
-            record_id = airtable_create(table_name, fields)
+            record_id = _airtable_create(table_name, fields)
 
             return {
                 "ok": True,
@@ -909,7 +909,7 @@ def create_system_run(req: RunRequest) -> Tuple[str, str]:
         "Workspace_ID": workspace_id,
     }
 
-    record_id = airtable_create(SYSTEM_RUNS_TABLE_NAME, fields)
+    record_id = _airtable_create(SYSTEM_RUNS_TABLE_NAME, fields)
     return record_id, run_uuid
 
 def finish_system_run(record_id: str, status: str, result_obj: Dict[str, Any]) -> None:
@@ -1027,7 +1027,7 @@ def state_put(app_key: str, value_obj: Dict[str, Any], workspace_id: str = "prod
             "workspace_id": workspace_id,
         }
 
-    rid = airtable_create(STATE_TABLE_NAME, fields)
+    rid = _airtable_create(STATE_TABLE_NAME, fields)
     return {
         "ok": True,
         "mode": "create",
@@ -1334,7 +1334,7 @@ def lock_acquire(lock_key: str, holder: str) -> Dict[str, Any]:
         )
         return {"ok": True, "locked": True, "record_id": rec["id"], "lock_status": STATE_LOCK_ACTIVE}
 
-    rid = airtable_create(
+    rid = _airtable_create(
         STATE_TABLE_NAME,
         {
             "App_Key": app_key,
@@ -1442,7 +1442,7 @@ def flow_create(
     if linked_run:
         fields["Linked_Run"] = linked_run
 
-    record_id = airtable_create(FLOWS_TABLE_NAME, fields)
+    record_id = _airtable_create(FLOWS_TABLE_NAME, fields)
 
     return {
         "ok": True,
@@ -5773,7 +5773,7 @@ async def webhook_receiver(request: Request) -> Dict[str, Any]:
         idempotency_key=idempotency_key,
     )
 
-    event_id = airtable_create(EVENTS_TABLE_NAME, event_fields)
+    event_id = _airtable_create(EVENTS_TABLE_NAME, event_fields)
 
     return {
         "ok": True,
@@ -5826,7 +5826,7 @@ async def webhook_failure_receiver(request: Request) -> Dict[str, Any]:
         idempotency_key=str(payload.get("idempotency_key") or "").strip() or None,
     )
 
-    event_id = airtable_create(EVENTS_TABLE_NAME, event_fields)
+    event_id = _airtable_create(EVENTS_TABLE_NAME, event_fields)
 
     return {
         "ok": True,
@@ -5860,7 +5860,7 @@ def create_event(evt: EventCreate) -> Dict[str, Any]:
         "Command_Created": False,
     }
 
-    event_id = airtable_create(EVENTS_TABLE_NAME, fields)
+    event_id = _airtable_create(EVENTS_TABLE_NAME, fields)
 
     return {
         "ok": True,
