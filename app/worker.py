@@ -5395,7 +5395,6 @@ def process_events(limit: int = 50) -> Dict[str, Any]:
 # ============================================================
 # Run endpoint
 # ============================================================
-
 @app.post("/run", response_model=RunResponse)
 async def run(request: Request, response: Response) -> RunResponse:
     started = time.time()
@@ -5451,7 +5450,22 @@ async def run(request: Request, response: Response) -> RunResponse:
             )
 
         result_obj = fn(req, run_record_id)
-        
+
+        next_cmds = result_obj.get("next_commands") if isinstance(result_obj, dict) else None
+
+        if isinstance(next_cmds, list) and next_cmds:
+            for cmd in next_cmds:
+                try:
+                    create_command_record(
+                        capability=cmd.get("capability"),
+                        priority=cmd.get("priority", 1),
+                        input_data=cmd.get("input", {}),
+                        workspace_id=getattr(req, "workspace_id", None),
+                        parent_run_id=run_record_id,
+                    )
+                except Exception as e:
+                    print("[worker.spawn] failed to create command:", repr(e))
+
         if isinstance(result_obj, dict) and "run_record_id" not in result_obj:
             result_obj["run_record_id"] = run_record_id
 
