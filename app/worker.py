@@ -431,12 +431,9 @@ def _airtable_create(table_name: str, fields: Dict[str, Any]) -> str:
     url = _airtable_url(table_name)
     headers = _airtable_headers()
 
-    print(">>> REAL CREATE ACTIVE")
-    print(">>> REAL TABLE =", table_name)
-    print(">>> REAL URL =", url)
-    print(">>> REAL AIRTABLE_BASE_ID =", AIRTABLE_BASE_ID)
+    print(f"[AIRTABLE] create → {table_name} ({r.status_code})")
 
-    r = requests.post(
+    r = _http_session.post(
         url,
         headers=headers,
         json={"fields": fields},
