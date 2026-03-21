@@ -5280,10 +5280,23 @@ async def run(request: Request, response: Response) -> RunResponse:
     try:
         fn = CAPABILITIES.get(req.capability)
         if not fn:
-            finish_system_run(run_record_id, "Unsupported", {"ok": False, "error": "unsupported_capability"})
-            raise HTTPException(status_code=400, detail=f"Unsupported capability: {req.capability}")
+            finish_system_run(
+                run_record_id,
+                "Unsupported",
+                {"ok": False, "error": "unsupported_capability"},
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported capability: {req.capability}",
+            )
 
-        result_obj = fn(req, run_record_id)
+        input_data = getattr(req, "input", None) or {}
+
+        result_obj = fn(
+            input_data=input_data,
+            run_record_id=run_record_id,
+        )
+
         if isinstance(result_obj, dict) and "run_record_id" not in result_obj:
             result_obj["run_record_id"] = run_record_id
 
@@ -5305,8 +5318,7 @@ async def run(request: Request, response: Response) -> RunResponse:
     except Exception as e:
         fail_system_run(run_record_id, repr(e))
         raise HTTPException(status_code=500, detail="Internal error.")
-
-
+        
 # ============================================================
 # Incidents / graphs / details
 # ============================================================
