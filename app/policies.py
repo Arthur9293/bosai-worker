@@ -1,6 +1,7 @@
 import json
 import os
 from typing import Any, Dict
+from urllib.parse import quote
 
 import requests
 
@@ -12,7 +13,7 @@ POLICIES_VIEW_NAME = os.getenv("POLICIES_VIEW_NAME", "Active").strip()
 
 
 def _airtable_url(table_name: str) -> str:
-    return f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_name}"
+    return f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{quote(table_name)}"
 
 
 def _airtable_headers() -> Dict[str, str]:
