@@ -4327,26 +4327,22 @@ def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, An
 def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
     workspace_id = _resolve_workspace_id(req=req)
-    next_commands: List[Dict[str, Any]] = []
-
-    normalized_req = RunRequest.from_payload(
-        {
-            "worker": req.worker,
-            "capability": req.capability,
-            "idempotency_key": req.idempotency_key,
-            "priority": req.priority,
-            "dry_run": req.dry_run,
-            "input": payload,
-        }
-    )
 
     result = capability_http_exec(input_data=payload)
 
     flow_id, root_event_id = _resolve_flow_ids(payload)
+    step_index = _resolve_flow_step_index(payload, 0)
+    goal = str(payload.get("goal") or "").strip()
+
     next_commands: List[Dict[str, Any]] = []
 
-    status_code = result.get("status_code")
-    goal = str(payload.get("goal") or "").strip()
+    response_obj = result.get("response") if isinstance(result, dict) else {}
+    if not isinstance(response_obj, dict):
+        response_obj = {}
+
+    status_code = response_obj.get("status_code")
+    if status_code is None:
+        status_code = result.get("status_code")
 
     if status_code is not None:
         try:
@@ -4354,38 +4350,68 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         except Exception:
             status_code = None
 
-    if flow_id and status_code is not None and status_code >= 400:
-        result["flow_id"] = flow_id
-        result["root_event_id"] = root_event_id
+    # ------------------------------------------------------------
+    # FAILURE PATH -> retry_router only
+    # ------------------------------------------------------------
+    if result.get("trigger_retry_router") is True:
+        retry_input = dict(payload)
+
+        retry_input["flow_id"] = flow_id
+        retry_input["root_event_id"] = root_event_id
+        retry_input["step_index"] = step_index + 1
+        retry_input["retry_count"] = int(
+            result.get("retry_count", payload.get("retry_count", 0)) or 0
+        )
+        retry_input["retry_max"] = int(
+            result.get("retry_max", payload.get("retry_max", 3)) or 3
+        )
+        retry_input["retry_reason"] = (
+            result.get("retry_reason")
+            or result.get("error_code")
+            or "unknown"
+        )
+        retry_input["error"] = result.get("error")
+        retry_input["original_capability"] = "http_exec"
+        retry_input["goal"] = "route_retry"
+
+        # cleanup internal fields if present
+        retry_input.pop("next_capability", None)
+        retry_input.pop("trigger_retry_router", None)
+        retry_input.pop("next_commands", None)
+        retry_input.pop("terminal", None)
+        retry_input.pop("spawn_summary", None)
 
         next_commands = [
             {
                 "capability": "retry_router",
-                "priority": 2,
-                "input": {
-                    "flow_id": flow_id,
-                    "root_event_id": root_event_id,
-                    "step_index": _resolve_flow_step_index(payload, 0) + 1,
-                    "goal": "retry_after_http_failure",
-                    "reason": "probe_failed",
-                    "http_status": status_code,
-                    "failed_goal": goal,
-                    "failed_url": payload.get("url") or payload.get("http_target"),
-                    "failed_method": payload.get("method") or "POST",
-                    "retry_count": int(payload.get("retry_count") or 0),
-                    "retry_max": int(payload.get("retry_max") or 2),
-                },
+                "priority": req.priority,
+                "input": retry_input,
+                "terminal": False,
             }
         ]
 
+        result["flow_id"] = flow_id
+        result["root_event_id"] = root_event_id
         result["next_commands"] = next_commands
         result["terminal"] = False
+
+        print(
+            "[worker.wrapper] http_exec failure -> retry_router",
+            {
+                "flow_id": flow_id,
+                "root_event_id": root_event_id,
+                "retry_count": retry_input.get("retry_count"),
+                "retry_max": retry_input.get("retry_max"),
+                "retry_reason": retry_input.get("retry_reason"),
+            },
+        )
+
         return result
 
+    # ------------------------------------------------------------
+    # SUCCESS PATH -> flow memory / next step
+    # ------------------------------------------------------------
     if flow_id:
-        step_index = _resolve_flow_step_index(payload, 0)
-        goal = str(payload.get("goal") or "").strip()
-
         _append_flow_step_safe(
             flow_id=flow_id,
             workspace_id=workspace_id,
@@ -4396,7 +4422,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                 "goal": goal,
                 "url": payload.get("url") or payload.get("http_target"),
                 "result": {
-                    "status_code": result.get("status_code"),
+                    "status_code": status_code,
                     "ok": result.get("ok"),
                 },
                 "run_record_id": run_record_id,
@@ -4427,7 +4453,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                 "last_http_exec": {
                     "goal": goal,
                     "step_index": step_index,
-                    "status_code": result.get("status_code"),
+                    "status_code": status_code,
                     "ok": result.get("ok"),
                 },
                 "http_exec_done_count": http_exec_done_count,
@@ -4442,7 +4468,12 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
         goal_lower = goal.lower()
 
-        if goal_lower in ("create_incident", "alert_incident", "sla_probe", "sla_warning_probe"):
+        if goal_lower in (
+            "create_incident",
+            "alert_incident",
+            "sla_probe",
+            "sla_warning_probe",
+        ):
             next_commands = []
 
         elif goal_lower == "escalation_send":
@@ -4456,6 +4487,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                         "step_index": step_index + 1,
                         "goal": "escalation_sent",
                     },
+                    "terminal": False,
                 }
             ]
 
@@ -4470,6 +4502,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                         "step_index": step_index + 1,
                         "goal": "complete_flow",
                     },
+                    "terminal": False,
                 }
             ]
 
@@ -4484,21 +4517,147 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                         "step_index": step_index + 1,
                         "goal": "continue_flow",
                     },
+                    "terminal": False,
                 }
             ]
+
         if next_commands:
             result["next_commands"] = next_commands
             result["terminal"] = False
         else:
+            result["next_commands"] = []
             result["terminal"] = True
 
         print(
-            "[worker.wrapper] http_exec result next_commands =",
+            "[worker.wrapper] http_exec success next_commands =",
             [x.get("capability") for x in (result.get("next_commands") or [])]
             if isinstance(result, dict) else "not_dict"
         )
 
-        return result
+    return result
+
+def capability_retry_router_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    payload = _normalize_flow_keys(req.input or {})
+    workspace_id = _resolve_workspace_id(req=req)
+
+    flow_id, root_event_id = _resolve_flow_ids(payload)
+
+    retry_count = int(payload.get("retry_count") or 0)
+    retry_max = int(payload.get("retry_max") or 3)
+    step_index = int(payload.get("step_index") or 0)
+
+    goal = str(payload.get("goal") or "").strip()
+    original_capability = str(payload.get("original_capability") or "http_exec").strip()
+
+    retry_reason = str(payload.get("retry_reason") or payload.get("error_code") or "unknown").strip()
+    last_error = payload.get("error") or payload.get("response_status") or payload.get("status_code")
+
+    next_commands: List[Dict[str, Any]] = []
+
+    # ------------------------------------------------------------
+    # CASE 1: retry still allowed
+    # ------------------------------------------------------------
+    if retry_count < retry_max:
+        next_retry_count = retry_count + 1
+
+        retry_input = dict(payload)
+        retry_input["retry_count"] = next_retry_count
+        retry_input["step_index"] = step_index + 1
+        retry_input["goal"] = goal or "retry_http_exec"
+
+        # cleanup router-only fields if present
+        retry_input.pop("next_capability", None)
+        retry_input.pop("trigger_retry_router", None)
+        retry_input.pop("next_commands", None)
+        retry_input.pop("terminal", None)
+        retry_input.pop("spawn_summary", None)
+
+        # keep explicit original capability trace
+        retry_input["original_capability"] = original_capability
+        retry_input["retry_reason"] = retry_reason
+
+        next_commands.append(
+            {
+                "capability": original_capability,
+                "priority": req.priority,
+                "input": retry_input,
+                "terminal": False,
+            }
+        )
+
+        return {
+            "ok": True,
+            "capability": "retry_router",
+            "status": "retry_scheduled",
+            "run_record_id": run_record_id,
+            "workspace_id": workspace_id,
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
+            "step_index": step_index,
+            "retry_count": retry_count,
+            "retry_max": retry_max,
+            "next_retry_count": next_retry_count,
+            "retry_reason": retry_reason,
+            "last_error": last_error,
+            "decision": "retry",
+            "terminal": False,
+            "next_commands": next_commands,
+            "spawn_summary": {
+                "ok": True,
+                "spawned": len(next_commands),
+                "skipped": 0,
+                "errors": [],
+            },
+        }
+
+    # ------------------------------------------------------------
+    # CASE 2: retry max reached
+    # ------------------------------------------------------------
+    escalation_input = {
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "step_index": step_index + 1,
+        "goal": "retry_exhausted",
+        "original_capability": original_capability,
+        "retry_count": retry_count,
+        "retry_max": retry_max,
+        "retry_reason": retry_reason,
+        "last_error": last_error,
+        "workspace_id": workspace_id,
+    }
+
+    next_commands.append(
+        {
+            "capability": "decision_demo",
+            "priority": req.priority,
+            "input": escalation_input,
+            "terminal": True,
+        }
+    )
+
+    return {
+        "ok": True,
+        "capability": "retry_router",
+        "status": "retry_exhausted",
+        "run_record_id": run_record_id,
+        "workspace_id": workspace_id,
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "step_index": step_index,
+        "retry_count": retry_count,
+        "retry_max": retry_max,
+        "retry_reason": retry_reason,
+        "last_error": last_error,
+        "decision": "stop_and_escalate",
+        "terminal": True,
+        "next_commands": next_commands,
+        "spawn_summary": {
+            "ok": True,
+            "spawned": len(next_commands),
+            "skipped": 0,
+            "errors": [],
+        },
+    }
     
 EVENT_CAPABILITY_ALLOWLIST = {
     "http_exec",
@@ -4629,6 +4788,7 @@ CAPABILITIES = {
     "complete_flow_demo": capability_complete_flow_demo,
     "incident_router": capability_incident_router,
     "retry_router": capability_retry_router,
+    "retry_router": capability_retry_router_wrapped,
     "sla_router": capability_sla_router,
 }
   
