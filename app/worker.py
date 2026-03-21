@@ -4265,6 +4265,89 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         "idempotency_key": effective_idempotency_key,
     }
 
+def _create_command_from_next_command(
+    next_cmd: Dict[str, Any],
+    parent_run_id: str,
+    workspace_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not isinstance(next_cmd, dict):
+        return {"ok": False, "error": "invalid_next_command"}
+
+    capability = str(next_cmd.get("capability") or "").strip()
+    if not capability:
+        return {"ok": False, "error": "missing_capability"}
+
+    command_input = next_cmd.get("input") or {}
+    if not isinstance(command_input, dict):
+        return {"ok": False, "error": "invalid_input"}
+
+    priority = int(next_cmd.get("priority") or 1)
+
+    flow_id = str(command_input.get("flow_id") or "").strip()
+    root_event_id = str(command_input.get("root_event_id") or "").strip()
+
+    if capability in (
+        "decision_demo",
+        "decision_router",
+        "incident_router",
+        "retry_router",
+        "sla_router",
+        "complete_flow",
+        "complete_flow_demo",
+    ):
+        if not flow_id:
+            flow_id = parent_run_id
+            command_input["flow_id"] = flow_id
+        if not root_event_id:
+            root_event_id = parent_run_id
+            command_input["root_event_id"] = root_event_id
+
+    effective_idempotency_key = str(
+        next_cmd.get("idempotency_key")
+        or command_input.get("idempotency_key")
+        or f"spawn:{capability}:{flow_id or parent_run_id}:{uuid.uuid4().hex[:10]}"
+    ).strip()
+
+    existing = find_command_by_idem(effective_idempotency_key)
+    if existing:
+        return {
+            "ok": True,
+            "mode": "existing_command",
+            "command_record_id": str(existing.get("id") or "").strip(),
+            "capability": capability,
+            "workspace_id": workspace_id,
+            "idempotency_key": effective_idempotency_key,
+            "parent_run_id": parent_run_id,
+        }
+
+    candidates = _build_command_fields_candidates(
+        capability=capability,
+        command_input=command_input,
+        workspace_id=workspace_id,
+        event_record_id=root_event_id or parent_run_id,
+        idempotency_key=effective_idempotency_key,
+        priority=priority,
+    )
+
+    create_res = _airtable_create_best_effort(COMMANDS_TABLE_NAME, candidates)
+    if not create_res.get("ok"):
+        return {
+            "ok": False,
+            "error": f"command_create_failed:{create_res.get('error')}",
+            "capability": capability,
+            "parent_run_id": parent_run_id,
+        }
+
+    return {
+        "ok": True,
+        "mode": "created_command",
+        "command_record_id": str(create_res.get("record_id") or "").strip(),
+        "capability": capability,
+        "workspace_id": workspace_id,
+        "idempotency_key": effective_idempotency_key,
+        "parent_run_id": parent_run_id,
+    }
+
 
 def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
@@ -5502,17 +5585,41 @@ async def run(request: Request, response: Response) -> RunResponse:
         next_cmds = result_obj.get("next_commands") if isinstance(result_obj, dict) else None
 
         if isinstance(next_cmds, list) and next_cmds:
+            spawned_results = []
+
             for cmd in next_cmds:
                 try:
-                    create_command_record(
-                        capability=cmd.get("capability"),
-                        priority=cmd.get("priority", 1),
-                        input_data=cmd.get("input", {}),
-                        workspace_id=getattr(req, "workspace_id", None),
+                    spawn_res = _create_command_from_next_command(
+                        next_cmd=cmd,
                         parent_run_id=run_record_id,
+                        workspace_id=getattr(req, "workspace_id", None),
+                    )
+                    spawned_results.append(spawn_res)
+
+                    print(
+                        "[worker.spawn] next_command -> command",
+                        {
+                            "capability": cmd.get("capability"),
+                            "ok": spawn_res.get("ok"),
+                            "mode": spawn_res.get("mode"),
+                            "command_record_id": spawn_res.get("command_record_id"),
+                        },
                     )
                 except Exception as e:
-                    print("[worker.spawn] failed to create command:", repr(e))
+                    err = {
+                        "ok": False,
+                        "error": repr(e),
+                        "capability": cmd.get("capability") if isinstance(cmd, dict) else None,
+                    }
+                    spawned_results.append(err)
+                    print("[worker.spawn] failed to create command:", err)
+
+            result_obj["spawn_summary"] = {
+                "ok": all(bool(x.get("ok")) for x in spawned_results) if spawned_results else True,
+                "spawned": len([x for x in spawned_results if x.get("ok")]),
+                "failed": len([x for x in spawned_results if not x.get("ok")]),
+                "results": spawned_results,
+            }
 
         if isinstance(result_obj, dict) and "run_record_id" not in result_obj:
             result_obj["run_record_id"] = run_record_id
