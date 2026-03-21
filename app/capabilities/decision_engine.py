@@ -24,25 +24,43 @@ def run(input_data: Dict[str, Any] | None = None) -> Dict[str, Any]:
     action_plan: List[str] = []
     next_commands: List[Dict[str, Any]] = []
 
+    if not isinstance(original_input, dict):
+        original_input = {}
+
+    original_url = (
+        original_input.get("url")
+        or original_input.get("http_target")
+        or original_input.get("URL")
+    )
+    original_method = original_input.get("method") or original_input.get("http_method") or "GET"
+
     if incident_decision == "retry":
         final_state = "retrying"
         action_plan = [
             "retry original capability",
             "track retry attempt",
         ]
+
+        retry_input = {
+            **original_input,
+            "retry_count": retry_count + 1,
+            "retry_max": retry_max,
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
+            "workspace_id": workspace_id,
+            "incident_record_id": incident_record_id,
+        }
+
+        if original_capability == "http_exec":
+            if original_url:
+                retry_input["url"] = original_url
+            retry_input["method"] = original_method
+
         next_commands.append(
             {
                 "capability": original_capability,
                 "priority": 2,
-                "input": {
-                    **original_input,
-                    "retry_count": retry_count + 1,
-                    "retry_max": retry_max,
-                    "flow_id": flow_id,
-                    "root_event_id": root_event_id,
-                    "workspace_id": workspace_id,
-                    "incident_record_id": incident_record_id,
-                },
+                "input": retry_input,
             }
         )
 
@@ -89,5 +107,5 @@ def run(input_data: Dict[str, Any] | None = None) -> Dict[str, Any]:
         "final_state": final_state,
         "action_plan": action_plan,
         "next_commands": next_commands,
-        "terminal": final_state in ("escalated", "logged_only"),
+        "terminal": final_state in ["logged_only"],
     }
