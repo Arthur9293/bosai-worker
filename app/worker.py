@@ -838,16 +838,35 @@ def _airtable_update_best_effort(table_name: str, record_id: str, candidates: Li
 
 def _airtable_create_best_effort(table_name: str, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
     last_err: Optional[str] = None
+
     for fields in candidates:
         if not fields:
             continue
+
         try:
+            print("[AIRTABLE CREATE] table =", table_name)
+            print("[AIRTABLE CREATE] trying fields =", fields)
+
             record_id = airtable_create(table_name, fields)
-            return {"ok": True, "record_id": record_id, "applied_fields": list(fields.keys())}
+
+            return {
+                "ok": True,
+                "record_id": record_id,
+                "applied_fields": list(fields.keys()),
+            }
+
         except HTTPException as e:
             last_err = str(e.detail)
+            print("[AIRTABLE CREATE] failed table =", table_name)
+            print("[AIRTABLE CREATE] failed fields =", fields)
+            print("[AIRTABLE CREATE] error =", str(e.detail))
+
         except Exception as e:
             last_err = repr(e)
+            print("[AIRTABLE CREATE] failed table =", table_name)
+            print("[AIRTABLE CREATE] failed fields =", fields)
+            print("[AIRTABLE CREATE] error =", repr(e))
+
     return {"ok": False, "error": last_err or "create_failed"}
 
 
