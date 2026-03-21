@@ -7,6 +7,9 @@ import threading
 import time
 import traceback
 import uuid
+from dotenv import load_dotenv
+load_dotenv()
+
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
