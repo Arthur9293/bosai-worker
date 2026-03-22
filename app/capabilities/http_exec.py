@@ -663,12 +663,39 @@ def capability_http_exec(
     Main BOSAI capability entrypoint.
 
     Returns a structured dict.
-    Failure path always targets retry_router only.
+    Failure path always targets retry_router via next_commands.
     """
     started_at = _now_ts()
     payload = input_data or {}
     retry_meta = _extract_retry_meta(payload)
     retry_block = _retry_meta_block(retry_meta)
+
+    flow_id = str(payload.get("flow_id") or "").strip()
+    root_event_id = str(payload.get("root_event_id") or "").strip()
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+
+    def _build_retry_next_command(reason: str) -> List[Dict[str, Any]]:
+        retry_input = dict(payload)
+        retry_input.setdefault("flow_id", flow_id)
+        retry_input.setdefault("root_event_id", root_event_id)
+        retry_input.setdefault("workspace_id", workspace_id)
+        retry_input.setdefault("original_capability", "http_exec")
+        retry_input.setdefault("original_input", dict(payload))
+
+        return [
+            {
+                "capability": "retry_router",
+                "priority": 2,
+                "input": retry_input | {
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "workspace_id": workspace_id,
+                    "original_capability": "http_exec",
+                    "original_input": dict(payload),
+                    "retry_reason": reason,
+                },
+            }
+        ]
 
     if not HTTP_EXEC_ENABLED:
         return {
@@ -679,9 +706,9 @@ def capability_http_exec(
             "error": "HTTP_EXEC_ENABLED=0",
             "started_at": started_at,
             **retry_block,
-            "next_capability": "retry_router",
-            "trigger_retry_router": True,
+            "next_commands": _build_retry_next_command("capability_disabled"),
             "retry_reason": "capability_disabled",
+            "terminal": False,
         }
 
     request_cfg = _build_request_payload(payload)
@@ -725,7 +752,10 @@ def capability_http_exec(
             "request": {
                 "method": method,
                 "url": url,
-                "headers": {k: ("***" if k.lower() == "authorization" else v) for k, v in headers.items()},
+                "headers": {
+                    k: ("***" if k.lower() == "authorization" else v)
+                    for k, v in headers.items()
+                },
                 "params": params,
                 "timeout_seconds": timeout_seconds,
                 "follow_redirects": follow_redirects,
@@ -735,9 +765,9 @@ def capability_http_exec(
                 "url_validation": url_diag,
                 **secret_diag,
             },
-            "next_capability": "retry_router",
-            "trigger_retry_router": True,
+            "next_commands": _build_retry_next_command("url_blocked"),
             "retry_reason": "url_blocked",
+            "terminal": False,
         }
 
     tool_ok, tool_reason, tool_diag = _enforce_toolcatalog(payload, url, method)
@@ -755,9 +785,9 @@ def capability_http_exec(
                 "url": url,
             },
             "toolcatalog": tool_diag,
-            "next_capability": "retry_router",
-            "trigger_retry_router": True,
+            "next_commands": _build_retry_next_command("toolcatalog_block"),
             "retry_reason": "toolcatalog_block",
+            "terminal": False,
         }
 
     if dry_run:
@@ -770,7 +800,10 @@ def capability_http_exec(
             "request": {
                 "method": method,
                 "url": url,
-                "headers": {k: ("***" if k.lower() == "authorization" else v) for k, v in headers.items()},
+                "headers": {
+                    k: ("***" if k.lower() == "authorization" else v)
+                    for k, v in headers.items()
+                },
                 "params": params,
                 "json_body": json_body,
                 "body": body_to_send,
@@ -783,8 +816,8 @@ def capability_http_exec(
                 **secret_diag,
             },
             "toolcatalog": tool_diag,
-            "next_capability": None,
-            "trigger_retry_router": False,
+            "next_commands": [],
+            "terminal": True,
         }
 
     client = _build_session(session)
@@ -826,9 +859,25 @@ def capability_http_exec(
                     **secret_diag,
                 },
                 "toolcatalog": tool_diag,
-                "next_capability": None,
-                "trigger_retry_router": False,
+                "next_commands": [],
+                "terminal": True,
             }
+
+        error_payload = dict(payload)
+        error_payload.update(
+            {
+                "flow_id": flow_id,
+                "root_event_id": root_event_id,
+                "workspace_id": workspace_id,
+                "url": url,
+                "http_target": url,
+                "method": method,
+                "error": f"HTTP {response.status_code}",
+                "http_status": response.status_code,
+                "original_capability": "http_exec",
+                "original_input": dict(payload),
+            }
+        )
 
         return {
             "ok": False,
@@ -852,13 +901,38 @@ def capability_http_exec(
                 **secret_diag,
             },
             "toolcatalog": tool_diag,
-            "next_capability": "retry_router",
-            "trigger_retry_router": True,
+            "next_commands": [
+                {
+                    "capability": "retry_router",
+                    "priority": 2,
+                    "input": error_payload | {
+                        "retry_reason": "http_status_error",
+                    },
+                }
+            ],
             "retry_reason": "http_status_error",
+            "terminal": False,
         }
 
     except requests.Timeout as exc:
         elapsed_ms = int((time.time() - request_started) * 1000)
+
+        error_payload = dict(payload)
+        error_payload.update(
+            {
+                "flow_id": flow_id,
+                "root_event_id": root_event_id,
+                "workspace_id": workspace_id,
+                "url": url,
+                "http_target": url,
+                "method": method,
+                "error": str(exc),
+                "http_status": None,
+                "original_capability": "http_exec",
+                "original_input": dict(payload),
+            }
+        )
+
         return {
             "ok": False,
             "capability": "http_exec",
@@ -880,13 +954,38 @@ def capability_http_exec(
                 **secret_diag,
             },
             "toolcatalog": tool_diag,
-            "next_capability": "retry_router",
-            "trigger_retry_router": True,
+            "next_commands": [
+                {
+                    "capability": "retry_router",
+                    "priority": 2,
+                    "input": error_payload | {
+                        "retry_reason": "timeout",
+                    },
+                }
+            ],
             "retry_reason": "timeout",
+            "terminal": False,
         }
 
     except requests.RequestException as exc:
         elapsed_ms = int((time.time() - request_started) * 1000)
+
+        error_payload = dict(payload)
+        error_payload.update(
+            {
+                "flow_id": flow_id,
+                "root_event_id": root_event_id,
+                "workspace_id": workspace_id,
+                "url": url,
+                "http_target": url,
+                "method": method,
+                "error": str(exc),
+                "http_status": None,
+                "original_capability": "http_exec",
+                "original_input": dict(payload),
+            }
+        )
+
         return {
             "ok": False,
             "capability": "http_exec",
@@ -908,13 +1007,38 @@ def capability_http_exec(
                 **secret_diag,
             },
             "toolcatalog": tool_diag,
-            "next_capability": "retry_router",
-            "trigger_retry_router": True,
+            "next_commands": [
+                {
+                    "capability": "retry_router",
+                    "priority": 2,
+                    "input": error_payload | {
+                        "retry_reason": "request_exception",
+                    },
+                }
+            ],
             "retry_reason": "request_exception",
+            "terminal": False,
         }
 
     except Exception as exc:
         elapsed_ms = int((time.time() - request_started) * 1000)
+
+        error_payload = dict(payload)
+        error_payload.update(
+            {
+                "flow_id": flow_id,
+                "root_event_id": root_event_id,
+                "workspace_id": workspace_id,
+                "url": url,
+                "http_target": url,
+                "method": method,
+                "error": str(exc),
+                "http_status": None,
+                "original_capability": "http_exec",
+                "original_input": dict(payload),
+            }
+        )
+
         return {
             "ok": False,
             "capability": "http_exec",
@@ -936,11 +1060,18 @@ def capability_http_exec(
                 **secret_diag,
             },
             "toolcatalog": tool_diag,
-            "next_capability": "retry_router",
-            "trigger_retry_router": True,
+            "next_commands": [
+                {
+                    "capability": "retry_router",
+                    "priority": 2,
+                    "input": error_payload | {
+                        "retry_reason": "unexpected_exception",
+                    },
+                }
+            ],
             "retry_reason": "unexpected_exception",
+            "terminal": False,
         }
-
 
 def run(
     input_data: Optional[Dict[str, Any]] = None,
