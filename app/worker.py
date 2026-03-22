@@ -25,7 +25,7 @@ from app.capabilities.health_tick import run as capability_health_tick
 from app.capabilities.http_exec import capability_http_exec
 from app.policies import get_policies
 from app.capabilities.internal_escalate import capability_internal_escalate
-from app.capabilities.incident_router import run as capability_incident_router
+from app.capabilities.incident_router import run as capability_incident_router_run
 from app.capabilities.decision_engine import run as capability_decision_engine
 from app.capabilities.retry_router import run as capability_retry_router_run
 
@@ -4358,7 +4358,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             "original_input": payload,
         }
 
-        incident_result = capability_incident_router(req, run_record_id)
+        incident_result = capability_incident_router_run(req, run_record_id)
         # 1) retry path
         if incident_result.get("decision") == "retry":
             retry_input = {
@@ -5158,7 +5158,7 @@ CAPABILITIES = {
     "decision_engine": capability_decision_engine,
     "retry_router": capability_retry_router,
     "decision_router": capability_decision_router,
-    "incident_router": capability_incident_router,
+    "incident_router": capability_incident_router_run,
 }
   
 # ============================================================
