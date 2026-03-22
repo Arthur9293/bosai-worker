@@ -674,14 +674,12 @@ def capability_http_exec(
     root_event_id = str(payload.get("root_event_id") or "").strip()
     workspace_id = str(payload.get("workspace_id") or "").strip()
 
-    def _build_retry_input(reason: str, error: str = "", http_status: Optional[int] = None) -> Dict[str, Any]:
+    def _build_retry_input(
+        reason: str,
+        error: str = "",
+        http_status: Optional[int] = None,
+    ) -> Dict[str, Any]:
         retry_input = dict(payload)
-        retry_input.setdefault("flow_id", flow_id)
-        retry_input.setdefault("root_event_id", root_event_id)
-        retry_input.setdefault("workspace_id", workspace_id)
-        retry_input.setdefault("original_capability", "http_exec")
-        retry_input.setdefault("original_input", dict(payload))
-
         retry_input.update(
             {
                 "flow_id": flow_id,
@@ -700,12 +698,20 @@ def capability_http_exec(
 
         return retry_input
 
-    def _build_retry_next_command(reason: str, error: str = "", http_status: Optional[int] = None) -> List[Dict[str, Any]]:
+    def _build_retry_next_command(
+        reason: str,
+        error: str = "",
+        http_status: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
         return [
             {
                 "capability": "retry_router",
                 "priority": 2,
-                "input": _build_retry_input(reason=reason, error=error, http_status=http_status),
+                "input": _build_retry_input(
+                    reason=reason,
+                    error=error,
+                    http_status=http_status,
+                ),
             }
         ]
 
@@ -718,7 +724,10 @@ def capability_http_exec(
             "error": "HTTP_EXEC_ENABLED=0",
             "started_at": started_at,
             **retry_block,
-            "next_commands": _build_retry_next_command("capability_disabled", error="HTTP_EXEC_ENABLED=0"),
+            "next_commands": _build_retry_next_command(
+                "capability_disabled",
+                error="HTTP_EXEC_ENABLED=0",
+            ),
             "retry_reason": "capability_disabled",
             "terminal": False,
         }
@@ -777,7 +786,10 @@ def capability_http_exec(
                 "url_validation": url_diag,
                 **secret_diag,
             },
-            "next_commands": _build_retry_next_command("url_blocked", error=url_reason),
+            "next_commands": _build_retry_next_command(
+                "url_blocked",
+                error=url_reason,
+            ),
             "retry_reason": "url_blocked",
             "terminal": False,
         }
@@ -797,7 +809,10 @@ def capability_http_exec(
                 "url": url,
             },
             "toolcatalog": tool_diag,
-            "next_commands": _build_retry_next_command("toolcatalog_block", error=tool_reason),
+            "next_commands": _build_retry_next_command(
+                "toolcatalog_block",
+                error=tool_reason,
+            ),
             "retry_reason": "toolcatalog_block",
             "terminal": False,
         }
