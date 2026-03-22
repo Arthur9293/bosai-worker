@@ -29,6 +29,7 @@ def _to_int(value: Any) -> Optional[int]:
 
 def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "") -> Dict[str, Any]:
     error = str(payload.get("error") or "").strip()
+
     http_status = _to_int(payload.get("http_status"))
     if http_status is None:
         http_status = _to_int(payload.get("status_code"))
@@ -41,8 +42,30 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
     flow_id = str(payload.get("flow_id") or "").strip()
     root_event_id = str(payload.get("root_event_id") or "").strip()
     workspace_id = str(payload.get("workspace_id") or "").strip()
-    original_capability = str(payload.get("original_capability") or "http_exec").strip() or "http_exec"
-    original_input = payload.get("original_input") if isinstance(payload.get("original_input"), dict) else {}
+
+    original_capability = str(
+        payload.get("original_capability") or "http_exec"
+    ).strip() or "http_exec"
+
+    original_input = (
+        payload.get("original_input")
+        if isinstance(payload.get("original_input"), dict)
+        else {}
+    )
+
+    failed_url = str(
+        payload.get("failed_url")
+        or payload.get("url")
+        or payload.get("http_target")
+        or payload.get("URL")
+        or ""
+    ).strip()
+
+    failed_method = str(
+        payload.get("failed_method")
+        or payload.get("method")
+        or "GET"
+    ).strip().upper()
 
     decision = "log_only"
     reason = "default"
@@ -50,7 +73,7 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
     if retry_max > 0 and retry_count >= retry_max:
         decision = "escalate"
         reason = "retry_exhausted"
-    elif isinstance(http_status, int):
+    elif http_status is not None:
         if 500 <= http_status <= 599:
             if retry_max > 0 and retry_count < retry_max:
                 decision = "retry"
@@ -76,9 +99,20 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
 
     if decision == "retry":
         retry_input = dict(original_input) if isinstance(original_input, dict) else {}
+
+        if not retry_input.get("url"):
+            retry_input["url"] = failed_url
+
+        if not retry_input.get("http_target"):
+            retry_input["http_target"] = failed_url
+
+        if not retry_input.get("method"):
+            retry_input["method"] = failed_method
+
         retry_input.setdefault("flow_id", flow_id)
         retry_input.setdefault("root_event_id", root_event_id)
         retry_input.setdefault("workspace_id", workspace_id)
+
         retry_input["retry_count"] = retry_count + 1
         retry_input["retry_max"] = retry_max
 
@@ -101,6 +135,8 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
                     "error": error,
                     "http_status": http_status,
                     "source_capability": original_capability,
+                    "failed_url": failed_url,
+                    "failed_method": failed_method,
                     "workspace_id": workspace_id,
                     "retry_count": retry_count,
                     "retry_max": retry_max,
@@ -122,6 +158,8 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
         "root_event_id": root_event_id,
         "workspace_id": workspace_id,
         "run_record_id": run_record_id,
+        "failed_url": failed_url,
+        "failed_method": failed_method,
         "next_commands": next_commands,
         "terminal": False,
     }
