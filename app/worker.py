@@ -3292,7 +3292,7 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
     incident_record_id = ""
     incident_create_result: Dict[str, Any] = {"ok": False, "mode": "not_attempted"}
 
-if severity in ("critical", "high", "medium"):
+    if severity in ("critical", "high", "medium"):
     incident_fields_candidates = [
         {
             "Error_ID": flow_id,
