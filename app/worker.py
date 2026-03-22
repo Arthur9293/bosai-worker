@@ -3294,14 +3294,13 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
     if severity in ("critical", "high", "medium"):
         incident_fields_candidates = [
             {
-                "Name": failed_goal or reason or f"incident-{flow_id}",
+                "Name": failed_goal or reason or f"incident-{flow_id}"
             }
         ]
-
     print("[incident_router] TRY CREATE in table:", LOGS_ERRORS_TABLE_NAME)
 
     incident_create_result = _airtable_create_best_effort(
-        "Logs_Erreurs",  # ← FORCÉ pour test
+        LOGS_ERRORS_TABLE_NAME, # ← FORCÉ pour test
         incident_fields_candidates,
     )
 
