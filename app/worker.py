@@ -3271,7 +3271,6 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
     ).strip().upper()
 
     sla_status = str(payload.get("sla_status") or payload.get("status") or "").strip().lower()
-    severity = "low"
 
     try:
         http_status = int(raw_http_status) if raw_http_status is not None else None
@@ -3329,7 +3328,7 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
                 "Linked_Run": [run_record_id] if run_record_id else [],
                 "Error_Message": reason,
                 "SLA_Status": sla_status,
-            }, 
+            },
             {
                 "Error_ID": flow_id,
                 "Flow_ID": flow_id,
@@ -3351,28 +3350,28 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
                 "Incident_Source": "incident_router",
                 "Severity": severity,
             },
-         ]
+        ]
 
         incident_create_result = _airtable_create_best_effort(
             LOGS_ERRORS_TABLE_NAME,
             incident_fields_candidates,
-         )
+        )
 
-         if incident_create_result.get("ok"):
-             incident_record_id = str(
+        if incident_create_result.get("ok"):
+            incident_record_id = str(
                 incident_create_result.get("record_id")
                 or incident_create_result.get("id")
                 or ((incident_create_result.get("record") or {}).get("id"))
                 or ""
-             ).strip()
+            ).strip()
 
-          print(
-              "[incident_router] incident_create_result =",
-              incident_create_result,
-              "=> incident_record_id =",
-              incident_record_id,
-          )
-        
+        print(
+            "[incident_router] incident_create_result =",
+            incident_create_result,
+            "=> incident_record_id =",
+            incident_record_id,
+        )
+
     decision = ""
     next_commands: List[Dict[str, Any]] = []
     terminal = False
@@ -3530,6 +3529,7 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
         "incident_record_id": incident_record_id,
         "incident_create_result": incident_create_result,
     }
+    
 def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
     flow_id, root_event_id = _resolve_flow_ids(payload)
