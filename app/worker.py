@@ -27,6 +27,7 @@ from app.policies import get_policies
 from app.capabilities.internal_escalate import capability_internal_escalate
 from app.capabilities.incident_router import run as capability_incident_router
 from app.capabilities.decision_engine import run as capability_decision_engine
+from app.capabilities.retry_router import run as capability_retry_router
 
 
 # ============================================================
@@ -4619,7 +4620,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         response_obj = {}
 
     status_code = response_obj.get("status_code")
-    if status_code is None:
+    if status_code is None and isinstance(result, dict):
         status_code = result.get("status_code")
 
     if status_code is not None:
@@ -4628,6 +4629,9 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         except Exception:
             status_code = None
 
+    # ------------------------------------------------------------
+    # FAILURE PATH -> incident_router / retry_router / decision_engine
+    # ------------------------------------------------------------
     if (result.get("ok") is False) or (isinstance(status_code, int) and status_code >= 400):
         incident_input = {
             "flow_id": flow_id,
@@ -4643,6 +4647,60 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
         incident_result = capability_incident_router(incident_input)
 
+        # 1) retry path
+        if incident_result.get("decision") == "retry":
+            retry_input = {
+                "flow_id": flow_id,
+                "root_event_id": root_event_id,
+                "workspace_id": workspace_id,
+                "original_capability": "http_exec",
+                "original_input": payload,
+                "retry_reason": incident_result.get("reason"),
+                "retry_count": incident_result.get("retry_count"),
+                "retry_max": incident_result.get("retry_max"),
+                "http_status": incident_result.get("http_status"),
+                "incident_record_id": incident_result.get("incident_record_id"),
+            }
+
+            retry_result = capability_retry_router(retry_input)
+
+            for next_cmd in retry_result.get("next_commands", []):
+                next_capability = next_cmd.get("capability")
+                next_input = next_cmd.get("input", {}) or {}
+                next_priority = int(next_cmd.get("priority") or 2)
+
+                if next_capability == "http_exec" and not next_input.get("url"):
+                    print("[spawn] skipped http_exec without url:", next_input)
+                    continue
+
+                spawn_fields = {
+                    "Name": f"{next_capability} from retry_router",
+                    "Capability": next_capability,
+                    "Status_select": "Queued",
+                    "Priority": next_priority,
+                    "Input_JSON": json.dumps(next_input, ensure_ascii=False),
+                    "Idempotency_Key": (
+                        f"retry-router:{flow_id}:{next_capability}:"
+                        f"{incident_result.get('reason')}:{next_input.get('retry_count', 0)}"
+                    ),
+                }
+
+                if workspace_id:
+                    spawn_fields["Workspace_ID"] = workspace_id
+                if flow_id:
+                    spawn_fields["Flow_ID"] = flow_id
+                if root_event_id:
+                    spawn_fields["Root_Event_ID"] = root_event_id
+
+                _airtable_create(COMMANDS_TABLE_NAME, spawn_fields)
+
+            result["flow_id"] = flow_id
+            result["root_event_id"] = root_event_id
+            result["next_commands"] = retry_result.get("next_commands", [])
+            result["terminal"] = bool(retry_result.get("terminal", False))
+            return result
+
+        # 2) fallback path -> decision_engine
         decision_input = {
             "flow_id": flow_id,
             "root_event_id": root_event_id,
@@ -4664,10 +4722,9 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             next_input = next_cmd.get("input", {}) or {}
             next_priority = int(next_cmd.get("priority") or 2)
 
-            if next_capability == "http_exec":
-                if not next_input.get("url"):
-                    print("[spawn] skipped http_exec without url:", next_input)
-                    continue
+            if next_capability == "http_exec" and not next_input.get("url"):
+                print("[spawn] skipped http_exec without url:", next_input)
+                continue
 
             spawn_fields = {
                 "Name": f"{next_capability} from decision_engine",
@@ -4687,65 +4744,11 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
             _airtable_create(COMMANDS_TABLE_NAME, spawn_fields)
 
-    return result
-
-    # ------------------------------------------------------------
-    # FAILURE PATH -> retry_router only
-    # ------------------------------------------------------------
-    if result.get("trigger_retry_router") is True:
-        retry_input = dict(payload)
-
-        retry_input["flow_id"] = flow_id
-        retry_input["root_event_id"] = root_event_id
-        retry_input["step_index"] = step_index + 1
-        retry_input["retry_count"] = int(
-            result.get("retry_count", payload.get("retry_count", 0)) or 0
-        )
-        retry_input["retry_max"] = int(
-            result.get("retry_max", payload.get("retry_max", 3)) or 3
-        )
-        retry_input["retry_reason"] = (
-            result.get("retry_reason")
-            or result.get("error_code")
-            or "unknown"
-        )
-        retry_input["error"] = result.get("error")
-        retry_input["original_capability"] = "http_exec"
-        retry_input["goal"] = "route_retry"
-
-        # cleanup internal fields if present
-        retry_input.pop("next_capability", None)
-        retry_input.pop("trigger_retry_router", None)
-        retry_input.pop("next_commands", None)
-        retry_input.pop("terminal", None)
-        retry_input.pop("spawn_summary", None)
-
-        next_commands = [
-            {
-                "capability": "retry_router",
-                "priority": req.priority,
-                "input": retry_input,
-                "terminal": False,
-            }
-        ]
-
         result["flow_id"] = flow_id
         result["root_event_id"] = root_event_id
-        result["next_commands"] = next_commands
-        result["terminal"] = False
-
-        print(
-            "[worker.wrapper] http_exec failure -> retry_router",
-            {
-                "flow_id": flow_id,
-                "root_event_id": root_event_id,
-                "retry_count": retry_input.get("retry_count"),
-                "retry_max": retry_input.get("retry_max"),
-                "retry_reason": retry_input.get("retry_reason"),
-            },
-        )
-
-        
+        result["next_commands"] = decision_result.get("next_commands", [])
+        result["terminal"] = bool(decision_result.get("terminal", False))
+        return result
 
     # ------------------------------------------------------------
     # SUCCESS PATH -> flow memory / next step
@@ -4873,6 +4876,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             if isinstance(result, dict) else "not_dict"
         )
 
+    return result
 
 def capability_retry_router_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
