@@ -3865,15 +3865,17 @@ def _build_command_fields_candidates(
     *,
     capability: str,
     command_input: Dict[str, Any],
-    workspace_id: str,
-    event_record_id: str,
+    workspace_id: Optional[str],
+    event_record_id: Optional[str],
     idempotency_key: Optional[str] = None,
     priority: int = 1,
 ) -> List[Dict[str, Any]]:
-    idem = str(idempotency_key or f"evt:{event_record_id}:{capability}").strip()
+    command_input = dict(command_input or {})
 
-    command_input = command_input or {}
-    input_json = json.dumps(command_input, ensure_ascii=False)
+    idem = str(
+        idempotency_key
+        or f"evt:{str(event_record_id or '').strip()}:{capability}"
+    ).strip()
 
     url_value = str(
         command_input.get("url")
@@ -3888,41 +3890,51 @@ def _build_command_fields_candidates(
         or "GET"
     ).strip().upper()
 
-    candidates: List[Dict[str, Any]] = [
-        {
-            "Capability": capability,
-            "Status_select": "Queued",
-            "Priority": priority,
-            "Input_JSON": input_json,
-            "Idempotency_Key": idem,
-            "Workspace_ID": workspace_id,
-            "Source_Event": [event_record_id],
-            "http_target": url_value,
-            "URL": url_value,
-            "HTTP_Method": method_value,
-        },
-        {
-            "Capability": capability,
-            "Status_select": "Queued",
-            "Priority": priority,
-            "Input_JSON": input_json,
-            "Idempotency_Key": idem,
-            "Workspace_ID": workspace_id,
-            "http_target": url_value,
-            "URL": url_value,
-            "HTTP_Method": method_value,
-        },
-        {
-            "Capability": capability,
-            "Status_select": "Queued",
-            "Priority": priority,
-            "Input_JSON": input_json,
-            "Idempotency_Key": idem,
-            "http_target": url_value,
-            "URL": url_value,
-            "HTTP_Method": method_value,
-        },
-    ]
+    # normalise aussi l'input JSON pour que http_exec retrouve toujours ses clés
+    if url_value:
+        command_input.setdefault("url", url_value)
+        command_input.setdefault("http_target", url_value)
+        command_input.setdefault("URL", url_value)
+
+    command_input.setdefault("method", method_value)
+    command_input.setdefault("HTTP_Method", method_value)
+
+    if workspace_id:
+        command_input.setdefault("workspace_id", str(workspace_id).strip())
+
+    input_json = json.dumps(command_input, ensure_ascii=False)
+
+    base_fields: Dict[str, Any] = {
+        "Capability": capability,
+        "Status_select": "Queued",
+        "Priority": priority,
+        "Input_JSON": input_json,
+        "Idempotency_Key": idem,
+        "http_target": url_value,
+        "URL": url_value,
+        "HTTP_Method": method_value,
+    }
+
+    candidates: List[Dict[str, Any]] = []
+
+    if workspace_id and event_record_id:
+        candidates.append(
+            {
+                **base_fields,
+                "Workspace_ID": str(workspace_id).strip(),
+                "Source_Event": [str(event_record_id).strip()],
+            }
+        )
+
+    if workspace_id:
+        candidates.append(
+            {
+                **base_fields,
+                "Workspace_ID": str(workspace_id).strip(),
+            }
+        )
+
+    candidates.append(base_fields)
 
     return candidates
 
@@ -4044,14 +4056,22 @@ def _create_command_from_next_command(
     if not capability:
         return {"ok": False, "error": "missing_capability"}
 
-    command_input = next_cmd.get("input") or {}
-    if not isinstance(command_input, dict):
+    raw_input = next_cmd.get("input") or {}
+    if not isinstance(raw_input, dict):
         return {"ok": False, "error": "invalid_input"}
+
+    command_input = dict(raw_input)
 
     priority = int(next_cmd.get("priority") or 1)
 
     flow_id = str(command_input.get("flow_id") or "").strip()
     root_event_id = str(command_input.get("root_event_id") or "").strip()
+
+    effective_workspace_id = str(
+        workspace_id
+        or command_input.get("workspace_id")
+        or ""
+    ).strip() or None
 
     if capability in (
         "decision_demo",
@@ -4082,19 +4102,33 @@ def _create_command_from_next_command(
             "mode": "existing_command",
             "command_record_id": str(existing.get("id") or "").strip(),
             "capability": capability,
-            "workspace_id": workspace_id,
+            "workspace_id": effective_workspace_id,
             "idempotency_key": effective_idempotency_key,
             "parent_run_id": parent_run_id,
         }
 
+    print(
+        "[worker.spawn] create_command payload",
+        {
+            "capability": capability,
+            "priority": priority,
+            "workspace_id": effective_workspace_id,
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
+            "command_input": command_input,
+        },
+    )
+
     candidates = _build_command_fields_candidates(
         capability=capability,
         command_input=command_input,
-        workspace_id=workspace_id,
+        workspace_id=effective_workspace_id,
         event_record_id=root_event_id or parent_run_id,
         idempotency_key=effective_idempotency_key,
         priority=priority,
     )
+
+    print("[worker.spawn] candidates =", candidates)
 
     create_res = _airtable_create_best_effort(COMMANDS_TABLE_NAME, candidates)
     if not create_res.get("ok"):
@@ -4103,6 +4137,7 @@ def _create_command_from_next_command(
             "error": f"command_create_failed:{create_res.get('error')}",
             "capability": capability,
             "parent_run_id": parent_run_id,
+            "create_res": create_res,
         }
 
     return {
@@ -4110,7 +4145,7 @@ def _create_command_from_next_command(
         "mode": "created_command",
         "command_record_id": str(create_res.get("record_id") or "").strip(),
         "capability": capability,
-        "workspace_id": workspace_id,
+        "workspace_id": effective_workspace_id,
         "idempotency_key": effective_idempotency_key,
         "parent_run_id": parent_run_id,
     }
