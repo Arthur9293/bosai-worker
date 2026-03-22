@@ -1079,18 +1079,25 @@ def capability_http_exec(
             "retry_reason": "unexpected_exception",
             "terminal": False,
         }
-def run(
-    input_data: Optional[Dict[str, Any]] = None,
-    dry_run: bool = False,
-    session: Optional[requests.Session] = None,
-    **kwargs: Any,
-) -> Dict[str, Any]:
+def run(req: Any = None, run_record_id: str = "") -> Dict[str, Any]:
     """
-    Alias compatible with workers importing `run`.
+    Alias compatible with workers calling fn(req, run_record_id).
     """
+    if isinstance(req, dict):
+        payload = req
+    else:
+        payload = getattr(req, "input", None) or {}
+
+    if not isinstance(payload, dict):
+        payload = {}
+
+    payload = dict(payload)
+
+    if run_record_id and "run_record_id" not in payload:
+        payload["run_record_id"] = run_record_id
+
     return capability_http_exec(
-        input_data=input_data,
-        dry_run=dry_run,
-        session=session,
-        **kwargs,
+        input_data=payload,
+        dry_run=False,
+        session=None,
     )
