@@ -3293,11 +3293,8 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
 
     if severity in ("critical", "high", "medium"):
         incident_fields_candidates = [
-           {
+            {
                 "Name": failed_goal or reason or f"incident-{flow_id}",
-                "Statut_incident": "Nouveau",
-                "Severity": severity,
-                "Source": "bosai-worker",
             }
         ]
 
@@ -3306,16 +3303,16 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
             incident_fields_candidates,
         )
 
-        if incident_create_result.get("ok"):
-            incident_record_id = str(
-                incident_create_result.get("record_id")
-                or incident_create_result.get("id")
-                or ((incident_create_result.get("record") or {}).get("id"))
-                or ""
-            ).strip()
+    if incident_create_result.get("ok"):
+        incident_record_id = str(
+            incident_create_result.get("record_id")
+            or incident_create_result.get("id")
+            or ((incident_create_result.get("record") or {}).get("id"))
+            or ""
+        ).strip()
 
-        print("[incident_router] create_result =", incident_create_result)
-        print("[incident_router] incident_record_id =", incident_record_id)
+    print("[incident_router] create_result =", incident_create_result)
+    print("[incident_router] incident_record_id =", incident_record_id)
 
         print(
             "[incident_router] incident_create_result =",
