@@ -895,13 +895,20 @@ def capability_http_exec(
             error=f"HTTP {response.status_code}",
             http_status=response.status_code,
         )
+        
         error_payload.update(
             {
-                "url": url,
-                "http_target": url,
-                "method": method,
-            }
-        )
+                 "url": url,
+                 "http_target": url,
+                 "method": method,
+                 "original_input": {
+                    **dict(payload),
+                    "url": url,
+                    "http_target": url,
+                    "method": method,
+             },
+        }
+   )
 
         return {
             "ok": False,
@@ -944,13 +951,20 @@ def capability_http_exec(
             error=str(exc),
             http_status=None,
         )
+        
         error_payload.update(
             {
                 "url": url,
                 "http_target": url,
                 "method": method,
-            }
-        )
+                "original_input": {
+                   **dict(payload),
+                   "url": url,
+                   "http_target": url,
+                   "method": method,
+            },
+        }
+   )
 
         return {
             "ok": False,
@@ -992,13 +1006,20 @@ def capability_http_exec(
             error=str(exc),
             http_status=None,
         )
+        
         error_payload.update(
             {
-                "url": url,
-                "http_target": url,
-                "method": method,
-            }
-        )
+                 "url": url,
+                 "http_target": url,
+                 "method": method,
+                 "original_input": {
+                    **dict(payload),
+                    "url": url,
+                    "http_target": url,
+                    "method": method,
+             },
+        }
+   )
 
         return {
             "ok": False,
@@ -1040,13 +1061,20 @@ def capability_http_exec(
             error=str(exc),
             http_status=None,
         )
+        
         error_payload.update(
             {
                 "url": url,
                 "http_target": url,
                 "method": method,
-            }
-        )
+                "original_input": {
+                   **dict(payload),
+                   "url": url,
+                   "http_target": url,
+                   "method": method,
+            },
+        }
+    )
 
         return {
             "ok": False,
