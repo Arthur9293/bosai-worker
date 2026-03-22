@@ -909,7 +909,7 @@ def capability_http_exec(
              },
         }
    )
-
+        print("[HTTP_EXEC_500_DEBUG] spawning retry_router with error_payload =", error_payload)
         return {
             "ok": False,
             "capability": "http_exec",
