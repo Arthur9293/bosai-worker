@@ -886,8 +886,8 @@ def capability_http_exec(
                     **secret_diag,
                 },
                 "toolcatalog": tool_diag,
-                "next_commands": [],
-                "terminal": True,
+                "next_commands": http_status_error,
+                "terminal": False,
             }
 
         error_payload = _build_retry_input(
