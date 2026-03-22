@@ -4357,26 +4357,33 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
     result = capability_http_exec(input_data=payload)
 
+    if not isinstance(result, dict):
+        result = {
+            "ok": False,
+            "capability": "http_exec",
+            "status": "error",
+            "error": "http_exec returned non-dict result",
+            "next_commands": [],
+            "terminal": True,
+        }
+
     flow_id, root_event_id = _resolve_flow_ids(payload)
     step_index = _resolve_flow_step_index(payload, 0)
-    goal = str(payload.get("goal") or "").strip()
 
-    next_commands: List[Dict[str, Any]] = []
+    result.setdefault("workspace_id", workspace_id)
+    result.setdefault("flow_id", flow_id)
+    result.setdefault("root_event_id", root_event_id)
+    result.setdefault("step_index", step_index)
+    result.setdefault("run_record_id", run_record_id)
 
-    response_obj = result.get("response") if isinstance(result, dict) else {}
-    if not isinstance(response_obj, dict):
-        response_obj = {}
+    if "next_commands" not in result or not isinstance(result.get("next_commands"), list):
+        result["next_commands"] = []
 
-    status_code = response_obj.get("status_code")
-    if status_code is None and isinstance(result, dict):
-        status_code = result.get("status_code")
+    if "terminal" not in result:
+        result["terminal"] = not bool(result["next_commands"])
 
-    if status_code is not None:
-        try:
-            status_code = int(status_code)
-        except Exception:
-            status_code = None
-
+    print("[HTTP_EXEC_WRAPPER_RESULT]", result)
+    return result
     # ------------------------------------------------------------
     # FAILURE PATH -> incident_router / retry_router / decision_engine
     # ------------------------------------------------------------
