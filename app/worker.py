@@ -4061,11 +4061,12 @@ def _create_command_from_next_command(
         return {"ok": False, "error": "invalid_input"}
 
     command_input = dict(raw_input)
-
     priority = int(next_cmd.get("priority") or 1)
 
     flow_id = str(command_input.get("flow_id") or "").strip()
     root_event_id = str(command_input.get("root_event_id") or "").strip()
+    retry_count = int(command_input.get("retry_count") or 0)
+    step_index = int(command_input.get("step_index") or 0)
 
     effective_workspace_id = str(
         workspace_id
@@ -4089,14 +4090,52 @@ def _create_command_from_next_command(
             root_event_id = parent_run_id
             command_input["root_event_id"] = root_event_id
 
-    effective_idempotency_key = str(
-        next_cmd.get("idempotency_key")
-        or command_input.get("idempotency_key")
-        or f"spawn:{capability}:{flow_id or parent_run_id}:{uuid.uuid4().hex[:10]}"
+    # ------------------------------------------------------------
+    # IMPORTANT:
+    # For spawned retries, do not blindly reuse inherited idempotency_key
+    # from previous command_input unless explicitly forced on next_cmd.
+    # ------------------------------------------------------------
+    inherited_input_idem = str(command_input.get("idempotency_key") or "").strip()
+    explicit_next_cmd_idem = str(next_cmd.get("idempotency_key") or "").strip()
+
+    if capability == "http_exec":
+        # retry / spawned http_exec must get a fresh key per attempt
+        inherited_input_idem = ""
+
+    effective_idempotency_key = (
+        explicit_next_cmd_idem
+        or inherited_input_idem
+        or f"spawn:{capability}:{flow_id or parent_run_id}:step{step_index}:retry{retry_count}:{uuid.uuid4().hex[:10]}"
     ).strip()
+
+    print(
+        "[worker.spawn] idem check",
+        {
+            "capability": capability,
+            "effective_idempotency_key": effective_idempotency_key,
+            "explicit_next_cmd_idem": explicit_next_cmd_idem,
+            "inherited_input_idem": inherited_input_idem,
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
+            "retry_count": retry_count,
+            "step_index": step_index,
+        },
+    )
 
     existing = find_command_by_idem(effective_idempotency_key)
     if existing:
+        print(
+            "[worker.spawn] existing_command hit",
+            {
+                "capability": capability,
+                "effective_idempotency_key": effective_idempotency_key,
+                "existing_record_id": str(existing.get("id") or "").strip(),
+                "flow_id": flow_id,
+                "root_event_id": root_event_id,
+                "retry_count": retry_count,
+                "step_index": step_index,
+            },
+        )
         return {
             "ok": True,
             "mode": "existing_command",
@@ -4115,6 +4154,8 @@ def _create_command_from_next_command(
             "workspace_id": effective_workspace_id,
             "flow_id": flow_id,
             "root_event_id": root_event_id,
+            "retry_count": retry_count,
+            "step_index": step_index,
             "command_input": command_input,
         },
     )
