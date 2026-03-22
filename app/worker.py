@@ -3314,13 +3314,6 @@ def capability_incident_router(req: RunRequest, run_record_id: str) -> Dict[str,
     print("[incident_router] create_result =", incident_create_result)
     print("[incident_router] incident_record_id =", incident_record_id)
 
-        print(
-            "[incident_router] incident_create_result =",
-            incident_create_result,
-            "=> incident_record_id =",
-            incident_record_id,
-        )
-
     decision = ""
     next_commands: List[Dict[str, Any]] = []
     terminal = False
