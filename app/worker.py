@@ -5153,16 +5153,13 @@ CAPABILITIES = {
     "chain_demo": capability_chain_demo,
     "planner_demo": capability_planner_demo,
     "decision_demo": capability_decision_demo,
-    "decision_router": capability_decision_router,
     "complete_flow": capability_complete_flow,
     "complete_flow_demo": capability_complete_flow_demo,
-    "incident_router": capability_incident_router,
-    "retry_router": capability_retry_router,
-    "retry_router": capability_retry_router_wrapped,
-    "decision_router": capability_decision_router_wrapped,
-    "incident_router": capability_incident_router_wrapped,
     "sla_router": capability_sla_router,
     "decision_engine": capability_decision_engine,
+    "retry_router": capability_retry_router,
+    "decision_router": capability_decision_router,
+    "incident_router": capability_incident_router,
 }
   
 # ============================================================
