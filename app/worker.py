@@ -4662,6 +4662,7 @@ def capability_retry_router_wrapped(req: RunRequest, run_record_id: str) -> Dict
         retry_input = dict(payload)
         retry_input["flow_id"] = flow_id
         retry_input["root_event_id"] = root_event_id
+        retry_input["workspace_id"] = workspace_id
         retry_input["retry_count"] = next_retry_count
         retry_input["retry_max"] = retry_max
         retry_input["step_index"] = step_index + 1
