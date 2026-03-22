@@ -27,7 +27,7 @@ from app.policies import get_policies
 from app.capabilities.internal_escalate import capability_internal_escalate
 from app.capabilities.incident_router import run as capability_incident_router_run
 from app.capabilities.decision_engine import run as capability_decision_engine
-from app.capabilities.retry_router import run as capability_retry_router
+from app.capabilities.retry_router import run as capability_retry_router_run
 
 
 # ============================================================
@@ -4662,7 +4662,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                 "incident_record_id": incident_result.get("incident_record_id"),
             }
 
-            retry_result = capability_retry_router(retry_input)
+            retry_result = capability_retry_router_run(retry_input)
 
             for next_cmd in retry_result.get("next_commands", []):
                 next_capability = next_cmd.get("capability")
