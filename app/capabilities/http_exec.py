@@ -84,7 +84,11 @@ def _build_retry_input(
     return retry_input
 
 
-def capability_http_exec(input_data: Dict[str, Any] | None = None, dry_run: bool = False, **_: Any) -> Dict[str, Any]:
+def capability_http_exec(
+    input_data: Dict[str, Any] | None = None,
+    dry_run: bool = False,
+    **_: Any,
+) -> Dict[str, Any]:
     started_at = _now_ts()
     payload = input_data or {}
 
@@ -96,8 +100,13 @@ def capability_http_exec(input_data: Dict[str, Any] | None = None, dry_run: bool
     workspace_id = str(payload.get("workspace_id", "") or "")
 
     method = str(payload.get("method", "GET") or "GET").upper()
-    url = str(payload.get("url", "") or "").strip()
-    timeout_seconds = payload.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
+    url = str(
+        payload.get("url")
+        or payload.get("http_target")
+        or payload.get("URL")
+        or ""
+    ).strip()
+    timeout_seconds = _to_int(payload.get("timeout_seconds"), DEFAULT_TIMEOUT_SECONDS)
 
     if not HTTP_EXEC_ENABLED:
         error_payload = _build_retry_input(
@@ -121,6 +130,8 @@ def capability_http_exec(input_data: Dict[str, Any] | None = None, dry_run: bool
             "started_at": started_at,
             "finished_at": _now_ts(),
             **retry_block,
+            "workspace_id": workspace_id,
+            "run_record_id": payload.get("run_record_id", ""),
             "next_commands": [
                 {
                     "capability": "retry_router",
@@ -139,7 +150,7 @@ def capability_http_exec(input_data: Dict[str, Any] | None = None, dry_run: bool
             root_event_id=root_event_id,
             workspace_id=workspace_id,
             reason="missing_url",
-            error="missing_url",
+            error="HTTP_EXEC missing url (Input_JSON.url / http_target / URL)",
         )
         error_payload["retry_count"] = retry_meta["retry_count"]
         error_payload["retry_max"] = retry_meta["retry_max"]
@@ -150,10 +161,12 @@ def capability_http_exec(input_data: Dict[str, Any] | None = None, dry_run: bool
             "capability": "http_exec",
             "status": "error",
             "error_code": "missing_url",
-            "error": "missing_url",
+            "error": "HTTP_EXEC missing url (Input_JSON.url / http_target / URL)",
             "started_at": started_at,
             "finished_at": _now_ts(),
             **retry_block,
+            "workspace_id": workspace_id,
+            "run_record_id": payload.get("run_record_id", ""),
             "next_commands": [
                 {
                     "capability": "retry_router",
@@ -173,6 +186,8 @@ def capability_http_exec(input_data: Dict[str, Any] | None = None, dry_run: bool
             "started_at": started_at,
             "finished_at": _now_ts(),
             **retry_block,
+            "workspace_id": workspace_id,
+            "run_record_id": payload.get("run_record_id", ""),
             "request": {
                 "method": method,
                 "url": url,
@@ -185,7 +200,11 @@ def capability_http_exec(input_data: Dict[str, Any] | None = None, dry_run: bool
     request_started = time.time()
 
     try:
-        response = requests.request(method=method, url=url, timeout=timeout_seconds)
+        response = requests.request(
+            method=method,
+            url=url,
+            timeout=timeout_seconds,
+        )
         elapsed = int((time.time() - request_started) * 1000)
 
         if response.ok:
@@ -214,7 +233,6 @@ def capability_http_exec(input_data: Dict[str, Any] | None = None, dry_run: bool
                 "terminal": False,
             }
 
-        # ERROR -> RETRY ROUTER
         error_payload = _build_retry_input(
             payload=payload,
             flow_id=flow_id,
@@ -226,7 +244,6 @@ def capability_http_exec(input_data: Dict[str, Any] | None = None, dry_run: bool
             response_status_code=response.status_code,
         )
 
-        # IMPORTANT: conserver état runtime
         error_payload["retry_count"] = retry_meta["retry_count"]
         error_payload["retry_max"] = retry_meta["retry_max"]
         error_payload["step_index"] = retry_meta["step_index"]
