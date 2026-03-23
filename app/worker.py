@@ -3288,12 +3288,20 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
     except Exception:
         retry_max = 2
 
-    http_status_raw = payload.get("http_status")
+http_status = None
+
+if payload.get("http_status") is not None:
     try:
-        http_status = int(http_status_raw) if http_status_raw is not None else None
+        http_status = int(payload.get("http_status"))
     except Exception:
         http_status = None
 
+elif payload.get("response") and payload["response"].get("status_code") is not None:
+    try:
+        http_status = int(payload["response"]["status_code"])
+    except Exception:
+        http_status = None
+        
     retryable_statuses = {408, 409, 425, 429, 500, 502, 503, 504}
     retryable_reasons = {
         "http_failure",
