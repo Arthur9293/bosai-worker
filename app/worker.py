@@ -5007,8 +5007,17 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
     error_text = str(payload.get("error") or payload.get("last_error") or "").strip()
 
     original_capability = str(payload.get("original_capability") or "").strip()
-    failed_url = str(payload.get("failed_url") or payload.get("url") or payload.get("http_target") or "").strip()
-    failed_method = str(payload.get("failed_method") or payload.get("method") or "").strip()
+    failed_url = str(
+        payload.get("failed_url")
+        or payload.get("url")
+        or payload.get("http_target")
+        or ""
+    ).strip()
+    failed_method = str(
+        payload.get("failed_method")
+        or payload.get("method")
+        or ""
+    ).strip()
 
     retry_count = int(payload.get("retry_count") or 0)
     retry_max = int(payload.get("retry_max") or 0)
@@ -5050,33 +5059,36 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
     }
 
     create_res = _create_incident_log_record(incident_payload)
+    incident_record_id = str(create_res.get("record_id") or "").strip()
+    incident_create_ok = bool(create_res.get("ok")) and bool(incident_record_id)
 
     next_commands: List[Dict[str, Any]] = []
 
-    # étape suivante simple: escalade interne / ou flow completion
-    next_commands.append(
-        {
-            "capability": "internal_escalate",
-            "priority": req.priority,
-            "input": {
-                "flow_id": flow_id,
-                "root_event_id": root_event_id,
-                "step_index": step_index + 1,
-                "goal": "incident_escalation",
-                "reason": reason,
-                "error": error_text,
-                "original_capability": original_capability,
-                "failed_url": failed_url,
-                "failed_method": failed_method,
-                "retry_count": retry_count,
-                "retry_max": retry_max,
-                "http_status": http_status,
-                "incident_record_id": create_res.get("record_id"),
-                "workspace_id": workspace_id,
-            },
-            "terminal": False,
-        }
-    )
+    if incident_create_ok:
+        next_commands.append(
+            {
+                "capability": "internal_escalate",
+                "priority": req.priority,
+                "input": {
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": step_index + 1,
+                    "goal": "incident_escalation",
+                    "reason": reason,
+                    "error": error_text,
+                    "original_capability": original_capability,
+                    "failed_url": failed_url,
+                    "failed_method": failed_method,
+                    "retry_count": retry_count,
+                    "retry_max": retry_max,
+                    "http_status": http_status,
+                    "incident_record_id": incident_record_id,
+                    "log_record_id": incident_record_id,
+                    "workspace_id": workspace_id,
+                },
+                "terminal": False,
+            }
+        )
 
     _append_flow_step_safe(
         flow_id=flow_id,
@@ -5084,13 +5096,13 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
         step_obj={
             "step_index": step_index,
             "capability": "incident_router",
-            "status": "done",
+            "status": "done" if incident_create_ok else "incident_create_failed",
             "goal": goal,
             "reason": reason,
             "http_status": http_status,
             "failed_url": failed_url,
             "failed_method": failed_method,
-            "incident_record_id": create_res.get("record_id"),
+            "incident_record_id": incident_record_id,
             "run_record_id": run_record_id,
         },
     )
@@ -5098,24 +5110,25 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
     _update_flow_registry_safe(
         flow_id=flow_id,
         workspace_id=workspace_id,
-        status="Running",
+        status="Running" if incident_create_ok else "Error",
         current_step=step_index,
-        last_decision="incident_created",
+        last_decision="incident_created" if incident_create_ok else "incident_create_failed",
         memory_obj={
             "last_incident": {
                 "goal": goal,
                 "reason": reason,
                 "http_status": http_status,
                 "failed_url": failed_url,
-                "incident_record_id": create_res.get("record_id"),
+                "incident_record_id": incident_record_id,
             }
         },
         result_obj={
             "incident_router_result": {
-                "ok": bool(create_res.get("ok")),
-                "record_id": create_res.get("record_id"),
+                "ok": incident_create_ok,
+                "record_id": incident_record_id,
                 "reason": reason,
                 "http_status": http_status,
+                "create_res": create_res,
             }
         },
         linked_run=[run_record_id],
@@ -5124,7 +5137,7 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
     return {
         "ok": True,
         "capability": "incident_router",
-        "status": "incident_created" if create_res.get("ok") else "incident_create_failed",
+        "status": "incident_created" if incident_create_ok else "incident_create_failed",
         "run_record_id": run_record_id,
         "workspace_id": workspace_id,
         "flow_id": flow_id,
@@ -5139,10 +5152,11 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
         "retry_count": retry_count,
         "retry_max": retry_max,
         "http_status": http_status,
-        "incident_record_id": create_res.get("record_id"),
-        "incident_create_ok": bool(create_res.get("ok")),
+        "incident_record_id": incident_record_id,
+        "log_record_id": incident_record_id,
+        "incident_create_ok": incident_create_ok,
         "next_commands": next_commands,
-        "terminal": False,
+        "terminal": not incident_create_ok,
     }
     
 def capability_complete_flow(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
