@@ -590,10 +590,14 @@ def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     raw_step_index = (
         normalized.get("step_index")
-        or normalized.get("stepindex")
-        or normalized.get("stepIndex")
-        or normalized.get("Step_Index")
-        or normalized.get("StepIndex")
+        if normalized.get("step_index") is not None
+        else normalized.get("stepindex")
+        if normalized.get("stepindex") is not None
+        else normalized.get("stepIndex")
+        if normalized.get("stepIndex") is not None
+        else normalized.get("Step_Index")
+        if normalized.get("Step_Index") is not None
+        else normalized.get("StepIndex")
     )
 
     step_index = 0
@@ -605,17 +609,31 @@ def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     if flow_id:
         normalized["flow_id"] = flow_id
-        normalized["flowid"] = flow_id
 
     if root_event_id:
         normalized["root_event_id"] = root_event_id
-        normalized["rooteventid"] = root_event_id
 
     if goal:
         normalized["goal"] = goal
 
     normalized["step_index"] = step_index
-    normalized["stepindex"] = step_index
+
+    # IMPORTANT: on supprime les alias compacts pour éviter de polluer Input_JSON
+    normalized.pop("flowid", None)
+    normalized.pop("flowId", None)
+    normalized.pop("Flow_ID", None)
+    normalized.pop("FlowId", None)
+
+    normalized.pop("rooteventid", None)
+    normalized.pop("rootEventId", None)
+    normalized.pop("root_eventid", None)
+    normalized.pop("Root_Event_ID", None)
+    normalized.pop("RootEventId", None)
+
+    normalized.pop("stepindex", None)
+    normalized.pop("stepIndex", None)
+    normalized.pop("Step_Index", None)
+    normalized.pop("StepIndex", None)
 
     return normalized
 
