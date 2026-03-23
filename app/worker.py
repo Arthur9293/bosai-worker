@@ -4574,7 +4574,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
             retry_result = capability_retry_router_run(retry_input)
 
-            for next_cmd in decision_result.get("next_commands", []):
+        for next_cmd in decision_result.get("next_commands", []):
             next_capability = next_cmd.get("capability")
             next_input = next_cmd.get("input", {}) or {}
             next_priority = int(next_cmd.get("priority") or 1)
