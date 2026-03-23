@@ -4574,46 +4574,46 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
             retry_result = capability_retry_router_run(retry_input)
 
-        for next_cmd in decision_result.get("next_commands", []):
-            next_capability = next_cmd.get("capability")
-            next_input = next_cmd.get("input", {}) or {}
-            next_priority = int(next_cmd.get("priority") or 1)
+for next_cmd in decision_result.get("next_commands", []):
+    next_capability = next_cmd.get("capability")
+    next_input = next_cmd.get("input", {}) or {}
+    next_priority = int(next_cmd.get("priority") or 1)
 
-            if not isinstance(next_input, dict):
-                next_input = {}
+    if not isinstance(next_input, dict):
+        next_input = {}
 
-            next_input = _normalize_flow_keys(dict(next_input))
+    next_input = _normalize_flow_keys(dict(next_input))
 
-            if flow_id and not str(next_input.get("flow_id") or "").strip():
-               next_input["flow_id"] = flow_id
+    if flow_id and not str(next_input.get("flow_id") or "").strip():
+        next_input["flow_id"] = flow_id
 
-            if root_event_id and not str(next_input.get("root_event_id") or "").strip():
-               next_input["root_event_id"] = root_event_id
+    if root_event_id and not str(next_input.get("root_event_id") or "").strip():
+        next_input["root_event_id"] = root_event_id
 
-            if workspace_id and not str(next_input.get("workspace_id") or "").strip():
-               next_input["workspace_id"] = workspace_id
+    if workspace_id and not str(next_input.get("workspace_id") or "").strip():
+        next_input["workspace_id"] = workspace_id
 
-            if "step_index" in next_input:
-                try:
-                    next_input["step_index"] = int(next_input["step_index"])
-            except Exception:
-                next_input["step_index"] = 0
+    if "step_index" in next_input:
+        try:
+            next_input["step_index"] = int(next_input["step_index"])
+        except Exception:
+            next_input["step_index"] = 0
 
-            if "http_status" not in next_input:
-                next_input["http_status"] = result_obj.get("http_status") or result_obj.get("status_code")
+    if "http_status" not in next_input:
+        next_input["http_status"] = result_obj.get("http_status") or result_obj.get("status_code")
 
-            if "retry_max" not in next_input:
-                next_input["retry_max"] = cmd_input.get("retry_max", 2)
+    if "retry_max" not in next_input:
+        next_input["retry_max"] = cmd_input.get("retry_max", 2)
 
-            if not next_input.get("reason"):
-                next_input["reason"] = result_obj.get("error_code") or "http_status_error"
+    if not next_input.get("reason"):
+        next_input["reason"] = result_obj.get("error_code") or "http_status_error"
 
-            if not next_input.get("retry_reason"):
-                next_input["retry_reason"] = next_input.get("reason")
+    if not next_input.get("retry_reason"):
+        next_input["retry_reason"] = next_input.get("reason")
 
-            if next_capability == "http_exec" and not next_input.get("url"):
-                print("[spawn] skipped http_exec without url")
-                continue
+    if next_capability == "http_exec" and not next_input.get("url"):
+        print("[spawn] skipped http_exec without url")
+        continue
 
     spawn_fields = {
         "Name": f"{next_capability} from decision",
