@@ -4559,6 +4559,9 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         incident_result = capability_incident_router_run(req, run_record_id)
         # 1) retry path
         if incident_result.get("decision") == "retry":
+            print("DEBUG INCIDENT RESULT:", incident_result)
+            print("DEBUG PAYLOAD:", payload)
+            
             retry_input = {
                 "flow_id": flow_id,
                 "root_event_id": root_event_id,
@@ -4567,8 +4570,8 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                 "original_input": payload,
                 "retry_reason": incident_result.get("reason") or payload.get("retry_reason") or "http_status_error",
                 "reason": incident_result.get("reason") or payload.get("reason") or payload.get("retry_reason") or "http_status_error",
-                "retry_count": incident_result.get("retry_count", payload.get("retry_count", 0)),
-                "retry_max": incident_result.get("retry_max", payload.get("retry_max", 2)),
+                "retry_count": incident_result.get("retry_count") or payload.get("retry_count", 0)),
+                "retry_max": incident_result.get("retry_max") or payload.get("retry_max", 2)),
                 "http_status": incident_result.get("http_status") or payload.get("http_status") or payload.get("status_code"),
                 "status_code": incident_result.get("http_status") or payload.get("http_status") or payload.get("status_code"),
                 "error": incident_result.get("error") or payload.get("error"),
