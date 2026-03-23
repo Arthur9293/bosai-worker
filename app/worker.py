@@ -3294,6 +3294,11 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
             http_status = int(payload.get("http_status"))
         except Exception:
             http_status = None
+    elif payload.get("status_code") is not None:
+        try:
+            http_status = int(payload.get("status_code"))
+        except Exception:
+            http_status = None
     elif isinstance(payload.get("response"), dict) and payload["response"].get("status_code") is not None:
         try:
             http_status = int(payload["response"]["status_code"])
@@ -3323,6 +3328,10 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
     terminal = False
     retry_delay_seconds = 0
     status = "decision_made"
+
+    # état effectif qu’on renverra/loguera
+    effective_retry_count = retry_count
+    effective_retry_max = retry_max
 
     # 1) succès réel -> terminaison propre
     if http_status is not None and http_status < 400:
@@ -3420,6 +3429,9 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
         status = "retry_scheduled"
         terminal = False
 
+        effective_retry_count = next_retry_count
+        effective_retry_max = retry_max
+
         next_commands = [
             {
                 "capability": original_capability or "http_exec",
@@ -3479,6 +3491,9 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
         status = "retry_exhausted"
         terminal = False
 
+        effective_retry_count = retry_count
+        effective_retry_max = retry_max
+
         next_commands = [
             {
                 "capability": "incident_router",
@@ -3514,8 +3529,8 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
             "decision": decision,
             "reason": reason,
             "retry_reason": retry_reason,
-            "retry_count": retry_count,
-            "retry_max": retry_max,
+            "retry_count": effective_retry_count,
+            "retry_max": effective_retry_max,
             "retry_delay_seconds": retry_delay_seconds,
             "failed_url": failed_url,
             "failed_goal": failed_goal,
@@ -3534,8 +3549,8 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
         current_step=step_index,
         last_decision=decision,
         memory_obj={
-            "retry_count": retry_count,
-            "retry_max": retry_max,
+            "retry_count": effective_retry_count,
+            "retry_max": effective_retry_max,
             "retry_delay_seconds": retry_delay_seconds,
             "failed_url": failed_url,
             "failed_goal": failed_goal,
@@ -3551,8 +3566,8 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
                 "decision": decision,
                 "reason": reason,
                 "retry_reason": retry_reason,
-                "retry_count": retry_count,
-                "retry_max": retry_max,
+                "retry_count": effective_retry_count,
+                "retry_max": effective_retry_max,
                 "retry_delay_seconds": retry_delay_seconds,
                 "failed_url": failed_url,
                 "failed_goal": failed_goal,
@@ -3575,8 +3590,8 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
         "decision": decision,
         "reason": reason,
         "retry_reason": retry_reason,
-        "retry_count": retry_count,
-        "retry_max": retry_max,
+        "retry_count": effective_retry_count,
+        "retry_max": effective_retry_max,
         "retry_delay_seconds": retry_delay_seconds,
         "failed_url": failed_url,
         "failed_goal": failed_goal,
