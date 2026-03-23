@@ -3333,6 +3333,40 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
     effective_retry_count = retry_count
     effective_retry_max = retry_max
 
+    def _base_downstream_input(
+        *,
+        next_step_index: int,
+        goal_value: str,
+        reason_value: str,
+    ) -> Dict[str, Any]:
+        return {
+            # clés canon
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
+            "step_index": next_step_index,
+            "goal": goal_value,
+            "reason": reason_value,
+            "retry_reason": retry_reason,
+            "http_status": http_status,
+            "status_code": http_status,
+            "error": error_text,
+            "original_capability": original_capability,
+            "failed_goal": failed_goal,
+            "failed_url": failed_url,
+            "failed_method": failed_method,
+            "retry_count": effective_retry_count,
+            "retry_max": effective_retry_max,
+            "workspace_id": workspace_id,
+            "run_record_id": run_record_id,
+            # alias legacy / tolérance
+            "flowid": flow_id,
+            "rooteventid": root_event_id,
+            "stepindex": next_step_index,
+            "url": failed_url,
+            "http_target": failed_url,
+            "method": failed_method,
+        }
+
     # 1) succès réel -> terminaison propre
     if http_status is not None and http_status < 400:
         decision = "no_retry_needed"
@@ -3351,6 +3385,9 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
                     "goal": "success_no_retry",
                     "workspace_id": workspace_id,
                     "run_record_id": run_record_id,
+                    "flowid": flow_id,
+                    "rooteventid": root_event_id,
+                    "stepindex": step_index + 1,
                 },
             }
         ]
@@ -3366,24 +3403,11 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
             {
                 "capability": "incident_router",
                 "priority": 1,
-                "input": {
-                    "flow_id": flow_id,
-                    "root_event_id": root_event_id,
-                    "step_index": step_index + 1,
-                    "goal": "incident_missing_failed_url",
-                    "reason": "missing_failed_url",
-                    "retry_reason": retry_reason,
-                    "http_status": http_status,
-                    "error": error_text,
-                    "original_capability": original_capability,
-                    "failed_goal": failed_goal,
-                    "failed_url": failed_url,
-                    "failed_method": failed_method,
-                    "retry_count": retry_count,
-                    "retry_max": retry_max,
-                    "workspace_id": workspace_id,
-                    "run_record_id": run_record_id,
-                },
+                "input": _base_downstream_input(
+                    next_step_index=step_index + 1,
+                    goal_value="incident_missing_failed_url",
+                    reason_value="missing_failed_url",
+                ),
             }
         ]
 
@@ -3398,24 +3422,11 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
             {
                 "capability": "incident_router",
                 "priority": 1,
-                "input": {
-                    "flow_id": flow_id,
-                    "root_event_id": root_event_id,
-                    "step_index": step_index + 1,
-                    "goal": "incident_non_retryable_http_failure",
-                    "reason": retry_reason or "non_retryable_failure",
-                    "retry_reason": retry_reason,
-                    "http_status": http_status,
-                    "error": error_text,
-                    "original_capability": original_capability,
-                    "failed_goal": failed_goal,
-                    "failed_url": failed_url,
-                    "failed_method": failed_method,
-                    "retry_count": retry_count,
-                    "retry_max": retry_max,
-                    "workspace_id": workspace_id,
-                    "run_record_id": run_record_id,
-                },
+                "input": _base_downstream_input(
+                    next_step_index=step_index + 1,
+                    goal_value="incident_non_retryable_http_failure",
+                    reason_value=retry_reason or "non_retryable_failure",
+                ),
             }
         ]
 
@@ -3465,11 +3476,16 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
                     "retry_max": retry_max,
                     "retry_delay_seconds": retry_delay_seconds,
                     "http_status": http_status,
+                    "status_code": http_status,
                     "error": error_text,
                     "failed_url": failed_url,
                     "failed_method": failed_method,
                     "failed_goal": failed_goal or "retry_after_http_failure",
                     "run_record_id": run_record_id,
+                    # alias legacy / tolérance
+                    "flowid": flow_id,
+                    "rooteventid": root_event_id,
+                    "stepindex": step_index + 1,
                     "body": {
                         "flow_id": flow_id,
                         "root_event_id": root_event_id,
@@ -3498,24 +3514,11 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
             {
                 "capability": "incident_router",
                 "priority": 3,
-                "input": {
-                    "flow_id": flow_id,
-                    "root_event_id": root_event_id,
-                    "step_index": step_index + 1,
-                    "goal": "incident_after_retry_exhausted",
-                    "reason": "retry_exhausted",
-                    "retry_reason": retry_reason,
-                    "http_status": http_status,
-                    "error": error_text,
-                    "original_capability": original_capability,
-                    "failed_goal": failed_goal,
-                    "failed_url": failed_url,
-                    "failed_method": failed_method,
-                    "retry_count": retry_count,
-                    "retry_max": retry_max,
-                    "workspace_id": workspace_id,
-                    "run_record_id": run_record_id,
-                },
+                "input": _base_downstream_input(
+                    next_step_index=step_index + 1,
+                    goal_value="incident_after_retry_exhausted",
+                    reason_value="retry_exhausted",
+                ),
             }
         ]
 
