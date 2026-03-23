@@ -3230,7 +3230,6 @@ def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, A
         "root_event_id": root_event_id,
     }
 
-    
 
 def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
@@ -3288,20 +3287,19 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
     except Exception:
         retry_max = 2
 
-http_status = None
+    http_status = None
 
-if payload.get("http_status") is not None:
-    try:
-        http_status = int(payload.get("http_status"))
-    except Exception:
-        http_status = None
+    if payload.get("http_status") is not None:
+        try:
+            http_status = int(payload.get("http_status"))
+        except Exception:
+            http_status = None
+    elif isinstance(payload.get("response"), dict) and payload["response"].get("status_code") is not None:
+        try:
+            http_status = int(payload["response"]["status_code"])
+        except Exception:
+            http_status = None
 
-elif payload.get("response") and payload["response"].get("status_code") is not None:
-    try:
-        http_status = int(payload["response"]["status_code"])
-    except Exception:
-        http_status = None
-        
     retryable_statuses = {408, 409, 425, 429, 500, 502, 503, 504}
     retryable_reasons = {
         "http_failure",
@@ -3400,8 +3398,8 @@ elif payload.get("response") and payload["response"].get("status_code") is not N
                     "retry_reason": retry_reason,
                     "http_status": http_status,
                     "error": error_text,
-                    "original_capability": payload.get("original_capability") or "http_exec",
-                    "goal": failed_goal,
+                    "original_capability": original_capability,
+                    "failed_goal": failed_goal,
                     "failed_url": failed_url,
                     "failed_method": failed_method,
                     "retry_count": retry_count,
@@ -3439,16 +3437,18 @@ elif payload.get("response") and payload["response"].get("status_code") is not N
                     "retry_reason": retry_reason,
                     "origin_reason": retry_reason,
                     "original_capability": original_capability or "http_exec",
-                    "original_input": payload.get("original_input")
-                    if isinstance(payload.get("original_input"), dict)
-                    else {
-                        "url": failed_url,
-                        "http_target": failed_url,
-                        "method": failed_method,
-                        "flow_id": flow_id,
-                        "root_event_id": root_event_id,
-                        "workspace_id": workspace_id,
-                    },
+                    "original_input": (
+                        payload.get("original_input")
+                        if isinstance(payload.get("original_input"), dict)
+                        else {
+                            "url": failed_url,
+                            "http_target": failed_url,
+                            "method": failed_method,
+                            "flow_id": flow_id,
+                            "root_event_id": root_event_id,
+                            "workspace_id": workspace_id,
+                        }
+                    ),
                     "retry_count": next_retry_count,
                     "retry_max": retry_max,
                     "retry_delay_seconds": retry_delay_seconds,
