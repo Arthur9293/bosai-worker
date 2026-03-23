@@ -27,24 +27,56 @@ def _to_int(value: Any) -> Optional[int]:
         return None
 
 
+def _pick(payload: Dict[str, Any], *keys: str, default: Any = None) -> Any:
+    for key in keys:
+        if key in payload and payload[key] is not None:
+            return payload[key]
+    return default
+
+
 def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "") -> Dict[str, Any]:
-    error = str(payload.get("error") or "").strip()
+    goal = str(
+        _pick(payload, "goal", "Goal", default="")
+        or ""
+    ).strip()
 
-    http_status = _to_int(payload.get("http_status"))
+    error = str(
+        _pick(payload, "error", "last_error", "Error", default="")
+        or ""
+    ).strip()
+
+    reason = str(
+        _pick(payload, "reason", "retry_reason", "Reason", default="unknown")
+        or "unknown"
+    ).strip()
+
+    http_status = _to_int(_pick(payload, "http_status", "status_code", "HTTP_Status"))
     if http_status is None:
-        http_status = _to_int(payload.get("status_code"))
-    if http_status is None:
-        http_status = _to_int(payload.get("HTTP_Status"))
+        response_obj = payload.get("response")
+        if isinstance(response_obj, dict):
+            http_status = _to_int(response_obj.get("status_code"))
 
-    retry_count = _to_int(payload.get("retry_count")) or 0
-    retry_max = _to_int(payload.get("retry_max")) or 0
+    retry_count = _to_int(_pick(payload, "retry_count", "Retry_Count")) or 0
+    retry_max = _to_int(_pick(payload, "retry_max", "Retry_Max")) or 0
 
-    flow_id = str(payload.get("flow_id") or "").strip()
-    root_event_id = str(payload.get("root_event_id") or "").strip()
-    workspace_id = str(payload.get("workspace_id") or "").strip()
+    flow_id = str(
+        _pick(payload, "flow_id", "flowid", "Flow_ID", default="")
+        or ""
+    ).strip()
+
+    root_event_id = str(
+        _pick(payload, "root_event_id", "rooteventid", "Root_Event_ID", default="")
+        or ""
+    ).strip()
+
+    workspace_id = str(
+        _pick(payload, "workspace_id", "Workspace_ID", default="")
+        or ""
+    ).strip()
 
     original_capability = str(
-        payload.get("original_capability") or "http_exec"
+        _pick(payload, "original_capability", "source_capability", default="http_exec")
+        or "http_exec"
     ).strip() or "http_exec"
 
     original_input = (
@@ -54,46 +86,52 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
     )
 
     failed_url = str(
-        payload.get("failed_url")
-        or payload.get("url")
-        or payload.get("http_target")
-        or payload.get("URL")
-        or ""
+        _pick(
+            payload,
+            "failed_url",
+            "url",
+            "http_target",
+            "URL",
+            default="",
+        ) or ""
     ).strip()
 
     failed_method = str(
-        payload.get("failed_method")
-        or payload.get("method")
+        _pick(payload, "failed_method", "method", default="GET")
         or "GET"
     ).strip().upper()
 
     decision = "log_only"
-    reason = "default"
+    final_reason = reason or "default"
 
     if retry_max > 0 and retry_count >= retry_max:
         decision = "escalate"
-        reason = "retry_exhausted"
+        final_reason = reason or "retry_exhausted"
+
     elif http_status is not None:
         if 500 <= http_status <= 599:
             if retry_max > 0 and retry_count < retry_max:
                 decision = "retry"
-                reason = "http_5xx"
+                final_reason = reason or "http_5xx"
             else:
                 decision = "escalate"
-                reason = "http_5xx_exhausted"
+                final_reason = reason or "http_5xx_exhausted"
+
         elif 400 <= http_status <= 499:
             decision = "escalate"
-            reason = "http_4xx"
+            final_reason = reason or "http_4xx"
+
     elif "timeout" in error.lower():
         if retry_max > 0 and retry_count < retry_max:
             decision = "retry"
-            reason = "timeout"
+            final_reason = reason or "timeout"
         else:
             decision = "escalate"
-            reason = "timeout_exhausted"
+            final_reason = reason or "timeout_exhausted"
+
     elif error:
         decision = "log_only"
-        reason = "unknown_error"
+        final_reason = reason or "unknown_error"
 
     next_commands = []
 
@@ -131,10 +169,13 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
                 "input": {
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
-                    "reason": reason,
+                    "goal": goal,
+                    "reason": final_reason,
                     "error": error,
                     "http_status": http_status,
+                    "status_code": http_status,
                     "source_capability": original_capability,
+                    "original_capability": original_capability,
                     "failed_url": failed_url,
                     "failed_method": failed_method,
                     "workspace_id": workspace_id,
@@ -149,8 +190,11 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
     return {
         "ok": True,
         "capability": "incident_router",
+        "status": "incident_escalated" if decision == "escalate" else "incident_logged",
         "decision": decision,
-        "reason": reason,
+        "goal": goal,
+        "reason": final_reason,
+        "error": error,
         "http_status": http_status,
         "retry_count": retry_count,
         "retry_max": retry_max,
@@ -158,6 +202,7 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
         "root_event_id": root_event_id,
         "workspace_id": workspace_id,
         "run_record_id": run_record_id,
+        "original_capability": original_capability,
         "failed_url": failed_url,
         "failed_method": failed_method,
         "next_commands": next_commands,
