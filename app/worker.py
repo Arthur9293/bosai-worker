@@ -5128,32 +5128,85 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
 
 def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
-    workspace_id = _resolve_workspace_id(req=req)
+
+    workspace_id = str(
+        _resolve_workspace_id(req=req)
+        or payload.get("workspace_id")
+        or payload.get("Workspace_ID")
+        or ""
+    ).strip()
 
     flow_id, root_event_id = _resolve_flow_ids(payload)
     step_index = _resolve_flow_step_index(payload, 0)
 
-    goal = str(payload.get("goal") or "").strip()
-    reason = str(payload.get("reason") or payload.get("retry_reason") or "unknown").strip()
-    error_text = str(payload.get("error") or payload.get("last_error") or "").strip()
+    goal = str(
+        payload.get("goal")
+        or payload.get("Goal")
+        or payload.get("failed_goal")
+        or ""
+    ).strip()
 
-    original_capability = str(payload.get("original_capability") or "").strip()
+    reason = str(
+        payload.get("reason")
+        or payload.get("retry_reason")
+        or payload.get("Reason")
+        or "unknown"
+    ).strip()
+
+    error_text = str(
+        payload.get("error")
+        or payload.get("last_error")
+        or payload.get("Error")
+        or ""
+    ).strip()
+
+    original_capability = str(
+        payload.get("original_capability")
+        or payload.get("source_capability")
+        or "http_exec"
+    ).strip() or "http_exec"
+
     failed_url = str(
         payload.get("failed_url")
         or payload.get("url")
         or payload.get("http_target")
+        or payload.get("URL")
         or ""
     ).strip()
+
     failed_method = str(
         payload.get("failed_method")
         or payload.get("method")
-        or ""
-    ).strip()
+        or "GET"
+    ).strip().upper()
 
-    retry_count = int(payload.get("retry_count") or 0)
-    retry_max = int(payload.get("retry_max") or 0)
+    try:
+        retry_count = int(
+            payload.get("retry_count")
+            or payload.get("Retry_Count")
+            or 0
+        )
+    except Exception:
+        retry_count = 0
 
-    http_status = payload.get("http_status") or payload.get("status_code")
+    try:
+        retry_max = int(
+            payload.get("retry_max")
+            or payload.get("Retry_Max")
+            or 0
+        )
+    except Exception:
+        retry_max = 0
+
+    http_status = (
+        payload.get("http_status")
+        or payload.get("status_code")
+        or payload.get("HTTP_Status")
+    )
+
+    if http_status is None and isinstance(payload.get("response"), dict):
+        http_status = payload["response"].get("status_code")
+
     try:
         http_status = int(http_status) if http_status is not None else None
     except Exception:
