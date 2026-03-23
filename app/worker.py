@@ -4583,6 +4583,26 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                     print("[spawn] skipped http_exec without url:", next_input)
                     continue
 
+                if not isinstance(next_input, dict):
+                    next_input = {}
+
+                next_input = _normalize_flow_keys(dict(next_input))
+
+                if flow_id and not str(next_input.get("flow_id") or "").strip():
+                    next_input["flow_id"] = flow_id
+
+                if root_event_id and not str(next_input.get("root_event_id") or "").strip():
+                    next_input["root_event_id"] = root_event_id
+
+                if workspace_id and not str(next_input.get("workspace_id") or "").strip(): 
+                    next_input["workspace_id"] = workspace_id
+
+                if "step_index" in next_input:
+                    try:
+                        next_input["step_index"] = int(next_input["step_index"])
+                    except Exception: 
+                        next_input["step_index"] = 0
+        
                 spawn_fields = {
                     "Name": f"{next_capability} from retry_router",
                     "Capability": next_capability,
