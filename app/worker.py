@@ -4807,13 +4807,35 @@ def capability_decision_router_wrapped(req: RunRequest, run_record_id: str) -> D
     step_index = _resolve_flow_step_index(payload, 0)
 
     goal = str(payload.get("goal") or "").strip().lower()
-    retry_reason = str(payload.get("retry_reason") or "").strip().lower()
-    original_capability = str(payload.get("original_capability") or "").strip()
+    retry_reason = str(
+        payload.get("retry_reason")
+        or payload.get("reason")
+        or "unknown"
+    ).strip().lower()
+
+    original_capability = str(
+        payload.get("original_capability")
+        or "http_exec"
+    ).strip()
+
     error_text = str(
         payload.get("error")
         or payload.get("last_error")
         or ""
     ).strip()
+
+    failed_url = str(
+        payload.get("failed_url")
+        or payload.get("url")
+        or payload.get("http_target")
+        or ""
+    ).strip()
+
+    failed_method = str(
+        payload.get("failed_method")
+        or payload.get("method")
+        or "GET"
+    ).strip().upper()
 
     http_status = payload.get("http_status") or payload.get("status_code")
     try:
@@ -4831,11 +4853,11 @@ def capability_decision_router_wrapped(req: RunRequest, run_record_id: str) -> D
     reason = ""
 
     # ------------------------------------------------------------
-    # CASE 1: retry exhausted -> escalate / incident path
+    # CASE 1: retry exhausted -> incident path
     # ------------------------------------------------------------
     if goal == "retry_exhausted":
-        decision = "escalate_after_retry_exhausted"
-        reason = "retry_exhausted"
+        decision = "retry_exhausted_to_incident"
+        reason = "retry_limit_reached"
 
         next_commands.append(
             {
@@ -4845,14 +4867,18 @@ def capability_decision_router_wrapped(req: RunRequest, run_record_id: str) -> D
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
                     "step_index": step_index + 1,
-                    "goal": "create_incident_after_retry_exhausted",
-                    "retry_count": retry_count,
-                    "retry_max": retry_max,
+                    "goal": "incident_after_retry_exhausted",
+                    "reason": "retry_exhausted",
                     "retry_reason": retry_reason,
                     "original_capability": original_capability,
-                    "http_status": http_status,
                     "error": error_text,
+                    "failed_url": failed_url,
+                    "failed_method": failed_method,
+                    "http_status": http_status,
+                    "retry_count": retry_count,
+                    "retry_max": retry_max,
                     "workspace_id": workspace_id,
+                    "run_record_id": run_record_id,
                 },
                 "terminal": False,
             }
@@ -4918,11 +4944,17 @@ def capability_decision_router_wrapped(req: RunRequest, run_record_id: str) -> D
                     "root_event_id": root_event_id,
                     "step_index": step_index + 1,
                     "goal": "create_incident",
-                    "http_status": http_status,
+                    "reason": "server_error",
                     "retry_reason": retry_reason,
                     "original_capability": original_capability,
                     "error": error_text,
+                    "failed_url": failed_url,
+                    "failed_method": failed_method,
+                    "http_status": http_status,
+                    "retry_count": retry_count,
+                    "retry_max": retry_max,
                     "workspace_id": workspace_id,
+                    "run_record_id": run_record_id,
                 },
                 "terminal": False,
             }
@@ -4952,6 +4984,8 @@ def capability_decision_router_wrapped(req: RunRequest, run_record_id: str) -> D
         "original_capability": original_capability,
         "http_status": http_status,
         "error": error_text,
+        "failed_url": failed_url,
+        "failed_method": failed_method,
         "decision": decision,
         "reason": reason,
         "terminal": terminal,
