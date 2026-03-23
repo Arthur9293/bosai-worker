@@ -4562,27 +4562,27 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             print("DEBUG INCIDENT RESULT:", incident_result)
             print("DEBUG PAYLOAD:", payload)
             
-        retry_input = {
-            "flow_id": flow_id,
-            "root_event_id": root_event_id,
-            "workspace_id": workspace_id,
-            "original_capability": "http_exec",
-            "original_input": payload,
-            "retry_reason": incident_result.get("reason") or payload.get("retry_reason") or "http_status_error",
-            "reason": incident_result.get("reason") or payload.get("reason") or payload.get("retry_reason") or "http_status_error",
-            "retry_count": incident_result.get("retry_count") or payload.get("retry_count", 0)),
-            "retry_max": incident_result.get("retry_max") or payload.get("retry_max", 2)),
-            "http_status": incident_result.get("http_status") or payload.get("http_status") or payload.get("status_code"),
-            "status_code": incident_result.get("http_status") or payload.get("http_status") or payload.get("status_code"),
-            "error": incident_result.get("error") or payload.get("error"),
-            "failed_url": payload.get("failed_url") or payload.get("url") or payload.get("http_target"),
-            "url": payload.get("url") or payload.get("failed_url") or payload.get("http_target"),
-            "http_target": payload.get("http_target") or payload.get("url") or payload.get("failed_url"),
-            "method": payload.get("method") or payload.get("failed_method") or "GET",
-            "failed_method": payload.get("failed_method") or payload.get("method") or "GET",
-            "failed_goal": payload.get("failed_goal") or payload.get("goal") or "retry_probe",
-            "incident_record_id": incident_result.get("incident_record_id"),
-        }
+            retry_input = {
+                "flow_id": flow_id,
+                "root_event_id": root_event_id,
+                "workspace_id": workspace_id,
+                "original_capability": "http_exec",
+                "original_input": payload,
+                "retry_reason": incident_result.get("reason") or payload.get("retry_reason") or "http_status_error",
+                "reason": incident_result.get("reason") or payload.get("reason") or payload.get("retry_reason") or "http_status_error",
+                "retry_count": incident_result.get("retry_count") or payload.get("retry_count", 0)),
+                "retry_max": incident_result.get("retry_max") or payload.get("retry_max", 2)),
+                "http_status": incident_result.get("http_status") or payload.get("http_status") or payload.get("status_code"),
+                "status_code": incident_result.get("http_status") or payload.get("http_status") or payload.get("status_code"),
+                "error": incident_result.get("error") or payload.get("error"),
+                "failed_url": payload.get("failed_url") or payload.get("url") or payload.get("http_target"),
+                "url": payload.get("url") or payload.get("failed_url") or payload.get("http_target"),
+                "http_target": payload.get("http_target") or payload.get("url") or payload.get("failed_url"),
+                "method": payload.get("method") or payload.get("failed_method") or "GET",
+                "failed_method": payload.get("failed_method") or payload.get("method") or "GET",
+                "failed_goal": payload.get("failed_goal") or payload.get("goal") or "retry_probe",
+                "incident_record_id": incident_result.get("incident_record_id"),
+            }
 
             retry_result = capability_retry_router_run(retry_input)
 
