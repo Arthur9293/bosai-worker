@@ -2553,7 +2553,7 @@ def _spawn_next_commands_from_result(
             errors.append(f"next_commands[{idx}] invalid_input")
             continue
 
-        cmd_input = _normalize_flow_keys(cmd_input)
+        cmd_input = dict(cmd_input)
 
         if resolved_flow_id and not str(cmd_input.get("flow_id") or "").strip():
             cmd_input["flow_id"] = resolved_flow_id
