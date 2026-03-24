@@ -1,23 +1,23 @@
 import json
 from datetime import datetime, timezone
-from typing import Any, Dict
 
 
-def utc_now_iso() -> str:
+def utc_now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
 def capability_internal_escalate(
     req,
-    run_record_id: str,
+    run_record_id,
     *,
     airtable_update,
-    logs_errors_table_name: str,
-) -> Dict[str, Any]:
+    logs_errors_table_name,
+):
     payload = req.input or {}
 
     flow_id = str(payload.get("flow_id") or "").strip()
     root_event_id = str(payload.get("root_event_id") or flow_id).strip()
+
     log_record_id = str(
         payload.get("log_record_id")
         or payload.get("run_record_id")
@@ -61,35 +61,47 @@ def capability_internal_escalate(
         "ts": utc_now_iso(),
     }
 
+    update_fields = {
+        "Escalation_Sent": True,
+        "Escalation_Queued": False,
+        "Escalation_Queued_At": utc_now_iso(),
+        "Statut_incident": "Escaladé",
+        "Error_Message": reason,
+        "Payload_Redacted": json.dumps(
+            {
+                "severity": severity,
+                "goal": goal,
+                "http_status": http_status,
+                "failed_goal": failed_goal,
+                "failed_url": failed_url,
+                "sla_status": sla_status,
+            },
+            ensure_ascii=False,
+        ),
+        "Result_JSON": json.dumps(escalation_result, ensure_ascii=False),
+        "Linked_Run": [run_record_id],
+    }
+
     try:
+        print("[INTERNAL_ESCALATE] table =", logs_errors_table_name)
+        print("[INTERNAL_ESCALATE] log_record_id =", log_record_id)
+        print("[INTERNAL_ESCALATE] run_record_id =", run_record_id)
+        print("[INTERNAL_ESCALATE] flow_id =", flow_id)
+        print("[INTERNAL_ESCALATE] root_event_id =", root_event_id)
+        print(
+            "[INTERNAL_ESCALATE] update_fields =",
+            json.dumps(update_fields, ensure_ascii=False),
+        )
+
         airtable_update(
             logs_errors_table_name,
             log_record_id,
-            {
-                "Escalation_Sent": True,
-                "Escalation_Queued": False,
-                "Escalation_Queued_At": utc_now_iso(),
-                "Statut_incident": "Escaladé",
-                "Error_Message": reason,
-                "Payload_Redacted": json.dumps(
-                    {
-                        "severity": severity,
-                        "goal": goal,
-                        "http_status": http_status,
-                        "failed_goal": failed_goal,
-                        "failed_url": failed_url,
-                        "sla_status": sla_status,
-                    },
-                    ensure_ascii=False,
-                ),
-                "Result_JSON": json.dumps(escalation_result, ensure_ascii=False),
-                "Linked_Run": [run_record_id],
-            },
+            update_fields,
         )
     except Exception as e:
         return {
             "ok": False,
-            "error": f"airtable_update_failed:{repr(e)}",
+            "error": "airtable_update_failed:" + repr(e),
             "flow_id": flow_id,
             "root_event_id": root_event_id,
             "log_record_id": log_record_id,
@@ -124,11 +136,11 @@ def capability_internal_escalate(
 
 def run(
     req,
-    run_record_id: str,
+    run_record_id,
     *,
     airtable_update,
-    logs_errors_table_name: str,
-) -> Dict[str, Any]:
+    logs_errors_table_name,
+):
     return capability_internal_escalate(
         req,
         run_record_id,
