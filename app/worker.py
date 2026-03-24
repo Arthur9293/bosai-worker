@@ -3824,11 +3824,32 @@ def _event_guess_http_capability(fields: Dict[str, Any], payload_guess: Dict[str
         return "http_exec"
     return ""
 
+def safe_json_load(value):
+    if not value:
+        return {}
+
+    if isinstance(value, dict):
+        return value
+
+    try:
+        return json.loads(value)
+    except Exception:
+        try:
+            return json.loads(value.replace('\\"', '"'))
+        except Exception:
+            print("❌ JSON PARSE FAILED:", value)
+            return {}
 
 def _event_build_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
-    command_input = _json_load_maybe(fields.get("Command_Input_JSON"))
+    raw = fields.get("Command_Input_JSON")
+    print("RAW INPUT_JSON:", raw)
+    command_input = safe_json_load(raw)
+
     if not command_input:
-        command_input = _json_load_maybe(fields.get("Payload_JSON"))
+        raw = fields.get("Payload_JSON")
+        print("RAW PAYLOAD_JSON:", raw)
+        command_input = safe_json_load(raw)
+
     if not isinstance(command_input, dict):
         command_input = {}
 
@@ -3858,7 +3879,6 @@ def _event_build_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         command_input["method"] = http_method
 
     return command_input
-
 
 def _event_mark_processed(
     event_record_id: str,
