@@ -542,20 +542,40 @@ def airtable_list_filtered(
         raise HTTPException(status_code=500, detail=f"Airtable filtered list failed: {r.status_code} {r.text}")
     return r.json().get("records", [])
 
-
 def _json_load_maybe(val: Any) -> Dict[str, Any]:
     if val is None:
         return {}
+
     if isinstance(val, dict):
         return val
+
+    if isinstance(val, list):
+        return {}
+
+    s = str(val).strip()
+    if not s:
+        return {}
+
     try:
-        s = str(val).strip()
-        if not s:
-            return {}
         parsed = json.loads(s)
         return parsed if isinstance(parsed, dict) else {}
     except Exception:
-        return {}
+        pass
+
+    try:
+        parsed = json.loads(s.replace('\\"', '"'))
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        pass
+
+    try:
+        parsed = json.loads(s.encode("utf-8").decode("unicode_escape"))
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        pass
+
+    print("[_json_load_maybe] JSON PARSE FAILED:", s)
+    return {}
 
 def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
@@ -3824,31 +3844,21 @@ def _event_guess_http_capability(fields: Dict[str, Any], payload_guess: Dict[str
         return "http_exec"
     return ""
 
-def safe_json_load(value):
-    if not value:
-        return {}
-
-    if isinstance(value, dict):
-        return value
-
-    try:
-        return json.loads(value)
-    except Exception:
-        try:
-            return json.loads(value.replace('\\"', '"'))
-        except Exception:
-            print("❌ JSON PARSE FAILED:", value)
-            return {}
 
 def _event_build_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     raw = fields.get("Command_Input_JSON")
     print("RAW INPUT_JSON:", raw)
-    command_input = safe_json_load(raw)
+    command_input = _json_load_maybe(raw)
+
+    if not command_input:
+        raw = fields.get("Input_JSON")
+        print("RAW INPUT_JSON fallback:", raw)
+        command_input = _json_load_maybe(raw)
 
     if not command_input:
         raw = fields.get("Payload_JSON")
         print("RAW PAYLOAD_JSON:", raw)
-        command_input = safe_json_load(raw)
+        command_input = _json_load_maybe(raw)
 
     if not isinstance(command_input, dict):
         command_input = {}
@@ -3858,6 +3868,7 @@ def _event_build_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         or fields.get("URL")
         or fields.get("Http_Target")
         or command_input.get("http_target")
+        or command_input.get("httptarget")
         or command_input.get("url")
         or ""
     ).strip()
