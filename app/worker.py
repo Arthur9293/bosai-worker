@@ -5210,6 +5210,7 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
     workspace_id = str(
         _resolve_workspace_id(req=req)
         or payload.get("workspace_id")
+        or payload.get("workspaceid")
         or payload.get("Workspace_ID")
         or ""
     ).strip()
@@ -5221,12 +5222,14 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
         payload.get("goal")
         or payload.get("Goal")
         or payload.get("failed_goal")
+        or payload.get("failedgoal")
         or ""
     ).strip()
 
     reason = str(
         payload.get("reason")
         or payload.get("retry_reason")
+        or payload.get("retryreason")
         or payload.get("Reason")
         or "unknown"
     ).strip()
@@ -5240,20 +5243,24 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
 
     original_capability = str(
         payload.get("original_capability")
+        or payload.get("originalcapability")
         or payload.get("source_capability")
         or "http_exec"
     ).strip() or "http_exec"
 
     failed_url = str(
         payload.get("failed_url")
+        or payload.get("failedurl")
         or payload.get("url")
         or payload.get("http_target")
+        or payload.get("httptarget")
         or payload.get("URL")
         or ""
     ).strip()
 
     failed_method = str(
         payload.get("failed_method")
+        or payload.get("failedmethod")
         or payload.get("method")
         or "GET"
     ).strip().upper()
@@ -5261,6 +5268,7 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
     try:
         retry_count = int(
             payload.get("retry_count")
+            or payload.get("retrycount")
             or payload.get("Retry_Count")
             or 0
         )
@@ -5270,6 +5278,7 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
     try:
         retry_max = int(
             payload.get("retry_max")
+            or payload.get("retrymax")
             or payload.get("Retry_Max")
             or 0
         )
@@ -5278,12 +5287,17 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
 
     http_status = (
         payload.get("http_status")
+        or payload.get("httpstatus")
         or payload.get("status_code")
+        or payload.get("statuscode")
         or payload.get("HTTP_Status")
     )
 
     if http_status is None and isinstance(payload.get("response"), dict):
-        http_status = payload["response"].get("status_code")
+        http_status = (
+            payload["response"].get("status_code")
+            or payload["response"].get("statuscode")
+        )
 
     try:
         http_status = int(http_status) if http_status is not None else None
