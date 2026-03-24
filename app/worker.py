@@ -4761,6 +4761,11 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                 spawn_fields["Flow_ID"] = flow_id
             if root_event_id:
                 spawn_fields["Root_Event_ID"] = root_event_id
+
+            print("[SPAWN next_capability]", next_capability)
+            print("[SPAWN next_input]", next_input)
+            print("[SPAWN Input_JSON]", json.dumps(next_input, ensure_ascii=False))
+            
             _airtable_create(COMMANDS_TABLE_NAME, spawn_fields)
 
             result["flow_id"] = flow_id
