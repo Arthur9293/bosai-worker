@@ -20,7 +20,9 @@ def capability_internal_escalate(
     root_event_id = str(payload.get("root_event_id") or flow_id).strip()
     log_record_id = str(
         payload.get("log_record_id")
+        or payload.get("run_record_id")
         or payload.get("incident_record_id")
+        or run_record_id
         or ""
     ).strip()
 
