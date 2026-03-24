@@ -4447,42 +4447,78 @@ def _create_incident_log_record(incident_payload: Dict[str, Any]) -> Dict[str, A
         retry_count = int(incident_payload.get("retry_count") or 0)
         retry_max = int(incident_payload.get("retry_max") or 0)
 
-        severity = "critical" if http_status is not None and http_status >= 500 else "high"
+        record_name = goal or reason or error_text or "incident"
 
-        error_id = incident_key or f"incident-{uuid.uuid4().hex[:12]}"
+        payload_redacted = {
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
+            "goal": goal,
+            "reason": reason,
+            "error": error_text,
+            "original_capability": original_capability,
+            "failed_url": failed_url,
+            "failed_method": failed_method,
+            "workspace_id": workspace_id,
+            "run_record_id": run_record_id,
+            "incident_key": incident_key,
+            "http_status": http_status,
+            "retry_count": retry_count,
+            "retry_max": retry_max,
+            "ts": utc_now_iso(),
+        }
+
+        notes_parts = [
+            f"Goal: {goal}" if goal else "",
+            f"Reason: {reason}" if reason else "",
+            f"Error: {error_text}" if error_text else "",
+            f"Capability: {original_capability}" if original_capability else "",
+            f"URL: {failed_url}" if failed_url else "",
+            f"Method: {failed_method}" if failed_method else "",
+            f"HTTP status: {http_status}" if http_status is not None else "",
+            f"Retry: {retry_count}/{retry_max}",
+            f"Flow ID: {flow_id}" if flow_id else "",
+            f"Root event ID: {root_event_id}" if root_event_id else "",
+            f"Workspace: {workspace_id}" if workspace_id else "",
+            f"Run record: {run_record_id}" if run_record_id else "",
+        ]
+        notes_value = "\n".join([x for x in notes_parts if x])
 
         candidates = [
             {
-                "Error_ID": error_id,
-                "Created_At": utc_now_iso(),
-                "Status_incident": "Nouveau",
-                "Source": "bosai-worker",
-                "Severity": severity,
-                "Endpoint_URL": failed_url,
+                "Name": record_name,
+                "Notes": notes_value,
+                "Statut_incident": "Nouveau",
+                "Error_Message": error_text or reason or "incident_error",
+                "Payload_Redacted": json.dumps(payload_redacted, ensure_ascii=False),
+                "Escalation_Sent": False,
+                "Escalation_Queued": True,
+                "Escalation_Queued_At": utc_now_iso(),
                 "Linked_Run": [run_record_id] if run_record_id else [],
-                "Name": goal or reason or "incident",
             },
             {
-                "Error_ID": error_id,
-                "Created_At": utc_now_iso(),
-                "Status_incident": "Nouveau",
-                "Source": "bosai-worker",
-                "Severity": severity,
-                "Endpoint_URL": failed_url,
-                "Name": goal or reason or "incident",
+                "Name": record_name,
+                "Notes": notes_value,
+                "Statut_incident": "Nouveau",
+                "Error_Message": error_text or reason or "incident_error",
+                "Payload_Redacted": json.dumps(payload_redacted, ensure_ascii=False),
+                "Escalation_Sent": False,
+                "Escalation_Queued": True,
+                "Escalation_Queued_At": utc_now_iso(),
             },
             {
-                "Error_ID": error_id,
-                "Status_incident": "Nouveau",
-                "Source": "bosai-worker",
-                "Severity": severity,
-                "Endpoint_URL": failed_url,
-                "Name": goal or reason or "incident",
+                "Name": record_name,
+                "Statut_incident": "Nouveau",
+                "Error_Message": error_text or reason or "incident_error",
+                "Escalation_Sent": False,
+                "Escalation_Queued": True,
             },
             {
-                "Name": goal or reason or "incident",
+                "Name": record_name,
             },
         ]
+
+        print("[AIRTABLE CREATE] table =", LOGS_ERREURS_TABLE_NAME)
+        print("[AIRTABLE CREATE] trying fields =", json.dumps(candidates[0], ensure_ascii=False))
 
         create_res = _airtable_create_best_effort(LOGS_ERREURS_TABLE_NAME, candidates)
 
