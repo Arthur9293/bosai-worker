@@ -199,6 +199,15 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
         retry_input["retry_count"] = retry_count + 1
         retry_input["retry_max"] = retry_max
 
+        if http_status is not None and retry_input.get("http_status") is None:
+            retry_input["http_status"] = http_status
+
+        if error and not retry_input.get("error"):
+            retry_input["error"] = error
+
+        if reason and not retry_input.get("retry_reason"):
+            retry_input["retry_reason"] = reason
+
         next_commands.append(
             {
                 "capability": original_capability,
