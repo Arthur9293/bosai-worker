@@ -4670,7 +4670,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
     result.setdefault("flow_id", flow_id)
     result.setdefault("root_event_id", root_event_id)
     result.setdefault("step_index", step_index)
-    result.setdefault("run_record_id", run_record_id)
+    result["run_record_id"] = run_record_id
 
     if "next_commands" not in result or not isinstance(result.get("next_commands"), list):
         result["next_commands"] = []
