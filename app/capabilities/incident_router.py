@@ -36,28 +36,62 @@ def _pick(payload: Dict[str, Any], *keys: str, default: Any = None) -> Any:
 
 def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "") -> Dict[str, Any]:
     goal = str(
-        _pick(payload, "goal", "Goal", default="")
-        or ""
+        _pick(
+            payload,
+            "goal",
+            "Goal",
+            "failed_goal",
+            "failedgoal",
+            default="",
+        ) or ""
     ).strip()
 
     error = str(
-        _pick(payload, "error", "last_error", "Error", default="")
-        or ""
+        _pick(
+            payload,
+            "error",
+            "last_error",
+            "Error",
+            default="",
+        ) or ""
     ).strip()
 
     reason = str(
-        _pick(payload, "reason", "retry_reason", "Reason", default="unknown")
-        or "unknown"
+        _pick(
+            payload,
+            "reason",
+            "retry_reason",
+            "retryreason",
+            "Reason",
+            default="unknown",
+        ) or "unknown"
     ).strip()
 
-    http_status = _to_int(_pick(payload, "http_status", "status_code", "HTTP_Status"))
+    http_status = _to_int(
+        _pick(
+            payload,
+            "http_status",
+            "httpstatus",
+            "status_code",
+            "statuscode",
+            "HTTP_Status",
+        )
+    )
     if http_status is None:
         response_obj = payload.get("response")
         if isinstance(response_obj, dict):
-            http_status = _to_int(response_obj.get("status_code"))
+            http_status = _to_int(
+                response_obj.get("status_code")
+                or response_obj.get("statuscode")
+            )
 
-    retry_count = _to_int(_pick(payload, "retry_count", "Retry_Count")) or 0
-    retry_max = _to_int(_pick(payload, "retry_max", "Retry_Max")) or 0
+    retry_count = _to_int(
+        _pick(payload, "retry_count", "retrycount", "Retry_Count")
+    ) or 0
+
+    retry_max = _to_int(
+        _pick(payload, "retry_max", "retrymax", "Retry_Max")
+    ) or 0
 
     flow_id = str(
         _pick(payload, "flow_id", "flowid", "Flow_ID", default="")
@@ -70,13 +104,18 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
     ).strip()
 
     workspace_id = str(
-        _pick(payload, "workspace_id", "Workspace_ID", default="")
+        _pick(payload, "workspace_id", "workspaceid", "Workspace_ID", default="")
         or ""
     ).strip()
 
     original_capability = str(
-        _pick(payload, "original_capability", "source_capability", default="http_exec")
-        or "http_exec"
+        _pick(
+            payload,
+            "original_capability",
+            "originalcapability",
+            "source_capability",
+            default="http_exec",
+        ) or "http_exec"
     ).strip() or "http_exec"
 
     original_input = (
@@ -89,6 +128,7 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
         _pick(
             payload,
             "failed_url",
+            "failedurl",
             "url",
             "http_target",
             "URL",
@@ -97,8 +137,13 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
     ).strip()
 
     failed_method = str(
-        _pick(payload, "failed_method", "method", default="GET")
-        or "GET"
+        _pick(
+            payload,
+            "failed_method",
+            "failedmethod",
+            "method",
+            default="GET",
+        ) or "GET"
     ).strip().upper()
 
     decision = "log_only"
