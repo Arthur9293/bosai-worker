@@ -549,30 +549,72 @@ def _json_load_maybe(val: Any) -> Dict[str, Any]:
     if isinstance(val, dict):
         return val
 
+    if isinstance(val, list):
+        return {}
+
     s = str(val).strip()
     if not s:
         return {}
 
+    # 1er parse
     try:
         parsed = json.loads(s)
-        return parsed if isinstance(parsed, dict) else {}
+
+        if isinstance(parsed, dict):
+            return parsed
+
+        # Cas critique : JSON double-encodé
+        if isinstance(parsed, str):
+            inner = parsed.strip()
+            if inner:
+                try:
+                    parsed2 = json.loads(inner)
+                    return parsed2 if isinstance(parsed2, dict) else {}
+                except Exception:
+                    pass
     except Exception:
         pass
 
+    # 2e tentative : quotes échappées
     try:
         parsed = json.loads(s.replace('\\"', '"'))
-        return parsed if isinstance(parsed, dict) else {}
+
+        if isinstance(parsed, dict):
+            return parsed
+
+        if isinstance(parsed, str):
+            inner = parsed.strip()
+            if inner:
+                try:
+                    parsed2 = json.loads(inner)
+                    return parsed2 if isinstance(parsed2, dict) else {}
+                except Exception:
+                    pass
     except Exception:
         pass
 
+    # 3e tentative : unicode_escape
     try:
-        parsed = json.loads(bytes(s, "utf-8").decode("unicode_escape"))
-        return parsed if isinstance(parsed, dict) else {}
+        fixed = bytes(s, "utf-8").decode("unicode_escape")
+        parsed = json.loads(fixed)
+
+        if isinstance(parsed, dict):
+            return parsed
+
+        if isinstance(parsed, str):
+            inner = parsed.strip()
+            if inner:
+                try:
+                    parsed2 = json.loads(inner)
+                    return parsed2 if isinstance(parsed2, dict) else {}
+                except Exception:
+                    pass
     except Exception:
         pass
 
     print("[_json_load_maybe] JSON PARSE FAILED:", s)
     return {}
+    
     
 def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
