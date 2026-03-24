@@ -5504,7 +5504,7 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
                     "retry_max": retry_max,
                     "http_status": http_status,
                     "incident_record_id": incident_record_id,
-                    "log_record_id": incident_record_id,
+                    "log_record_id": run_record_id,
                     "run_record_id": run_record_id,
                     "workspace_id": workspace_id,
                 },
