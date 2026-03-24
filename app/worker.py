@@ -760,24 +760,57 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
             if not raw_text:
                 continue
 
+            obj: Any = None
+
+            # 1) parse normal
             try:
                 obj = json.loads(raw_text)
-                if isinstance(obj, dict):
-                    parsed = obj
-            except Exception as e:
-                parse_errors.append(
-                    {
-                        "source": source_key,
-                        "error": repr(e),
-                        "raw_preview": raw_text[:500],
-                    }
-                )
-                continue
+
+            # 2) fallback guillemets échappés
+            except Exception:
+                try:
+                    obj = json.loads(raw_text.replace('\\"', '"'))
+
+                # 3) fallback unicode_escape
+                except Exception:
+                    try:
+                        fixed = bytes(raw_text, "utf-8").decode("unicode_escape")
+                        obj = json.loads(fixed)
+                    except Exception as e:
+                        parse_errors.append(
+                            {
+                                "source": source_key,
+                                "error": repr(e),
+                                "raw_preview": raw_text[:500],
+                            }
+                        )
+                        continue
+
+            # Cas dict direct
+            if isinstance(obj, dict):
+                parsed = obj
+
+            # Cas JSON double-encodé : 1er loads -> string, 2e loads -> dict
+            elif isinstance(obj, str):
+                inner = obj.strip()
+                if inner:
+                    try:
+                        obj2 = json.loads(inner)
+                        if isinstance(obj2, dict):
+                            parsed = obj2
+                    except Exception as e:
+                        parse_errors.append(
+                            {
+                                "source": source_key,
+                                "error": f"double_decode_failed: {repr(e)}",
+                                "raw_preview": inner[:500],
+                            }
+                        )
+                        continue
 
         if not isinstance(parsed, dict) or not parsed:
             continue
 
-        # IMPORTANT:
         # si le JSON est une enveloppe {"capability": "...", "input": {...}}
         # on extrait seulement le bloc input
         if isinstance(parsed.get("input"), dict) and parsed.get("input"):
@@ -802,13 +835,20 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         "flow_id": ("flow_id", "flowid", "flowId", "Flow_ID"),
         "root_event_id": ("root_event_id", "rooteventid", "rootEventId", "Root_Event_ID"),
         "step_index": ("step_index", "stepindex", "stepIndex", "Step_Index"),
-        "goal": ("goal", "Goal"),
+        "goal": ("goal", "Goal", "failed_goal", "failedgoal", "Failed_Goal"),
+        "reason": ("reason", "retry_reason", "retryreason", "Reason"),
+        "retry_reason": ("retry_reason", "retryreason", "reason", "Reason"),
         "retry_count": ("retry_count", "retrycount", "Retry_Count"),
         "retry_max": ("retry_max", "retrymax", "Retry_Max"),
         "failed_url": ("failed_url", "failedurl", "Failed_URL"),
         "failed_method": ("failed_method", "failedmethod", "Failed_Method"),
-        "failed_goal": ("failed_goal", "failedgoal", "Failed_Goal"),
-        "http_status": ("http_status", "httpstatus", "HTTP_Status"),
+        "failed_goal": ("failed_goal", "failedgoal", "Failed_Goal", "goal", "Goal"),
+        "http_status": ("http_status", "httpstatus", "status_code", "statuscode", "HTTP_Status"),
+        "status_code": ("status_code", "statuscode", "http_status", "httpstatus", "HTTP_Status"),
+        "error": ("error", "last_error", "Error"),
+        "original_capability": ("original_capability", "originalcapability", "source_capability"),
+        "workspace_id": ("workspace_id", "workspaceid", "Workspace_ID"),
+        "run_record_id": ("run_record_id", "runrecordid", "Run_Record_ID"),
     }
 
     for target_key, aliases in field_alias_map.items():
@@ -820,6 +860,19 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
             if value is not None and str(value).strip() != "":
                 base[target_key] = value
                 break
+
+    # Si response existe en string JSON, on essaie de la parser
+    if "response" in base and isinstance(base.get("response"), str):
+        response_obj = None
+        try:
+            response_obj = json.loads(base["response"])
+        except Exception:
+            try:
+                response_obj = json.loads(base["response"].replace('\\"', '"'))
+            except Exception:
+                response_obj = None
+        if isinstance(response_obj, dict):
+            base["response"] = response_obj
 
     base = _normalize_flow_keys(base)
 
