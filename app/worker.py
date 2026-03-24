@@ -4336,6 +4336,22 @@ def _create_command_from_next_command(
         or ""
     ).strip() or None
 
+    # ------------------------------------------------------------
+    # SAFE PATCH — ensure flow context propagation
+    # Keeps spawned commands attached to a stable parent context.
+    # ------------------------------------------------------------
+    try:
+        if not flow_id:
+            flow_id = parent_run_id
+            command_input["flow_id"] = flow_id
+
+        if not root_event_id:
+            root_event_id = parent_run_id
+            command_input["root_event_id"] = root_event_id
+
+    except Exception as _e:
+        print("[SAFE_PATCH][flow_propagation] error:", repr(_e))
+
     if capability in (
         "decision_demo",
         "decision_router",
@@ -4354,8 +4370,9 @@ def _create_command_from_next_command(
 
     # ------------------------------------------------------------
     # IMPORTANT:
-    # For spawned retries, do not blindly reuse inherited idempotency_key
-    # from previous command_input unless explicitly forced on next_cmd.
+    # For spawned retries, do not blindly reuse inherited
+    # idempotency_key from previous command_input unless explicitly
+    # forced on next_cmd.
     # ------------------------------------------------------------
     inherited_input_idem = str(command_input.get("idempotency_key") or "").strip()
     explicit_next_cmd_idem = str(next_cmd.get("idempotency_key") or "").strip()
@@ -4452,6 +4469,7 @@ def _create_command_from_next_command(
         "idempotency_key": effective_idempotency_key,
         "parent_run_id": parent_run_id,
     }
+    
 def _create_incident_log_record(incident_payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
         flow_id = str(incident_payload.get("flow_id") or "").strip()
