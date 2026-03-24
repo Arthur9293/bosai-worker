@@ -4200,7 +4200,35 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     workspace_id = _event_workspace_id(fields)
+
+    # ------------------------------------------------------------
+    # EXISTING LOGIC (NE PAS TOUCHER)
+    # ------------------------------------------------------------
     command_input = _event_build_command_input(fields)
+
+    # ------------------------------------------------------------
+    # 🔥 SAFE PATCH — inject payload for http_exec ONLY
+    # ------------------------------------------------------------
+    try:
+        payload = payload_guess.get("payload") if isinstance(payload_guess, dict) else {}
+
+        if mapped_capability == "http_exec":
+            if isinstance(payload, dict):
+                # Inject URL uniquement si absente
+                if not str(command_input.get("url") or "").strip():
+                    command_input["url"] = payload.get("url")
+
+                # Inject method uniquement si absente
+                if not str(command_input.get("method") or "").strip():
+                    command_input["method"] = payload.get("method") or "GET"
+
+    except Exception as _e:
+        # SAFE GUARD → ne jamais casser le flow
+        print("[SAFE_PATCH][http_exec_payload_injection] error:", repr(_e))
+
+    # ------------------------------------------------------------
+    # EXISTING LOGIC (suite)
+    # ------------------------------------------------------------
     effective_idempotency_key = _event_effective_idempotency_key(
         fields,
         event_record_id,
