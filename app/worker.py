@@ -5506,6 +5506,8 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
                     "incident_record_id": incident_record_id,
                     "log_record_id": incident_record_id,
                     "workspace_id": workspace_id,
+                    "log_record_id": incident_record_id,
+                    "incident_record_id": incident_record_id,
                 },
                 "terminal": False,
             }
