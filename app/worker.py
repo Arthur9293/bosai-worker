@@ -3923,6 +3923,7 @@ def _event_build_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     if http_method and "method" not in command_input:
         command_input["method"] = http_method
 
+    print("[compose_command_input] parsed_input=", command_input)
     return command_input
 
 def _event_mark_processed(
