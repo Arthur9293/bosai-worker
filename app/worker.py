@@ -549,9 +549,6 @@ def _json_load_maybe(val: Any) -> Dict[str, Any]:
     if isinstance(val, dict):
         return val
 
-    if isinstance(val, list):
-        return {}
-
     s = str(val).strip()
     if not s:
         return {}
@@ -569,14 +566,14 @@ def _json_load_maybe(val: Any) -> Dict[str, Any]:
         pass
 
     try:
-        parsed = json.loads(s.encode("utf-8").decode("unicode_escape"))
+        parsed = json.loads(bytes(s, "utf-8").decode("unicode_escape"))
         return parsed if isinstance(parsed, dict) else {}
     except Exception:
         pass
 
     print("[_json_load_maybe] JSON PARSE FAILED:", s)
     return {}
-
+    
 def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
@@ -3844,24 +3841,19 @@ def _event_guess_http_capability(fields: Dict[str, Any], payload_guess: Dict[str
         return "http_exec"
     return ""
 
-
 def _event_build_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
-    raw = fields.get("Command_Input_JSON")
-    print("RAW INPUT_JSON:", raw)
-    command_input = _json_load_maybe(raw)
+    raw_input = fields.get("Input_JSON")
+    command_input = _json_load_maybe(raw_input)
 
     if not command_input:
-        raw = fields.get("Input_JSON")
-        print("RAW INPUT_JSON fallback:", raw)
-        command_input = _json_load_maybe(raw)
+        raw_input = fields.get("Command_Input_JSON")
+        command_input = _json_load_maybe(raw_input)
 
     if not command_input:
-        raw = fields.get("Payload_JSON")
-        print("RAW PAYLOAD_JSON:", raw)
-        command_input = _json_load_maybe(raw)
+        raw_input = fields.get("Payload_JSON")
+        command_input = _json_load_maybe(raw_input)
 
-    if not isinstance(command_input, dict):
-        command_input = {}
+    command_input = _normalize_flow_keys(command_input if isinstance(command_input, dict) else {})
 
     http_target = str(
         fields.get("http_target")
