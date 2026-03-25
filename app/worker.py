@@ -1848,17 +1848,21 @@ def capability_decision_router(req: RunRequest, run_record_id: str) -> Dict[str,
         ]
     )
 
+    forced_url = str(payload.get("force_url") or "").strip()
+
     if http_exec_done_count == 0:
-        forced_url = str(payload.get("force_url") or "").strip()
-        
         decision = "send_first_probe"
         reason = "no_http_exec_done_yet"
+
+        first_url = forced_url or "https://httpbin.org/get"
+
         next_commands = [
             {
                 "capability": "http_exec",
                 "priority": 1,
                 "input": {
-                    "url": forced_url or "https://httpbin.org/get",
+                    "url": first_url,
+                    "http_target": first_url,
                     "method": "GET",
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
@@ -1874,12 +1878,16 @@ def capability_decision_router(req: RunRequest, run_record_id: str) -> Dict[str,
     elif http_exec_done_count == 1:
         decision = "send_second_probe"
         reason = "one_http_exec_done"
+
+        second_url = "https://httpbin.org/uuid"
+
         next_commands = [
             {
                 "capability": "http_exec",
                 "priority": 1,
                 "input": {
-                    "url": "https://httpbin.org/uuid",
+                    "url": second_url,
+                    "http_target": second_url,
                     "method": "GET",
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
@@ -1921,6 +1929,7 @@ def capability_decision_router(req: RunRequest, run_record_id: str) -> Dict[str,
             "decision": decision,
             "reason": reason,
             "http_exec_done_count": http_exec_done_count,
+            "force_url": forced_url,
             "run_record_id": run_record_id,
         },
     )
@@ -1934,11 +1943,13 @@ def capability_decision_router(req: RunRequest, run_record_id: str) -> Dict[str,
         memory_obj={
             "http_exec_done_count": http_exec_done_count,
             "last_reason": reason,
+            "force_url": forced_url,
         },
         result_obj={
             "last_decision_result": {
                 "decision": decision,
                 "reason": reason,
+                "force_url": forced_url,
             }
         },
         linked_run=[run_record_id],
@@ -1951,6 +1962,7 @@ def capability_decision_router(req: RunRequest, run_record_id: str) -> Dict[str,
         "decision": decision,
         "reason": reason,
         "http_exec_done_count": http_exec_done_count,
+        "force_url": forced_url,
         "next_commands": next_commands,
         "terminal": terminal,
         "run_record_id": run_record_id,
