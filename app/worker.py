@@ -1849,6 +1849,8 @@ def capability_decision_router(req: RunRequest, run_record_id: str) -> Dict[str,
     )
 
     if http_exec_done_count == 0:
+        forced_url = str(payload.get("force_url") or "").strip()
+        
         decision = "send_first_probe"
         reason = "no_http_exec_done_yet"
         next_commands = [
