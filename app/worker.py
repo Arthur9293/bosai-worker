@@ -1856,7 +1856,7 @@ def capability_decision_router(req: RunRequest, run_record_id: str) -> Dict[str,
                 "capability": "http_exec",
                 "priority": 1,
                 "input": {
-                    "url": "https://httpbin.org/get",
+                    "url": forced_url or "https://httpbin.org/get",
                     "method": "GET",
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
