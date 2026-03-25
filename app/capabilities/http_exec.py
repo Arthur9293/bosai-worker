@@ -40,7 +40,7 @@ def _to_bool(value: Any, default: bool = False) -> bool:
     if text in {"1", "true", "yes", "y", "on"}:
         return True
     if text in {"0", "false", "no", "n", "off"}:
-        return False
+            return False
     return default
 
 
@@ -57,12 +57,17 @@ def _safe_dict(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _safe_list(value: Any) -> List[Any]:
-    return value if isinstance(value, list) else []
-
-
 def _clip(value: int, min_value: int, max_value: int) -> int:
     return max(min_value, min(value, max_value))
+
+
+def _first_non_empty(payload: Dict[str, Any], keys: List[str], default: Any = None) -> Any:
+    for key in keys:
+        if key in payload:
+            value = payload.get(key)
+            if value is not None and value != "":
+                return value
+    return default
 
 
 def _normalize_headers(value: Any) -> Dict[str, str]:
@@ -84,10 +89,46 @@ def _normalize_method(value: Any) -> str:
     return method if method in allowed else "GET"
 
 
+def _coerce_payload(payload: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Dict[str, Any]:
+    if isinstance(payload, dict):
+        return payload
+
+    candidate = kwargs.get("input_data")
+    if isinstance(candidate, dict):
+        return candidate
+
+    candidate = kwargs.get("payload")
+    if isinstance(candidate, dict):
+        return candidate
+
+    return {}
+
+
 def _extract_flow_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
-    flow_id = _safe_str(payload.get("flow_id") or payload.get("flowid")).strip()
-    root_event_id = _safe_str(payload.get("root_event_id") or payload.get("event_id")).strip()
-    parent_command_id = _safe_str(payload.get("parent_command_id") or payload.get("command_id")).strip()
+    flow_id = _safe_str(
+        _first_non_empty(
+            payload,
+            ["flow_id", "flowid", "Flow_ID", "FlowId"],
+            "",
+        )
+    ).strip()
+
+    root_event_id = _safe_str(
+        _first_non_empty(
+            payload,
+            ["root_event_id", "rooteventid", "rootEventId", "event_id"],
+            "",
+        )
+    ).strip()
+
+    parent_command_id = _safe_str(
+        _first_non_empty(
+            payload,
+            ["parent_command_id", "parentcommandid", "command_id", "commandid"],
+            "",
+        )
+    ).strip()
+
     return {
         "flow_id": flow_id,
         "root_event_id": root_event_id,
@@ -96,11 +137,30 @@ def _extract_flow_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _extract_retry_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
-    retry_count = _to_int(payload.get("retry_count"), 0)
-    retry_max = _to_int(payload.get("retry_max"), DEFAULT_RETRY_MAX)
-    retry_delay_seconds = _to_int(payload.get("retry_delay_seconds"), DEFAULT_RETRY_DELAY_SECONDS)
-    step_index = _to_int(payload.get("step_index"), 0)
-    max_depth = _to_int(payload.get("max_depth"), DEFAULT_MAX_DEPTH)
+    retry_count = _to_int(
+        _first_non_empty(payload, ["retry_count", "retrycount"], 0),
+        0,
+    )
+    retry_max = _to_int(
+        _first_non_empty(payload, ["retry_max", "retrymax"], DEFAULT_RETRY_MAX),
+        DEFAULT_RETRY_MAX,
+    )
+    retry_delay_seconds = _to_int(
+        _first_non_empty(
+            payload,
+            ["retry_delay_seconds", "retrydelayseconds", "retry_delay"],
+            DEFAULT_RETRY_DELAY_SECONDS,
+        ),
+        DEFAULT_RETRY_DELAY_SECONDS,
+    )
+    step_index = _to_int(
+        _first_non_empty(payload, ["step_index", "stepindex"], 0),
+        0,
+    )
+    max_depth = _to_int(
+        _first_non_empty(payload, ["max_depth", "maxdepth"], DEFAULT_MAX_DEPTH),
+        DEFAULT_MAX_DEPTH,
+    )
 
     return {
         "retry_count": max(0, retry_count),
@@ -112,28 +172,74 @@ def _extract_retry_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _extract_execution_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
+    timeout_seconds = _clip(
+        _to_int(
+            _first_non_empty(payload, ["timeout_seconds", "timeoutseconds"], DEFAULT_TIMEOUT_SECONDS),
+            DEFAULT_TIMEOUT_SECONDS,
+        ),
+        1,
+        300,
+    )
+
+    dry_run = _to_bool(
+        _first_non_empty(payload, ["dry_run", "dryrun"], False),
+        False,
+    )
+
+    allow_redirects = _to_bool(
+        _first_non_empty(payload, ["allow_redirects", "allowredirects"], False),
+        False,
+    )
+
+    max_depth = max(
+        1,
+        _to_int(
+            _first_non_empty(payload, ["max_depth", "maxdepth"], DEFAULT_MAX_DEPTH),
+            DEFAULT_MAX_DEPTH,
+        ),
+    )
+
     return {
-        "timeout_seconds": _clip(_to_int(payload.get("timeout_seconds"), DEFAULT_TIMEOUT_SECONDS), 1, 300),
-        "dry_run": _to_bool(payload.get("dry_run"), False),
-        "allow_redirects": _to_bool(payload.get("allow_redirects"), False),
-        "max_depth": max(1, _to_int(payload.get("max_depth"), DEFAULT_MAX_DEPTH)),
+        "timeout_seconds": timeout_seconds,
+        "dry_run": dry_run,
+        "allow_redirects": allow_redirects,
+        "max_depth": max_depth,
     }
 
 
 def _extract_http_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    body = payload.get("body")
-    json_body = payload.get("json")
+    body = _first_non_empty(payload, ["body"], None)
+    json_body = _first_non_empty(payload, ["json"], None)
 
-    # Compatibility: if body is a dict/list and json is absent, prefer json.
     if json_body is None and isinstance(body, (dict, list)):
         json_body = deepcopy(body)
         body = None
 
+    url = _safe_str(
+        _first_non_empty(
+            payload,
+            ["url", "URL", "http_target", "httptarget", "target_url", "targeturl"],
+            "",
+        )
+    ).strip()
+
+    method = _normalize_method(
+        _first_non_empty(payload, ["method", "HTTP_Method", "HTTPMethod", "http_method"], "GET")
+    )
+
+    headers = _normalize_headers(
+        _first_non_empty(payload, ["headers", "HTTP_Headers_JSON", "http_headers_json"], {})
+    )
+
+    params = _safe_dict(
+        _first_non_empty(payload, ["params"], {})
+    )
+
     return {
-        "url": _safe_str(payload.get("url")).strip(),
-        "method": _normalize_method(payload.get("method")),
-        "headers": _normalize_headers(payload.get("headers")),
-        "params": _safe_dict(payload.get("params")),
+        "url": url,
+        "method": method,
+        "headers": headers,
+        "params": params,
         "json": deepcopy(json_body) if isinstance(json_body, (dict, list)) else json_body,
         "body": body,
     }
@@ -162,7 +268,6 @@ def _compose_clean_command_input(
         **http_payload,
     }
 
-    # Remove empty noise while preserving false/0.
     return {k: v for k, v in clean.items() if v is not None and v != ""}
 
 
@@ -258,14 +363,16 @@ def _build_log_summary(
     blocked_by_depth_limit: bool,
     duration_ms: int,
 ) -> Dict[str, Any]:
-    parsed = urlparse(_safe_str(payload.get("url")))
-    polluted = _is_input_polluted(payload)
+    http_payload = _extract_http_payload(payload)
     retry_meta = _extract_retry_meta(payload)
+
+    parsed = urlparse(http_payload["url"])
+    polluted = _is_input_polluted(payload)
 
     return {
         "ts": _now_ts(),
         "target_host": parsed.netloc,
-        "method": _normalize_method(payload.get("method")),
+        "method": http_payload["method"],
         "retry_count": retry_meta["retry_count"],
         "retry_max": retry_meta["retry_max"],
         "step_index": retry_meta["step_index"],
@@ -280,9 +387,9 @@ def _build_log_summary(
     }
 
 
-def capability_http_exec(payload: Dict[str, Any]) -> Dict[str, Any]:
+def capability_http_exec(payload: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Dict[str, Any]:
     started_at = time.time()
-    payload = _safe_dict(payload)
+    payload = _coerce_payload(payload, **kwargs)
 
     if not HTTP_EXEC_ENABLED:
         return {
@@ -490,5 +597,5 @@ def capability_http_exec(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def run(payload: Dict[str, Any]) -> Dict[str, Any]:
-    return capability_http_exec(payload)
+def run(payload: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Dict[str, Any]:
+    return capability_http_exec(payload=payload, **kwargs)
