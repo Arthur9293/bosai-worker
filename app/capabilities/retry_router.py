@@ -60,6 +60,37 @@ def _coerce_payload(payload: Optional[Dict[str, Any]] = None, **kwargs: Any) -> 
     return {}
 
 
+def _unwrap_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+
+    nested = payload.get("command_input")
+    if isinstance(nested, dict):
+        merged = dict(nested)
+        for k, v in payload.items():
+            if k != "command_input" and k not in merged:
+                merged[k] = v
+        return merged
+
+    nested = payload.get("commandinput")
+    if isinstance(nested, dict):
+        merged = dict(nested)
+        for k, v in payload.items():
+            if k != "commandinput" and k not in merged:
+                merged[k] = v
+        return merged
+
+    nested = payload.get("input")
+    if isinstance(nested, dict):
+        merged = dict(nested)
+        for k, v in payload.items():
+            if k != "input" and k not in merged:
+                merged[k] = v
+        return merged
+
+    return payload
+
+
 def _normalize_method(value: Any) -> str:
     method = _safe_str(value).strip().upper()
     if not method:
@@ -83,11 +114,11 @@ def _extract_flow_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
     ).strip()
 
     parent_command_id = _safe_str(
-        _pick(payload, "parent_command_id", "parentcommandid", "command_id", default="")
+        _pick(payload, "parent_command_id", "parentcommandid", "command_id", "commandid", default="")
     ).strip()
 
     incident_record_id = _safe_str(
-        _pick(payload, "incident_record_id", default="")
+        _pick(payload, "incident_record_id", "incidentrecordid", default="")
     ).strip()
 
     return {
@@ -101,9 +132,18 @@ def _extract_flow_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def _extract_retry_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
     retry_count = _to_int(_pick(payload, "retry_count", "retrycount", default=0), 0)
-    retry_max = _to_int(_pick(payload, "retry_max", "retrymax", default=DEFAULT_RETRY_MAX), DEFAULT_RETRY_MAX)
+    retry_max = _to_int(
+        _pick(payload, "retry_max", "retrymax", default=DEFAULT_RETRY_MAX),
+        DEFAULT_RETRY_MAX,
+    )
     retry_delay_seconds = _to_int(
-        _pick(payload, "retry_delay_seconds", "retrydelayseconds", "retry_delay", default=DEFAULT_RETRY_DELAY_SECONDS),
+        _pick(
+            payload,
+            "retry_delay_seconds",
+            "retrydelayseconds",
+            "retry_delay",
+            default=DEFAULT_RETRY_DELAY_SECONDS,
+        ),
         DEFAULT_RETRY_DELAY_SECONDS,
     )
     step_index = _to_int(_pick(payload, "step_index", "stepindex", default=0), 0)
@@ -123,13 +163,22 @@ def _extract_target_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
         _pick(
             payload,
             "target_capability",
+            "targetcapability",
             "original_capability",
+            "originalcapability",
             default="http_exec",
         )
     ).strip() or "http_exec"
 
     original_input = _to_dict(
-        _pick(payload, "original_input", "target_input", default={})
+        _pick(
+            payload,
+            "original_input",
+            "originalinput",
+            "target_input",
+            "targetinput",
+            default={},
+        )
     )
 
     url_value = _safe_str(
@@ -162,18 +211,18 @@ def _extract_target_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def _extract_error_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
     retry_reason = _safe_str(
-        _pick(payload, "retry_reason", "reason", default="")
+        _pick(payload, "retry_reason", "retryreason", "reason", default="")
     ).strip()
 
     error_type = _safe_str(
-        _pick(payload, "error_type", default=retry_reason)
+        _pick(payload, "error_type", "errortype", default=retry_reason)
     ).strip()
 
     request_error = _safe_str(
-        _pick(payload, "request_error", default="")
+        _pick(payload, "request_error", "requesterror", default="")
     ).strip()
 
-    http_status_raw = _pick(payload, "http_status", "status_code", default=None)
+    http_status_raw = _pick(payload, "http_status", "httpstatus", "status_code", "statuscode", default=None)
     http_status: Optional[int] = None
     if http_status_raw not in (None, ""):
         try:
@@ -329,6 +378,7 @@ def _build_log(
 
 def run(payload: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Dict[str, Any]:
     payload = _coerce_payload(payload, **kwargs)
+    payload = _unwrap_payload(payload)
 
     flow_meta = _extract_flow_meta(payload)
     retry_meta = _extract_retry_meta(payload)
