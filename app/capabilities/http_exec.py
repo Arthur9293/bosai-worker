@@ -302,26 +302,67 @@ def _should_retry(status_code: int, request_error: str) -> bool:
     return False
 
 
-def _make_retry_command(payload: Dict[str, Any], *, reason: str, delay_seconds: int) -> Dict[str, Any]:
-    retry_meta = _extract_retry_meta(payload)
-    next_retry_count = retry_meta["retry_count"] + 1
-    next_step_index = retry_meta["step_index"] + 1
+def _make_retry_command(
+    payload: Dict[str, Any],
+    *,
+    clean_input: Dict[str, Any],
+    flow_meta: Dict[str, Any],
+    retry_count: int,
+    retry_max: int,
+    retry_delay_seconds: int,
+    step_index: int,
+    max_depth: int,
+    status_code: int,
+    request_error: str,
+) -> Dict[str, Any]:
+    workspace_id = _safe_str(
+        _first_non_empty(payload, ["workspace_id", "workspaceid"], "")
+    ).strip()
 
-    clean_input = _compose_clean_command_input(
-        payload,
-        retry_count=next_retry_count,
-        step_index=next_step_index,
-    )
+    error_type = ""
+    retry_reason = ""
+
+    if request_error:
+        retry_reason = request_error
+        error_type = "request_exception"
+    elif status_code == 429:
+        retry_reason = "http_429"
+        error_type = "http_429"
+    elif status_code == 408:
+        retry_reason = "http_408"
+        error_type = "http_408"
+    elif status_code == 409:
+        retry_reason = "http_409"
+        error_type = "http_409"
+    elif status_code == 425:
+        retry_reason = "http_425"
+        error_type = "http_425"
+    elif 500 <= status_code <= 599:
+        retry_reason = "http_5xx"
+        error_type = "http_5xx"
+    else:
+        retry_reason = f"http_{status_code}" if status_code else "retry_requested"
 
     return {
         "capability": "retry_router",
         "command_input": {
-            **clean_input,
-            "reason": reason,
-            "retry_delay_seconds": max(0, delay_seconds),
+            "target_capability": "http_exec",
+            "original_input": clean_input,
+            "flow_id": flow_meta["flow_id"],
+            "root_event_id": flow_meta["root_event_id"],
+            "workspace_id": workspace_id,
+            "parent_command_id": flow_meta["parent_command_id"],
+            "retry_count": retry_count,
+            "retry_max": retry_max,
+            "retry_delay_seconds": max(0, retry_delay_seconds),
+            "step_index": step_index,
+            "max_depth": max_depth,
+            "retry_reason": retry_reason,
+            "error_type": error_type,
+            "http_status": status_code if status_code else None,
+            "request_error": request_error,
         },
     }
-
 
 def _safe_response_preview(response: Optional[requests.Response]) -> Dict[str, Any]:
     if response is None:
