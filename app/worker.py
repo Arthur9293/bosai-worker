@@ -4265,29 +4265,65 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
     workspace_id = _event_workspace_id(fields)
 
     # ------------------------------------------------------------
-    # EXISTING LOGIC (NE PAS TOUCHER)
+    # EXISTING LOGIC
     # ------------------------------------------------------------
     command_input = _event_build_command_input(fields)
 
     # ------------------------------------------------------------
-    # 🔥 SAFE PATCH — inject payload for http_exec ONLY
+    # SAFE PATCH — deep payload extraction for http_exec
+    # Supports:
+    # - payload.url
+    # - payload.payload.url
+    # - payload.method
+    # - payload.payload.method
+    # while never breaking the flow
     # ------------------------------------------------------------
     try:
-        payload = payload_guess.get("payload") if isinstance(payload_guess, dict) else {}
+        payload = payload_guess if isinstance(payload_guess, dict) else {}
+
+        deep_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+
+        final_url = (
+            payload.get("url")
+            or deep_payload.get("url")
+            or command_input.get("url")
+            or command_input.get("http_target")
+            or command_input.get("URL")
+        )
+
+        final_method = (
+            payload.get("method")
+            or deep_payload.get("method")
+            or command_input.get("method")
+            or command_input.get("HTTP_Method")
+            or "GET"
+        )
 
         if mapped_capability == "http_exec":
-            if isinstance(payload, dict):
-                # Inject URL uniquement si absente
-                if not str(command_input.get("url") or "").strip():
-                    command_input["url"] = payload.get("url")
+            if final_url and not str(command_input.get("url") or "").strip():
+                command_input["url"] = final_url
 
-                # Inject method uniquement si absente
-                if not str(command_input.get("method") or "").strip():
-                    command_input["method"] = payload.get("method") or "GET"
+            if final_url and not str(command_input.get("http_target") or "").strip():
+                command_input["http_target"] = final_url
+
+            if final_url and not str(command_input.get("URL") or "").strip():
+                command_input["URL"] = final_url
+
+            if not str(command_input.get("method") or "").strip():
+                command_input["method"] = str(final_method).strip().upper() or "GET"
+
+            if not str(command_input.get("HTTP_Method") or "").strip():
+                command_input["HTTP_Method"] = str(final_method).strip().upper() or "GET"
 
     except Exception as _e:
-        # SAFE GUARD → ne jamais casser le flow
-        print("[SAFE_PATCH][http_exec_payload_injection] error:", repr(_e))
+        print("[SAFE_PATCH][deep_payload_injection] error:", repr(_e))
+
+    command_input = _normalize_keys_deep(command_input)
+    command_input = _unwrap_command_payload(command_input)
+    command_input = _normalize_flow_keys(command_input)
+
+    if mapped_capability == "http_exec":
+        command_input = _normalize_http_exec_input(command_input)
 
     # ------------------------------------------------------------
     # EXISTING LOGIC (suite)
