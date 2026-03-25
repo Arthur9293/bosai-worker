@@ -36,11 +36,12 @@ def _to_bool(value: Any, default: bool = False) -> bool:
         return default
     if isinstance(value, (int, float)):
         return bool(value)
+
     text = str(value).strip().lower()
     if text in {"1", "true", "yes", "y", "on"}:
         return True
     if text in {"0", "false", "no", "n", "off"}:
-            return False
+        return False
     return default
 
 
@@ -85,6 +86,7 @@ def _normalize_method(value: Any) -> str:
     method = _safe_str(value).strip().upper()
     if not method:
         return "GET"
+
     allowed = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
     return method if method in allowed else "GET"
 
@@ -106,27 +108,15 @@ def _coerce_payload(payload: Optional[Dict[str, Any]] = None, **kwargs: Any) -> 
 
 def _extract_flow_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
     flow_id = _safe_str(
-        _first_non_empty(
-            payload,
-            ["flow_id", "flowid", "Flow_ID", "FlowId"],
-            "",
-        )
+        _first_non_empty(payload, ["flow_id", "flowid", "Flow_ID", "FlowId"], "")
     ).strip()
 
     root_event_id = _safe_str(
-        _first_non_empty(
-            payload,
-            ["root_event_id", "rooteventid", "rootEventId", "event_id"],
-            "",
-        )
+        _first_non_empty(payload, ["root_event_id", "rooteventid", "rootEventId", "event_id"], "")
     ).strip()
 
     parent_command_id = _safe_str(
-        _first_non_empty(
-            payload,
-            ["parent_command_id", "parentcommandid", "command_id", "commandid"],
-            "",
-        )
+        _first_non_empty(payload, ["parent_command_id", "parentcommandid", "command_id", "commandid"], "")
     ).strip()
 
     return {
@@ -137,10 +127,7 @@ def _extract_flow_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _extract_retry_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
-    retry_count = _to_int(
-        _first_non_empty(payload, ["retry_count", "retrycount"], 0),
-        0,
-    )
+    retry_count = _to_int(_first_non_empty(payload, ["retry_count", "retrycount"], 0), 0)
     retry_max = _to_int(
         _first_non_empty(payload, ["retry_max", "retrymax"], DEFAULT_RETRY_MAX),
         DEFAULT_RETRY_MAX,
@@ -153,10 +140,7 @@ def _extract_retry_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
         ),
         DEFAULT_RETRY_DELAY_SECONDS,
     )
-    step_index = _to_int(
-        _first_non_empty(payload, ["step_index", "stepindex"], 0),
-        0,
-    )
+    step_index = _to_int(_first_non_empty(payload, ["step_index", "stepindex"], 0), 0)
     max_depth = _to_int(
         _first_non_empty(payload, ["max_depth", "maxdepth"], DEFAULT_MAX_DEPTH),
         DEFAULT_MAX_DEPTH,
@@ -181,11 +165,7 @@ def _extract_execution_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
         300,
     )
 
-    dry_run = _to_bool(
-        _first_non_empty(payload, ["dry_run", "dryrun"], False),
-        False,
-    )
-
+    dry_run = _to_bool(_first_non_empty(payload, ["dry_run", "dryrun"], False), False)
     allow_redirects = _to_bool(
         _first_non_empty(payload, ["allow_redirects", "allowredirects"], False),
         False,
@@ -231,9 +211,7 @@ def _extract_http_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         _first_non_empty(payload, ["headers", "HTTP_Headers_JSON", "http_headers_json"], {})
     )
 
-    params = _safe_dict(
-        _first_non_empty(payload, ["params"], {})
-    )
+    params = _safe_dict(_first_non_empty(payload, ["params"], {}))
 
     return {
         "url": url,
@@ -363,6 +341,7 @@ def _make_retry_command(
             "request_error": request_error,
         },
     }
+
 
 def _safe_response_preview(response: Optional[requests.Response]) -> Dict[str, Any]:
     if response is None:
@@ -583,8 +562,15 @@ def capability_http_exec(payload: Optional[Dict[str, Any]] = None, **kwargs: Any
             next_commands.append(
                 _make_retry_command(
                     payload,
-                    reason=request_error or f"http_status_{status_code}",
-                    delay_seconds=retry_delay_seconds,
+                    clean_input=clean_input,
+                    flow_meta=flow_meta,
+                    retry_count=retry_count,
+                    retry_max=retry_max,
+                    retry_delay_seconds=retry_delay_seconds,
+                    step_index=step_index,
+                    max_depth=max_depth,
+                    status_code=status_code,
+                    request_error=request_error,
                 )
             )
 
