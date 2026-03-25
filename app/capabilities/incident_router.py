@@ -34,6 +34,104 @@ def _pick(payload: Dict[str, Any], *keys: str, default: Any = None) -> Any:
     return default
 
 
+def _normalize_http_status(payload: Dict[str, Any]) -> Optional[int]:
+    http_status = _to_int(
+        _pick(
+            payload,
+            "http_status",
+            "httpstatus",
+            "status_code",
+            "statuscode",
+            "HTTP_Status",
+        )
+    )
+    if http_status is not None:
+        return http_status
+
+    response_obj = payload.get("response")
+    if isinstance(response_obj, dict):
+        return _to_int(
+            response_obj.get("status_code")
+            or response_obj.get("statuscode")
+        )
+
+    return None
+
+
+def _build_clean_retry_input(
+    *,
+    original_input: Dict[str, Any],
+    failed_url: str,
+    failed_method: str,
+    flow_id: str,
+    root_event_id: str,
+    workspace_id: str,
+    retry_count: int,
+    retry_max: int,
+    http_status: Optional[int],
+    error: str,
+    reason: str,
+) -> Dict[str, Any]:
+    """
+    SAFE PATCH:
+    Rebuild a clean http_exec input.
+    We do NOT propagate event-style envelopes such as:
+    - event_type
+    - payload
+    This avoids contaminating spawned http_exec commands.
+    """
+    retry_input: Dict[str, Any] = {}
+
+    if isinstance(original_input, dict):
+        headers = original_input.get("headers")
+        if isinstance(headers, dict) and headers:
+            retry_input["headers"] = headers
+
+        timeout_seconds = original_input.get("timeout_seconds")
+        if timeout_seconds not in (None, ""):
+            retry_input["timeout_seconds"] = timeout_seconds
+
+        body = original_input.get("body")
+        if body is not None:
+            retry_input["body"] = body
+
+        json_body = original_input.get("json")
+        if json_body is not None:
+            retry_input["json"] = json_body
+
+        params = original_input.get("params")
+        if isinstance(params, dict) and params:
+            retry_input["params"] = params
+
+    # Champs réseau explicites et plats
+    retry_input["url"] = failed_url
+    retry_input["http_target"] = failed_url
+    retry_input["URL"] = failed_url
+    retry_input["method"] = failed_method or "GET"
+    retry_input["HTTP_Method"] = failed_method or "GET"
+
+    # Contexte BOSAI
+    retry_input["flow_id"] = flow_id
+    retry_input["root_event_id"] = root_event_id
+    retry_input["workspace_id"] = workspace_id
+
+    # Contrôle d'exécution
+    retry_input["step_index"] = 0
+    retry_input["retry_count"] = retry_count + 1
+    retry_input["retry_max"] = retry_max
+
+    if http_status is not None:
+        retry_input["http_status"] = http_status
+
+    if error:
+        retry_input["error"] = error
+
+    if reason:
+        retry_input["retry_reason"] = reason
+
+    return retry_input
+
+
 def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "") -> Dict[str, Any]:
     goal = str(
         _pick(
@@ -67,23 +165,7 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
         ) or "unknown"
     ).strip()
 
-    http_status = _to_int(
-        _pick(
-            payload,
-            "http_status",
-            "httpstatus",
-            "status_code",
-            "statuscode",
-            "HTTP_Status",
-        )
-    )
-    if http_status is None:
-        response_obj = payload.get("response")
-        if isinstance(response_obj, dict):
-            http_status = _to_int(
-                response_obj.get("status_code")
-                or response_obj.get("statuscode")
-            )
+    http_status = _normalize_http_status(payload)
 
     retry_count = _to_int(
         _pick(payload, "retry_count", "retrycount", "Retry_Count")
@@ -142,6 +224,7 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
             "failed_method",
             "failedmethod",
             "method",
+            "HTTP_Method",
             default="GET",
         ) or "GET"
     ).strip().upper()
@@ -181,32 +264,19 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
     next_commands = []
 
     if decision == "retry":
-        retry_input = dict(original_input) if isinstance(original_input, dict) else {}
-
-        if not retry_input.get("url"):
-            retry_input["url"] = failed_url
-
-        if not retry_input.get("http_target"):
-            retry_input["http_target"] = failed_url
-
-        if not retry_input.get("method"):
-            retry_input["method"] = failed_method
-
-        retry_input.setdefault("flow_id", flow_id)
-        retry_input.setdefault("root_event_id", root_event_id)
-        retry_input.setdefault("workspace_id", workspace_id)
-
-        retry_input["retry_count"] = retry_count + 1
-        retry_input["retry_max"] = retry_max
-
-        if http_status is not None and retry_input.get("http_status") is None:
-            retry_input["http_status"] = http_status
-
-        if error and not retry_input.get("error"):
-            retry_input["error"] = error
-
-        if reason and not retry_input.get("retry_reason"):
-            retry_input["retry_reason"] = reason
+        retry_input = _build_clean_retry_input(
+            original_input=original_input,
+            failed_url=failed_url,
+            failed_method=failed_method,
+            flow_id=flow_id,
+            root_event_id=root_event_id,
+            workspace_id=workspace_id,
+            retry_count=retry_count,
+            retry_max=retry_max,
+            http_status=http_status,
+            error=error,
+            reason=final_reason,
+        )
 
         next_commands.append(
             {
