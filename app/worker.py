@@ -4980,7 +4980,6 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
         incident_result = capability_incident_router_run(incident_input, run_record_id)
 
-        # 1) incident_router already produced commands -> spawn them
         if isinstance(incident_result, dict) and isinstance(incident_result.get("next_commands"), list) and incident_result.get("next_commands"):
             _spawn_commands(incident_result.get("next_commands", []), "incident-router")
 
@@ -4991,7 +4990,6 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             result["incident_result"] = incident_result
             return result
 
-        # 2) retry path if incident router says retry
         if incident_result.get("decision") == "retry":
             retry_input = {
                 "flow_id": flow_id,
@@ -5028,7 +5026,6 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             result["retry_result"] = retry_result
             return result
 
-        # 3) fallback path -> decision_engine
         decision_input = {
             "flow_id": flow_id,
             "root_event_id": root_event_id,
@@ -5135,6 +5132,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                         "root_event_id": root_event_id,
                         "step_index": step_index + 1,
                         "goal": "escalation_sent",
+                        "workspace_id": workspace_id,
                     },
                     "terminal": False,
                 }
@@ -5150,6 +5148,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                         "root_event_id": root_event_id,
                         "step_index": step_index + 1,
                         "goal": "complete_flow",
+                        "workspace_id": workspace_id,
                     },
                     "terminal": False,
                 }
@@ -5158,13 +5157,17 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         else:
             next_commands = [
                 {
-                    "capability": "decision_demo",
+                    "capability": "decision_router",
                     "priority": 1,
                     "input": {
                         "flow_id": flow_id,
                         "root_event_id": root_event_id,
                         "step_index": step_index + 1,
                         "goal": "continue_flow",
+                        "workspace_id": workspace_id,
+                        "http_status": status_code,
+                        "last_capability": "http_exec",
+                        "last_url": payload.get("url") or payload.get("http_target"),
                     },
                     "terminal": False,
                 }
