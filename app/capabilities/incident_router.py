@@ -58,9 +58,78 @@ def _normalize_http_status(payload: Dict[str, Any]) -> Optional[int]:
     return None
 
 
+def _extract_original_request(payload: Dict[str, Any]) -> Dict[str, Any]:
+    request_obj = payload.get("request")
+    if isinstance(request_obj, dict):
+        return request_obj
+    return {}
+
+
+def _normalize_failed_url(
+    payload: Dict[str, Any],
+    original_input: Dict[str, Any],
+    original_request: Dict[str, Any],
+) -> str:
+    return str(
+        _pick(
+            payload,
+            "failed_url",
+            "failedurl",
+            "url",
+            "http_target",
+            "URL",
+            default=(
+                original_input.get("url")
+                or original_input.get("http_target")
+                or original_input.get("URL")
+                or original_request.get("url")
+                or original_request.get("http_target")
+                or original_request.get("URL")
+                or ""
+            ),
+        ) or ""
+    ).strip()
+
+
+def _normalize_failed_method(
+    payload: Dict[str, Any],
+    original_input: Dict[str, Any],
+    original_request: Dict[str, Any],
+) -> str:
+    return str(
+        _pick(
+            payload,
+            "failed_method",
+            "failedmethod",
+            "method",
+            "HTTP_Method",
+            default=(
+                original_input.get("method")
+                or original_input.get("HTTP_Method")
+                or original_request.get("method")
+                or original_request.get("HTTP_Method")
+                or "GET"
+            ),
+        ) or "GET"
+    ).strip().upper()
+
+
+def _effective_flow_id(flow_id: str, root_event_id: str, run_record_id: str) -> str:
+    return (flow_id or root_event_id or run_record_id or "").strip()
+
+
+def _effective_root_event_id(flow_id: str, root_event_id: str, run_record_id: str) -> str:
+    return (root_event_id or flow_id or run_record_id or "").strip()
+
+
+def _effective_workspace_id(workspace_id: str) -> str:
+    return (workspace_id or "production").strip()
+
+
 def _build_clean_retry_input(
     *,
     original_input: Dict[str, Any],
+    original_request: Dict[str, Any],
     failed_url: str,
     failed_method: str,
     flow_id: str,
@@ -103,6 +172,21 @@ def _build_clean_retry_input(
         if isinstance(params, dict) and params:
             retry_input["params"] = params
 
+    if isinstance(original_request, dict):
+        if "timeout_seconds" not in retry_input:
+            timeout_seconds = original_request.get("timeout_seconds")
+            if timeout_seconds not in (None, ""):
+                retry_input["timeout_seconds"] = timeout_seconds
+
+        if "headers" not in retry_input:
+            headers = original_request.get("headers")
+            if isinstance(headers, dict) and headers:
+                retry_input["headers"] = headers
+
+    effective_flow = _effective_flow_id(flow_id, root_event_id, "")
+    effective_root_event = _effective_root_event_id(flow_id, root_event_id, "")
+    effective_workspace = _effective_workspace_id(workspace_id)
+
     # Champs réseau explicites et plats
     retry_input["url"] = failed_url
     retry_input["http_target"] = failed_url
@@ -111,9 +195,9 @@ def _build_clean_retry_input(
     retry_input["HTTP_Method"] = failed_method or "GET"
 
     # Contexte BOSAI
-    retry_input["flow_id"] = flow_id
-    retry_input["root_event_id"] = root_event_id
-    retry_input["workspace_id"] = workspace_id
+    retry_input["flow_id"] = effective_flow
+    retry_input["root_event_id"] = effective_root_event
+    retry_input["workspace_id"] = effective_workspace
 
     # Contrôle d'exécution
     retry_input["step_index"] = 0
@@ -205,29 +289,14 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
         if isinstance(payload.get("original_input"), dict)
         else {}
     )
+    original_request = _extract_original_request(payload)
 
-    failed_url = str(
-        _pick(
-            payload,
-            "failed_url",
-            "failedurl",
-            "url",
-            "http_target",
-            "URL",
-            default="",
-        ) or ""
-    ).strip()
+    failed_url = _normalize_failed_url(payload, original_input, original_request)
+    failed_method = _normalize_failed_method(payload, original_input, original_request)
 
-    failed_method = str(
-        _pick(
-            payload,
-            "failed_method",
-            "failedmethod",
-            "method",
-            "HTTP_Method",
-            default="GET",
-        ) or "GET"
-    ).strip().upper()
+    effective_flow = _effective_flow_id(flow_id, root_event_id, run_record_id)
+    effective_root_event = _effective_root_event_id(flow_id, root_event_id, run_record_id)
+    effective_workspace = _effective_workspace_id(workspace_id)
 
     decision = "log_only"
     final_reason = reason or "default"
@@ -266,11 +335,12 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
     if decision == "retry":
         retry_input = _build_clean_retry_input(
             original_input=original_input,
+            original_request=original_request,
             failed_url=failed_url,
             failed_method=failed_method,
-            flow_id=flow_id,
-            root_event_id=root_event_id,
-            workspace_id=workspace_id,
+            flow_id=effective_flow,
+            root_event_id=effective_root_event,
+            workspace_id=effective_workspace,
             retry_count=retry_count,
             retry_max=retry_max,
             http_status=http_status,
@@ -291,8 +361,8 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
             {
                 "capability": "internal_escalate",
                 "input": {
-                    "flow_id": flow_id,
-                    "root_event_id": root_event_id,
+                    "flow_id": effective_flow,
+                    "root_event_id": effective_root_event,
                     "goal": goal,
                     "reason": final_reason,
                     "error": error,
@@ -302,7 +372,7 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
                     "original_capability": original_capability,
                     "failed_url": failed_url,
                     "failed_method": failed_method,
-                    "workspace_id": workspace_id,
+                    "workspace_id": effective_workspace,
                     "retry_count": retry_count,
                     "retry_max": retry_max,
                     "run_record_id": run_record_id,
@@ -322,9 +392,9 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
         "http_status": http_status,
         "retry_count": retry_count,
         "retry_max": retry_max,
-        "flow_id": flow_id,
-        "root_event_id": root_event_id,
-        "workspace_id": workspace_id,
+        "flow_id": effective_flow,
+        "root_event_id": effective_root_event,
+        "workspace_id": effective_workspace,
         "run_record_id": run_record_id,
         "original_capability": original_capability,
         "failed_url": failed_url,
