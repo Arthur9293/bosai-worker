@@ -33,6 +33,10 @@ def _pick(payload: Dict[str, Any], *keys: str, default: Any = None) -> Any:
     return default
 
 
+def _safe(value: str, fallback: str) -> str:
+    return (value or fallback or "").strip()
+
+
 # =========================
 # Normalization
 # =========================
@@ -88,10 +92,6 @@ def _normalize_failed_method(payload, original_input, original_request) -> str:
     ).upper().strip()
 
 
-def _safe(value: str, fallback: str) -> str:
-    return (value or fallback or "").strip()
-
-
 # =========================
 # CLEAN RETRY INPUT
 # =========================
@@ -110,6 +110,7 @@ def _build_clean_retry_input(
     http_status: Optional[int],
     error: str,
     reason: str,
+    max_depth: int,
 ) -> Dict[str, Any]:
 
     retry_input: Dict[str, Any] = {}
@@ -128,7 +129,7 @@ def _build_clean_retry_input(
     retry_input["url"] = failed_url
     retry_input["method"] = failed_method
 
-    # BOSAI context (CRITICAL)
+    # BOSAI context
     retry_input["flow_id"] = flow_id
     retry_input["root_event_id"] = root_event_id
     retry_input["workspace_id"] = workspace_id
@@ -137,6 +138,12 @@ def _build_clean_retry_input(
     retry_input["retry_count"] = retry_count + 1
     retry_input["retry_max"] = retry_max
     retry_input["step_index"] = 0
+
+    # Anti-chaos
+    retry_input["max_depth"] = max_depth
+
+    # Simple backoff
+    retry_input["retry_delay"] = min(2 ** retry_count, 30)
 
     # Diagnostics
     if http_status is not None:
@@ -163,6 +170,7 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
 
     retry_count = _to_int(_pick(payload, "retry_count")) or 0
     retry_max = _to_int(_pick(payload, "retry_max")) or 0
+    max_depth = _to_int(_pick(payload, "max_depth")) or 10
 
     flow_id = _safe(_pick(payload, "flow_id"), run_record_id)
     root_event_id = _safe(_pick(payload, "root_event_id"), flow_id)
@@ -180,7 +188,7 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
     failed_method = _normalize_failed_method(payload, original_input, original_request)
 
     # =========================
-    # DECISION ENGINE (ANTI-LOOP SAFE)
+    # DECISION ENGINE (ANTI-CHAOS)
     # =========================
 
     decision = "log_only"
@@ -190,6 +198,11 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
     if retry_max > 0 and retry_count >= retry_max:
         decision = "escalate"
         final_reason = "retry_exhausted"
+
+    # HARD STOP anti-depth
+    elif retry_count >= max_depth:
+        decision = "escalate"
+        final_reason = "max_depth_reached"
 
     elif http_status is not None:
         if 500 <= http_status <= 599:
@@ -236,6 +249,7 @@ def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "")
             http_status=http_status,
             error=error,
             reason=final_reason,
+            max_depth=max_depth,
         )
 
         next_commands.append({
