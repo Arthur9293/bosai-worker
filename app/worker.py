@@ -1860,9 +1860,11 @@ def capability_decision_router(req: RunRequest, run_record_id: str) -> Dict[str,
                     "method": "GET",
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
+                    "workspace_id": workspace_id,
                     "step_index": step_index + 1,
                     "goal": "first_probe",
                 },
+                "terminal": False,
             }
         ]
         terminal = False
@@ -1879,9 +1881,11 @@ def capability_decision_router(req: RunRequest, run_record_id: str) -> Dict[str,
                     "method": "GET",
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
+                    "workspace_id": workspace_id,
                     "step_index": step_index + 1,
                     "goal": "second_probe",
                 },
+                "terminal": False,
             }
         ]
         terminal = False
@@ -1891,14 +1895,16 @@ def capability_decision_router(req: RunRequest, run_record_id: str) -> Dict[str,
         reason = "enough_http_exec_done"
         next_commands = [
             {
-                "capability": "complete_flow",
+                "capability": "complete_flow_demo",
                 "priority": 1,
                 "input": {
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
+                    "workspace_id": workspace_id,
                     "step_index": step_index + 1,
-                    "goal": "finish_flow",
+                    "goal": "complete_flow",
                 },
+                "terminal": False,
             }
         ]
         terminal = False
