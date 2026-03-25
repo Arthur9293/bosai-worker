@@ -762,16 +762,11 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
 
             obj: Any = None
 
-            # 1) parse normal
             try:
                 obj = json.loads(raw_text)
-
-            # 2) fallback guillemets échappés
             except Exception:
                 try:
                     obj = json.loads(raw_text.replace('\\"', '"'))
-
-                # 3) fallback unicode_escape
                 except Exception:
                     try:
                         fixed = bytes(raw_text, "utf-8").decode("unicode_escape")
@@ -786,11 +781,8 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
                         )
                         continue
 
-            # Cas dict direct
             if isinstance(obj, dict):
                 parsed = obj
-
-            # Cas JSON double-encodé : 1er loads -> string, 2e loads -> dict
             elif isinstance(obj, str):
                 inner = obj.strip()
                 if inner:
@@ -811,8 +803,9 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(parsed, dict) or not parsed:
             continue
 
-        # si le JSON est une enveloppe {"capability": "...", "input": {...}}
-        # on extrait seulement le bloc input
+        parsed = _normalize_keys_deep(parsed)
+        parsed = _unwrap_command_payload(parsed)
+
         if isinstance(parsed.get("input"), dict) and parsed.get("input"):
             base = parsed.get("input") or {}
         else:
@@ -823,6 +816,9 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
 
     if not isinstance(base, dict):
         base = {}
+
+    base = _normalize_keys_deep(base)
+    base = _unwrap_command_payload(base)
 
     field_alias_map = {
         "url": ("url", "URL", "http_target", "Http_Target"),
@@ -849,6 +845,11 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         "original_capability": ("original_capability", "originalcapability", "source_capability"),
         "workspace_id": ("workspace_id", "workspaceid", "Workspace_ID"),
         "run_record_id": ("run_record_id", "runrecordid", "Run_Record_ID"),
+        "target_capability": ("target_capability", "targetcapability"),
+        "original_input": ("original_input", "originalinput"),
+        "request_error": ("request_error", "requesterror"),
+        "error_type": ("error_type", "errortype"),
+        "parent_command_id": ("parent_command_id", "parentcommandid"),
     }
 
     for target_key, aliases in field_alias_map.items():
@@ -861,7 +862,6 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
                 base[target_key] = value
                 break
 
-    # Si response existe en string JSON, on essaie de la parser
     if "response" in base and isinstance(base.get("response"), str):
         response_obj = None
         try:
@@ -874,6 +874,8 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(response_obj, dict):
             base["response"] = response_obj
 
+    base = _normalize_keys_deep(base)
+    base = _unwrap_command_payload(base)
     base = _normalize_flow_keys(base)
 
     if parse_errors:
@@ -930,6 +932,60 @@ def verify_request_auth_or_401(raw_body: bytes, headers: Dict[str, str]) -> None
         return
 
     raise HTTPException(status_code=401, detail="Unauthorized (missing/invalid scheduler secret or run signature)")
+
+def _normalize_keys_deep(value: Any) -> Any:
+    mapping = {
+        "commandinput": "command_input",
+        "targetcapability": "target_capability",
+        "originalinput": "original_input",
+        "retrycount": "retry_count",
+        "retrymax": "retry_max",
+        "stepindex": "step_index",
+        "maxdepth": "max_depth",
+        "workspaceid": "workspace_id",
+        "rooteventid": "root_event_id",
+        "flowid": "flow_id",
+        "incidentrecordid": "incident_record_id",
+        "requesterror": "request_error",
+        "httptarget": "http_target",
+        "httpstatus": "http_status",
+        "retryreason": "retry_reason",
+        "errortype": "error_type",
+        "parentcommandid": "parent_command_id",
+        "statuscode": "status_code",
+        "failedurl": "failed_url",
+        "failedmethod": "failed_method",
+        "failedgoal": "failed_goal",
+        "originalcapability": "original_capability",
+    }
+
+    if isinstance(value, dict):
+        normalized: Dict[str, Any] = {}
+        for k, v in value.items():
+            key = mapping.get(str(k), str(k))
+            normalized[key] = _normalize_keys_deep(v)
+        return normalized
+
+    if isinstance(value, list):
+        return [_normalize_keys_deep(item) for item in value]
+
+    return value
+
+
+def _unwrap_command_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+
+    for nested_key in ("command_input", "commandinput", "input"):
+        nested = payload.get(nested_key)
+        if isinstance(nested, dict):
+            merged = dict(nested)
+            for k, v in payload.items():
+                if k != nested_key and k not in merged:
+                    merged[k] = v
+            return merged
+
+    return payload
 
 
 # ============================================================
@@ -4053,9 +4109,14 @@ def _event_mark_ignored(event_record_id: str, message: str) -> Dict[str, Any]:
                 "Processed_At": utc_now_iso(),
                 "Error_Message": message,
             },
+            {
+                "Status_select": "Ignored",
+            },
+            {
+                "Status": "Ignored",
+            },
         ],
     )
-
 
 def _event_mark_error(event_record_id: str, message: str) -> Dict[str, Any]:
     return _airtable_update_best_effort(
@@ -4104,7 +4165,9 @@ def _build_command_fields_candidates(
     idempotency_key: Optional[str] = None,
     priority: int = 1,
 ) -> List[Dict[str, Any]]:
-    command_input = dict(command_input or {})
+    command_input = _normalize_keys_deep(dict(command_input or {}))
+    command_input = _unwrap_command_payload(command_input)
+    command_input = _normalize_flow_keys(command_input)
 
     idem = str(
         idempotency_key
@@ -4314,15 +4377,41 @@ def _create_command_from_next_command(
     if not isinstance(next_cmd, dict):
         return {"ok": False, "error": "invalid_next_command"}
 
-    capability = str(next_cmd.get("capability") or "").strip()
+    next_cmd = _normalize_keys_deep(next_cmd)
+    next_cmd = _unwrap_command_payload(next_cmd)
+
+    capability = str(
+        next_cmd.get("capability")
+        or next_cmd.get("target_capability")
+        or ""
+    ).strip()
+
+    if capability == "httpexec":
+        capability = "http_exec"
+    elif capability == "retryrouter":
+        capability = "retry_router"
+    elif capability == "incidentrouter":
+        capability = "incident_router"
+    elif capability == "decisionrouter":
+        capability = "decision_router"
+
     if not capability:
         return {"ok": False, "error": "missing_capability"}
 
-    raw_input = next_cmd.get("input") or {}
+    raw_input = (
+        next_cmd.get("command_input")
+        or next_cmd.get("input")
+        or {}
+    )
+
     if not isinstance(raw_input, dict):
         return {"ok": False, "error": "invalid_input"}
 
     command_input = dict(raw_input)
+    command_input = _normalize_keys_deep(command_input)
+    command_input = _unwrap_command_payload(command_input)
+    command_input = _normalize_flow_keys(command_input)
+
     priority = int(next_cmd.get("priority") or 1)
 
     flow_id = str(command_input.get("flow_id") or "").strip()
@@ -4336,49 +4425,34 @@ def _create_command_from_next_command(
         or ""
     ).strip() or None
 
-    # ------------------------------------------------------------
-    # SAFE PATCH — ensure flow context propagation
-    # Keeps spawned commands attached to a stable parent context.
-    # ------------------------------------------------------------
-    try:
-        if not flow_id:
-            flow_id = parent_run_id
-            command_input["flow_id"] = flow_id
+    if not flow_id:
+        flow_id = parent_run_id
+        command_input["flow_id"] = flow_id
 
-        if not root_event_id:
-            root_event_id = parent_run_id
-            command_input["root_event_id"] = root_event_id
+    if not root_event_id:
+        root_event_id = parent_run_id
+        command_input["root_event_id"] = root_event_id
 
-    except Exception as _e:
-        print("[SAFE_PATCH][flow_propagation] error:", repr(_e))
+    if effective_workspace_id and not str(command_input.get("workspace_id") or "").strip():
+        command_input["workspace_id"] = effective_workspace_id
 
-    if capability in (
-        "decision_demo",
-        "decision_router",
-        "incident_router",
-        "retry_router",
-        "sla_router",
-        "complete_flow",
-        "complete_flow_demo",
-    ):
-        if not flow_id:
-            flow_id = parent_run_id
-            command_input["flow_id"] = flow_id
-        if not root_event_id:
-            root_event_id = parent_run_id
-            command_input["root_event_id"] = root_event_id
+    if capability == "http_exec":
+        command_input = _normalize_http_exec_input(command_input)
 
-    # ------------------------------------------------------------
-    # IMPORTANT:
-    # For spawned retries, do not blindly reuse inherited
-    # idempotency_key from previous command_input unless explicitly
-    # forced on next_cmd.
-    # ------------------------------------------------------------
+        resolved_url = _resolve_http_exec_url_from_command_input(command_input)
+        if not resolved_url:
+            return {
+                "ok": False,
+                "error": "spawn_http_exec_missing_url",
+                "capability": capability,
+                "parent_run_id": parent_run_id,
+                "command_input": command_input,
+            }
+
     inherited_input_idem = str(command_input.get("idempotency_key") or "").strip()
     explicit_next_cmd_idem = str(next_cmd.get("idempotency_key") or "").strip()
 
     if capability == "http_exec":
-        # retry / spawned http_exec must get a fresh key per attempt
         inherited_input_idem = ""
 
     effective_idempotency_key = (
@@ -6429,11 +6503,14 @@ async def run(request: Request, response: Response) -> RunResponse:
 
             for cmd in next_cmds:
                 try:
+                    cmd = _normalize_keys_deep(cmd)
+                    cmd = _unwrap_command_payload(cmd)
+
                     spawn_res = _create_command_from_next_command(
                         next_cmd=cmd,
                         parent_run_id=run_record_id,
-                        workspace_id=getattr(req, "workspace_id", None),
-                    )
+                        workspace_id=(req.input or {}).get("workspace_id"),
+                    ) 
                     spawned_results.append(spawn_res)
 
                     print(
