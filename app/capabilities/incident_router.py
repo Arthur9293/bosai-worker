@@ -1,436 +1,286 @@
 # app/capabilities/incident_router.py
+
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+import time
+from copy import deepcopy
+from typing import Any, Dict, List, Optional
+
+DEFAULT_MAX_DEPTH = 8
 
 
-# ============================================================
-# Constants
-# ============================================================
-
-DEFAULT_WORKSPACE_ID = "production"
-DEFAULT_ORIGINAL_CAPABILITY = "http_exec"
-DEFAULT_MAX_DEPTH = 10
+def _now_ts() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-# ============================================================
-# Helpers
-# ============================================================
-
-def _to_payload(value: Any) -> Dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-
-    input_attr = getattr(value, "input", None)
-    if isinstance(input_attr, dict):
-        return input_attr
-
-    return {}
-
-
-def _to_int(value: Any) -> Optional[int]:
+def _to_int(value: Any, default: int = 0) -> int:
     try:
-        if value in (None, ""):
-            return None
+        if value is None or value == "":
+            return default
         return int(value)
     except Exception:
-        return None
+        return default
 
 
-def _pick(payload: Dict[str, Any], *keys: str, default: Any = None) -> Any:
-    for key in keys:
-        if key in payload and payload[key] is not None:
-            return payload[key]
+def _to_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
     return default
 
 
-def _safe(value: Any, fallback: str = "") -> str:
+def _to_str(value: Any, default: str = "") -> str:
     if value is None:
-        return fallback.strip()
-    return str(value).strip()
+        return default
+    try:
+        return str(value)
+    except Exception:
+        return default
 
 
-# ============================================================
-# Normalization
-# ============================================================
+def _safe_dict(value: Any) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
 
-def _normalize_http_status(payload: Dict[str, Any]) -> Optional[int]:
-    http_status = _to_int(
-        _pick(payload, "http_status", "status_code", "HTTP_Status")
-    )
-    if http_status is not None:
-        return http_status
 
-    response = payload.get("response")
-    if isinstance(response, dict):
-        return _to_int(response.get("status_code"))
+def _safe_list(value: Any) -> List[Any]:
+    return value if isinstance(value, list) else []
 
-    return None
 
+def _extract_input(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Tolère plusieurs formes d'entrée :
+    - payload direct
+    - payload["input"]
+    - payload["command_input"]
+    - payload["incident"]
+    """
+    if not isinstance(payload, dict):
+        return {}
 
-def _extract_original_input(payload: Dict[str, Any]) -> Dict[str, Any]:
-    original_input = payload.get("original_input")
-    if isinstance(original_input, dict):
-        return original_input
-    return {}
+    for key in ("input", "command_input", "incident"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            merged = dict(payload)
+            merged.update(nested)
+            return merged
 
+    return dict(payload)
 
-def _extract_original_request(payload: Dict[str, Any]) -> Dict[str, Any]:
-    request_obj = payload.get("request")
-    if isinstance(request_obj, dict):
-        return request_obj
-    return {}
 
-
-def _normalize_failed_url(
-    payload: Dict[str, Any],
-    original_input: Dict[str, Any],
-    original_request: Dict[str, Any],
-) -> str:
-    return _safe(
-        _pick(
-            payload,
-            "failed_url",
-            "url",
-            "http_target",
-            default=(
-                original_input.get("url")
-                or original_input.get("http_target")
-                or original_request.get("url")
-                or original_request.get("http_target")
-                or ""
-            ),
-        ),
-        "",
-    )
-
-
-def _normalize_failed_method(
-    payload: Dict[str, Any],
-    original_input: Dict[str, Any],
-    original_request: Dict[str, Any],
-) -> str:
-    return _safe(
-        _pick(
-            payload,
-            "failed_method",
-            "method",
-            "HTTP_Method",
-            default=(
-                original_input.get("method")
-                or original_input.get("HTTP_Method")
-                or original_request.get("method")
-                or original_request.get("HTTP_Method")
-                or "GET"
-            ),
-        ),
-        "GET",
-    ).upper() or "GET"
-
-
-def _effective_flow_id(flow_id: str, root_event_id: str, run_record_id: str) -> str:
-    return (flow_id or root_event_id or run_record_id or "").strip()
-
-
-def _effective_root_event_id(flow_id: str, root_event_id: str, run_record_id: str) -> str:
-    return (root_event_id or flow_id or run_record_id or "").strip()
-
-
-def _effective_workspace_id(workspace_id: str) -> str:
-    return (workspace_id or DEFAULT_WORKSPACE_ID).strip() or DEFAULT_WORKSPACE_ID
-
-
-# ============================================================
-# Error Intelligence V2
-# ============================================================
-
-def _classify_error(http_status: Optional[int], error_text: str) -> str:
-    error_lower = (error_text or "").lower()
-
-    if http_status is not None:
-        if http_status in (401, 403):
-            return "auth_error"
-        if http_status == 429:
-            return "rate_limit"
-        if 500 <= http_status <= 599:
-            return "http_5xx"
-        if 400 <= http_status <= 499:
-            return "http_4xx"
-
-    if "timeout" in error_lower:
-        return "network_timeout"
-
-    if (
-        "schema" in error_lower
-        or "field" in error_lower
-        or "json" in error_lower
-        or "decode" in error_lower
-        or "validation" in error_lower
-    ):
-        return "schema_error"
-
-    if "auth" in error_lower or "unauthorized" in error_lower or "forbidden" in error_lower:
-        return "auth_error"
-
-    return "unknown_error"
-
-
-def _risk_level_for(error_type: str) -> str:
-    if error_type in ("auth_error", "schema_error"):
-        return "critical"
-    if error_type in ("http_5xx", "rate_limit", "http_4xx"):
-        return "high"
-    if error_type == "network_timeout":
-        return "medium"
-    return "medium"
-
-
-def _compute_retry_delay_seconds(error_type: str, retry_count: int) -> int:
-    if error_type == "rate_limit":
-        schedule = {0: 60, 1: 120, 2: 300}
-        return schedule.get(retry_count, 300)
-
-    if error_type == "network_timeout":
-        schedule = {0: 15, 1: 30, 2: 60, 3: 120}
-        return schedule.get(retry_count, 120)
-
-    if error_type == "http_5xx":
-        schedule = {0: 10, 1: 20, 2: 40, 3: 80}
-        return schedule.get(retry_count, 80)
-
-    return min(2 ** retry_count, 30)
-
-
-# ============================================================
-# Retry Input Builder
-# ============================================================
-
-def _build_clean_retry_input(
-    *,
-    original_input: Dict[str, Any],
-    original_request: Dict[str, Any],
-    failed_url: str,
-    failed_method: str,
-    flow_id: str,
-    root_event_id: str,
-    workspace_id: str,
-    retry_count: int,
-    retry_max: int,
-    http_status: Optional[int],
-    error: str,
-    reason: str,
-    max_depth: int,
-    retry_delay_seconds: int,
-    error_type: str,
-) -> Dict[str, Any]:
-    retry_input: Dict[str, Any] = {}
-
-    # Safe carry-over
-    if isinstance(original_input, dict):
-        for key in ("headers", "params", "timeout_seconds", "body", "json"):
-            if key in original_input:
-                retry_input[key] = original_input[key]
-
-    if isinstance(original_request, dict):
-        if "headers" not in retry_input and "headers" in original_request:
-            retry_input["headers"] = original_request["headers"]
-
-        if "timeout_seconds" not in retry_input and "timeout_seconds" in original_request:
-            retry_input["timeout_seconds"] = original_request["timeout_seconds"]
-
-    # Core http_exec fields
-    retry_input["url"] = failed_url
-    retry_input["http_target"] = failed_url
-    retry_input["method"] = failed_method or "GET"
-
-    # BOSAI context
-    retry_input["flow_id"] = flow_id
-    retry_input["root_event_id"] = root_event_id
-    retry_input["workspace_id"] = workspace_id
-
-    # Execution control
-    retry_input["retry_count"] = retry_count + 1
-    retry_input["retry_max"] = retry_max
-    retry_input["step_index"] = 0
-    retry_input["max_depth"] = max_depth
-    retry_input["retry_delay_seconds"] = retry_delay_seconds
-
-    # Diagnostics
-    retry_input["error_type"] = error_type
-
-    if http_status is not None:
-        retry_input["http_status"] = http_status
-
-    if error:
-        retry_input["error"] = error
-
-    if reason:
-        retry_input["retry_reason"] = reason
-
-    return retry_input
-
-
-# ============================================================
-# Main Capability
-# ============================================================
-
-def capability_incident_router(payload: Dict[str, Any], run_record_id: str = "") -> Dict[str, Any]:
-    goal = _safe(_pick(payload, "goal", "failed_goal"), "")
-    error = _safe(_pick(payload, "error", "last_error"), "")
-    reason = _safe(_pick(payload, "reason", "retry_reason"), "unknown")
-
-    http_status = _normalize_http_status(payload)
-
-    retry_count = _to_int(_pick(payload, "retry_count")) or 0
-    retry_max = _to_int(_pick(payload, "retry_max")) or 0
-    max_depth = _to_int(_pick(payload, "max_depth")) or DEFAULT_MAX_DEPTH
-
-    raw_flow_id = _safe(_pick(payload, "flow_id"), "")
-    raw_root_event_id = _safe(_pick(payload, "root_event_id"), "")
-    raw_workspace_id = _safe(_pick(payload, "workspace_id"), DEFAULT_WORKSPACE_ID)
-
-    flow_id = _effective_flow_id(raw_flow_id, raw_root_event_id, run_record_id)
-    root_event_id = _effective_root_event_id(raw_flow_id, raw_root_event_id, run_record_id)
-    workspace_id = _effective_workspace_id(raw_workspace_id)
-
-    original_capability = _safe(
-        _pick(payload, "original_capability", "source_capability"),
-        DEFAULT_ORIGINAL_CAPABILITY,
-    ) or DEFAULT_ORIGINAL_CAPABILITY
-
-    original_input = _extract_original_input(payload)
-    original_request = _extract_original_request(payload)
-
-    failed_url = _normalize_failed_url(payload, original_input, original_request)
-    failed_method = _normalize_failed_method(payload, original_input, original_request)
-
-    error_type = _classify_error(http_status, error)
-    risk_level = _risk_level_for(error_type)
-    retry_delay_seconds = _compute_retry_delay_seconds(error_type, retry_count)
-
-    # =========================
-    # Decision Engine V2
-    # =========================
-
-    decision = "log_only"
-    final_reason = reason or "unknown"
-
-    # HARD STOP anti-loop
-    if retry_max > 0 and retry_count >= retry_max:
-        decision = "escalate"
-        final_reason = "retry_exhausted"
-
-    # HARD STOP anti-depth
-    elif retry_count >= max_depth:
-        decision = "escalate"
-        final_reason = "max_depth_reached"
-
-    # Smart routing by classified error
-    elif error_type == "http_5xx":
-        if retry_count < retry_max:
-            decision = "retry"
-            final_reason = "http_5xx"
-        else:
-            decision = "escalate"
-            final_reason = "http_5xx_exhausted"
-
-    elif error_type == "network_timeout":
-        if retry_count < retry_max:
-            decision = "retry"
-            final_reason = "timeout"
-        else:
-            decision = "escalate"
-            final_reason = "timeout_exhausted"
-
-    elif error_type == "rate_limit":
-        if retry_count < retry_max:
-            decision = "retry"
-            final_reason = "rate_limit"
-        else:
-            decision = "escalate"
-            final_reason = "rate_limit_exhausted"
-
-    elif error_type in ("auth_error", "schema_error", "http_4xx"):
-        decision = "escalate"
-        final_reason = error_type
-
-    elif error:
-        decision = "log_only"
-        final_reason = "unknown_error"
-
-    next_commands = []
-
-    if decision == "retry":
-        retry_input = _build_clean_retry_input(
-            original_input=original_input,
-            original_request=original_request,
-            failed_url=failed_url,
-            failed_method=failed_method,
-            flow_id=flow_id,
-            root_event_id=root_event_id,
-            workspace_id=workspace_id,
-            retry_count=retry_count,
-            retry_max=retry_max,
-            http_status=http_status,
-            error=error,
-            reason=final_reason,
-            max_depth=max_depth,
-            retry_delay_seconds=retry_delay_seconds,
-            error_type=error_type,
-        )
-
-        next_commands.append(
-            {
-                "capability": original_capability,
-                "input": retry_input,
-                "priority": 2,
-            }
-        )
-
-    elif decision == "escalate":
-        next_commands.append(
-            {
-                "capability": "internal_escalate",
-                "input": {
-                    "flow_id": flow_id,
-                    "root_event_id": root_event_id,
-                    "goal": goal,
-                    "reason": final_reason,
-                    "error": error,
-                    "error_type": error_type,
-                    "risk_level": risk_level,
-                    "http_status": http_status,
-                    "failed_url": failed_url,
-                    "failed_method": failed_method,
-                    "workspace_id": workspace_id,
-                    "retry_count": retry_count,
-                    "retry_max": retry_max,
-                    "run_record_id": run_record_id,
-                },
-                "priority": 1,
-            }
-        )
-
+def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "ok": True,
-        "capability": "incident_router",
-        "status": "incident_escalated" if decision == "escalate" else "incident_logged",
-        "decision": decision,
-        "reason": final_reason,
-        "error_type": error_type,
-        "risk_level": risk_level,
-        "retry_delay_seconds": retry_delay_seconds,
-        "retry_count": retry_count,
-        "retry_max": retry_max,
-        "max_depth": max_depth,
-        "flow_id": flow_id,
-        "root_event_id": root_event_id,
-        "workspace_id": workspace_id,
-        "next_commands": next_commands,
-        "terminal": False,
+        "flow_id": _to_str(payload.get("flow_id")),
+        "root_event_id": _to_str(payload.get("root_event_id")),
+        "parent_command_id": _to_str(payload.get("parent_command_id")),
+        "parent_capability": _to_str(payload.get("parent_capability")),
+        "step_index": _to_int(payload.get("step_index"), 0),
+        "retry_count": _to_int(payload.get("retry_count"), 0),
+        "depth": _to_int(payload.get("depth"), 0),
+        "workspace_id": _to_str(payload.get("workspace_id")),
+        "tenant_id": _to_str(payload.get("tenant_id")),
+        "app_name": _to_str(payload.get("app_name")),
+        "source": _to_str(payload.get("source")),
     }
 
 
-def run(req: Any = None, run_record_id: str = "") -> Dict[str, Any]:
-    payload = _to_payload(req)
-    return capability_incident_router(payload, run_record_id)
+def _normalize_incident(payload: Dict[str, Any]) -> Dict[str, Any]:
+    error_obj = _safe_dict(payload.get("error"))
+    http_meta = _safe_dict(payload.get("http"))
+    incident_meta = _safe_dict(payload.get("incident_meta"))
+    diagnostics = _safe_dict(payload.get("diagnostics"))
+    result_obj = _safe_dict(payload.get("result"))
+
+    http_status = (
+        payload.get("http_status")
+        if payload.get("http_status") is not None
+        else error_obj.get("http_status")
+    )
+    if http_status is None:
+        http_status = http_meta.get("status_code")
+    if http_status is None:
+        http_status = result_obj.get("http_status")
+
+    incident_code = (
+        payload.get("incident_code")
+        or error_obj.get("incident_code")
+        or error_obj.get("code")
+        or diagnostics.get("incident_code")
+        or incident_meta.get("incident_code")
+    )
+
+    final_failure = payload.get("final_failure")
+    if final_failure is None:
+        final_failure = error_obj.get("final_failure")
+    if final_failure is None:
+        final_failure = diagnostics.get("final_failure")
+
+    normalized = {
+        "ts": _now_ts(),
+        "http_status": _to_int(http_status, 0) if http_status not in (None, "") else 0,
+        "incident_code": _to_str(incident_code).strip().lower(),
+        "final_failure": _to_bool(final_failure, False),
+        "error_message": _to_str(
+            payload.get("error_message")
+            or error_obj.get("message")
+            or payload.get("message")
+            or diagnostics.get("message")
+        ),
+        "failed_capability": _to_str(
+            payload.get("failed_capability")
+            or payload.get("capability")
+            or error_obj.get("capability")
+            or payload.get("source_capability")
+        ),
+        "target_url": _to_str(
+            payload.get("target_url")
+            or http_meta.get("url")
+            or payload.get("url")
+        ),
+        "method": _to_str(
+            payload.get("method")
+            or http_meta.get("method")
+        ).upper(),
+        "raw_payload": deepcopy(payload),
+    }
+    return normalized
+
+
+def _classify_incident(incident: Dict[str, Any]) -> Dict[str, Any]:
+    http_status = _to_int(incident.get("http_status"), 0)
+    incident_code = _to_str(incident.get("incident_code")).strip().lower()
+    final_failure = _to_bool(incident.get("final_failure"), False)
+
+    decision = "log_only"
+    reason = "unclassified_incident"
+    severity = "medium"
+    category = "unknown_incident"
+
+    if 500 <= http_status <= 599 and final_failure:
+        decision = "escalate"
+        reason = "http_5xx_exhausted"
+        severity = "high"
+        category = "http_failure"
+    elif incident_code == "timeout" and final_failure:
+        decision = "escalate"
+        reason = "timeout_exhausted"
+        severity = "high"
+        category = "timeout"
+    elif http_status == 429:
+        decision = "escalate"
+        reason = "rate_limit_exhausted"
+        severity = "medium"
+        category = "http_failure"
+
+    return {
+        "decision": decision,
+        "reason": reason,
+        "severity": severity,
+        "category": category,
+    }
+
+
+def _build_next_commands(
+    meta: Dict[str, Any],
+    incident: Dict[str, Any],
+    classification: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    decision = _to_str(classification.get("decision"))
+    depth = _to_int(meta.get("depth"), 0)
+    step_index = _to_int(meta.get("step_index"), 0)
+
+    if decision not in {"escalate", "critical_escalate"}:
+        return []
+
+    if depth >= DEFAULT_MAX_DEPTH:
+        return []
+
+    next_input = {
+        "flow_id": meta.get("flow_id", ""),
+        "root_event_id": meta.get("root_event_id", ""),
+        "parent_capability": "incident_router",
+        "parent_command_id": meta.get("parent_command_id", ""),
+        "step_index": step_index + 1,
+        "depth": depth + 1,
+        "workspace_id": meta.get("workspace_id", ""),
+        "tenant_id": meta.get("tenant_id", ""),
+        "app_name": meta.get("app_name", ""),
+        "source": "incident_router",
+        "incident": {
+            "decision": classification.get("decision"),
+            "reason": classification.get("reason"),
+            "severity": classification.get("severity"),
+            "category": classification.get("category"),
+            "http_status": incident.get("http_status", 0),
+            "incident_code": incident.get("incident_code", ""),
+            "final_failure": incident.get("final_failure", False),
+            "failed_capability": incident.get("failed_capability", ""),
+            "target_url": incident.get("target_url", ""),
+            "method": incident.get("method", ""),
+            "error_message": incident.get("error_message", ""),
+            "raised_at": incident.get("ts", ""),
+        },
+    }
+
+    return [
+        {
+            "capability": "internal_escalate",
+            "command_input": next_input,
+        }
+    ]
+
+
+def run(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    data = _extract_input(payload or {})
+    meta = _extract_meta(data)
+    incident = _normalize_incident(data)
+    classification = _classify_incident(incident)
+    next_commands = _build_next_commands(meta, incident, classification)
+
+    decision = _to_str(classification.get("decision"))
+    spawned = len(next_commands)
+
+    result = {
+        "ok": True,
+        "capability": "incident_router",
+        "ts": _now_ts(),
+        "flow_id": meta.get("flow_id", ""),
+        "root_event_id": meta.get("root_event_id", ""),
+        "step_index": meta.get("step_index", 0),
+        "depth": meta.get("depth", 0),
+        "decision": decision,
+        "reason": classification.get("reason", "unclassified_incident"),
+        "severity": classification.get("severity", "medium"),
+        "category": classification.get("category", "unknown_incident"),
+        "final_failure": incident.get("final_failure", False),
+        "http_status": incident.get("http_status", 0),
+        "incident_code": incident.get("incident_code", ""),
+        "failed_capability": incident.get("failed_capability", ""),
+        "target_url": incident.get("target_url", ""),
+        "method": incident.get("method", ""),
+        "spawned_count": spawned,
+        "next_commands": next_commands[:1],
+        "incident_summary": {
+            "error_message": incident.get("error_message", ""),
+            "reason": classification.get("reason", "unclassified_incident"),
+            "severity": classification.get("severity", "medium"),
+            "category": classification.get("category", "unknown_incident"),
+        },
+        "guards": {
+            "max_spawn": 1,
+            "never_respawn_incident_router": True,
+            "never_retry_http_exec": True,
+            "deterministic_output": True,
+            "tolerant_to_missing_fields": True,
+        },
+    }
+
+    return result
