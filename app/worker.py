@@ -6336,6 +6336,8 @@ def get_commands(limit: int = 30) -> Dict[str, Any]:
         else:
             stats["other"] += 1
 
+        flow_meta = _extract_flow_metadata_from_command_fields(f
+
         commands.append(
             {
                 "id": r.get("id"),
