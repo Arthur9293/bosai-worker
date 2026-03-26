@@ -4319,9 +4319,31 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
     workspace_id = _event_workspace_id(fields)
 
     # ------------------------------------------------------------
+    # SAFE PATCH — stable flow context from event
+    # ------------------------------------------------------------
+    payload_obj = payload_guess if isinstance(payload_guess, dict) else {}
+
+    flow_id, root_event_id = _resolve_flow_context_from_event(
+        event_record_id=event_record_id,
+        fields=fields,
+        payload_obj=payload_obj,
+    )
+
+    # ------------------------------------------------------------
     # EXISTING LOGIC
     # ------------------------------------------------------------
     command_input = _event_build_command_input(fields)
+
+    if not isinstance(command_input, dict):
+        command_input = {}
+
+    # Force stable flow context as early as possible
+    command_input["flow_id"] = flow_id
+    command_input["root_event_id"] = root_event_id
+
+    # Remove alternate legacy keys if present
+    command_input.pop("flowid", None)
+    command_input.pop("rooteventid", None)
 
     # ------------------------------------------------------------
     # SAFE PATCH — deep payload extraction for http_exec
@@ -4333,7 +4355,7 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
     # while never breaking the flow
     # ------------------------------------------------------------
     try:
-        payload = payload_guess if isinstance(payload_guess, dict) else {}
+        payload = payload_obj
 
         deep_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
 
@@ -4376,6 +4398,13 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
     command_input = _unwrap_command_payload(command_input)
     command_input = _normalize_flow_keys(command_input)
 
+    # Re-assert flow context after normalization/unwrapping
+    if not str(command_input.get("flow_id") or "").strip():
+        command_input["flow_id"] = flow_id
+
+    if not str(command_input.get("root_event_id") or "").strip():
+        command_input["root_event_id"] = root_event_id
+
     if mapped_capability == "http_exec":
         command_input = _normalize_http_exec_input(command_input)
 
@@ -4398,9 +4427,9 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         "complete_flow_demo",
     ):
         if not str(command_input.get("flow_id") or "").strip():
-            command_input["flow_id"] = event_record_id
+            command_input["flow_id"] = flow_id
         if not str(command_input.get("root_event_id") or "").strip():
-            command_input["root_event_id"] = event_record_id
+            command_input["root_event_id"] = root_event_id
 
     existing = find_command_by_idem(effective_idempotency_key)
     if existing:
@@ -4421,6 +4450,8 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
             "capability": mapped_capability,
             "workspace_id": workspace_id,
             "idempotency_key": effective_idempotency_key,
+            "flow_id": command_input.get("flow_id"),
+            "root_event_id": command_input.get("root_event_id"),
         }
 
     candidates = _build_command_fields_candidates(
@@ -4457,6 +4488,8 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         "capability": mapped_capability,
         "workspace_id": workspace_id,
         "idempotency_key": effective_idempotency_key,
+        "flow_id": command_input.get("flow_id"),
+        "root_event_id": command_input.get("root_event_id"),
     }
 
 def _create_command_from_next_command(
