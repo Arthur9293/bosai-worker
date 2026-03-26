@@ -3113,6 +3113,32 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             _command_lock_heartbeat(cid, lock_token)
             result_obj = fn(cmd_req, run_record_id)
 
+            if isinstance(result_obj, dict):
+                current_flow_id = (
+                    result_obj.get("flow_id")
+                    or cmd_input.get("flow_id")
+                    or cmd_input.get("flowid")
+                    or fields.get("Flow_ID")
+                    or fields.get("flow_id")
+                )
+
+                current_root_event_id = (
+                    result_obj.get("root_event_id")
+                    or cmd_input.get("root_event_id")
+                    or cmd_input.get("rooteventid")
+                    or fields.get("Root_Event_ID")
+                    or fields.get("root_event_id")
+                )
+
+                if not current_flow_id and current_root_event_id:
+                    current_flow_id = current_root_event_id
+
+                if not current_root_event_id and current_flow_id:
+                    current_root_event_id = current_flow_id
+
+                result_obj["flow_id"] = current_flow_id or ""
+                result_obj["root_event_id"] = current_root_event_id or ""
+
             if not _worker_still_owns_lock(cid, req.worker, lock_token):
                 blocked += 1
 
