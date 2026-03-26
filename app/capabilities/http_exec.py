@@ -366,8 +366,18 @@ def _build_incident_router_command(
     }
 
 
-def capability_http_exec(payload: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def capability_http_exec(
+    payload: Optional[Dict[str, Any]] = None,
+    context: Optional[Dict[str, Any]] = None,
+    **kwargs: Any,
+) -> Dict[str, Any]:
     context = context or {}
+
+    if payload is None and isinstance(kwargs.get("input_data"), dict):
+        payload = kwargs["input_data"]
+    elif payload is None and isinstance(kwargs.get("payload"), dict):
+        payload = kwargs["payload"]
+
     original_payload = deepcopy(payload or {})
     meta = _extract_retry_meta(original_payload)
 
