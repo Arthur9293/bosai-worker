@@ -4564,8 +4564,11 @@ def _create_command_from_next_command(
 
     priority = int(next_cmd.get("priority") or 1)
 
-    flow_id = str(command_input.get("flow_id") or "").strip()
-    root_event_id = str(command_input.get("root_event_id") or "").strip()
+    flow_id, root_event_id = _resolve_flow_context_from_command_input(
+        command_input,
+        fallback_command_id=parent_run_id,
+    )
+
     retry_count = int(command_input.get("retry_count") or 0)
     step_index = int(command_input.get("step_index") or 0)
 
@@ -4575,13 +4578,21 @@ def _create_command_from_next_command(
         or ""
     ).strip() or None
 
+    # ------------------------------------------------------------
+    # SAFE PATCH — stable flow propagation
+    # Keep child commands inside the same flow unless explicitly overridden.
+    # ------------------------------------------------------------
     if not flow_id:
         flow_id = parent_run_id
-        command_input["flow_id"] = flow_id
 
     if not root_event_id:
-        root_event_id = parent_run_id
-        command_input["root_event_id"] = root_event_id
+        root_event_id = flow_id or parent_run_id
+
+    command_input["flow_id"] = flow_id
+    command_input["root_event_id"] = root_event_id
+
+    command_input.pop("flowid", None)
+    command_input.pop("rooteventid", None)
 
     if effective_workspace_id and not str(command_input.get("workspace_id") or "").strip():
         command_input["workspace_id"] = effective_workspace_id
@@ -4598,6 +4609,13 @@ def _create_command_from_next_command(
                 "parent_run_id": parent_run_id,
                 "command_input": command_input,
             }
+
+    # Re-assert flow context after possible capability-specific normalization
+    if not str(command_input.get("flow_id") or "").strip():
+        command_input["flow_id"] = flow_id or parent_run_id
+
+    if not str(command_input.get("root_event_id") or "").strip():
+        command_input["root_event_id"] = root_event_id or flow_id or parent_run_id
 
     inherited_input_idem = str(command_input.get("idempotency_key") or "").strip()
     explicit_next_cmd_idem = str(next_cmd.get("idempotency_key") or "").strip()
@@ -4647,6 +4665,8 @@ def _create_command_from_next_command(
             "workspace_id": effective_workspace_id,
             "idempotency_key": effective_idempotency_key,
             "parent_run_id": parent_run_id,
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
         }
 
     print(
@@ -4692,6 +4712,8 @@ def _create_command_from_next_command(
         "workspace_id": effective_workspace_id,
         "idempotency_key": effective_idempotency_key,
         "parent_run_id": parent_run_id,
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
     }
     
 def _create_incident_log_record(incident_payload: Dict[str, Any]) -> Dict[str, Any]:
