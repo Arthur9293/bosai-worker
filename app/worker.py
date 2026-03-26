@@ -1278,6 +1278,33 @@ def capability_state_put(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
 # ============================================================
 # Flow helpers
 # ============================================================
+def _resolve_flow_context_from_command_input(command_input, fallback_command_id=""):
+    if not isinstance(command_input, dict):
+        command_input = {}
+
+    flow_id = (
+        _coerce_non_empty_str(command_input.get("flow_id"))
+        or _coerce_non_empty_str(command_input.get("flowid"))
+    )
+
+    root_event_id = (
+        _coerce_non_empty_str(command_input.get("root_event_id"))
+        or _coerce_non_empty_str(command_input.get("rooteventid"))
+    )
+
+    if not flow_id and root_event_id:
+        flow_id = root_event_id
+
+    if not root_event_id and flow_id:
+        root_event_id = flow_id
+
+    if not flow_id:
+        flow_id = fallback_command_id
+
+    if not root_event_id:
+        root_event_id = flow_id
+
+    return flow_id, root_event_id
 def _coerce_non_empty_str(value):
     if value is None:
         return ""
