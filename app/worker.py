@@ -6288,7 +6288,129 @@ def _extract_flow_metadata_from_command_fields(fields: Dict[str, Any]) -> Dict[s
         "input_json": input_json if input_json else None,
         "result_json": result_json if result_json else None,
     }
-    
+
+def _flow_status_from_commands(commands: List[Dict[str, Any]]) -> str:
+    statuses = [str(c.get("status") or "").lower() for c in commands]
+
+    has_error = any(s in ("error", "failed", "dead") for s in statuses)
+    has_running = any(s == "running" for s in statuses)
+    has_retry = any(s == "retry" for s in statuses)
+    has_queued = any(s in ("queued", "queue") for s in statuses)
+    all_done = len(statuses) > 0 and all(s == "done" for s in statuses)
+    has_done = any(s == "done" for s in statuses)
+
+    if all_done:
+        return "completed"
+    if has_error:
+        return "failed"
+    if has_running or has_retry or has_queued:
+        return "running"
+    if has_done:
+        return "partial"
+    return "unknown"
+
+
+def _flow_summary_from_commands(commands: List[Dict[str, Any]]) -> Dict[str, int]:
+    done = sum(1 for c in commands if str(c.get("status") or "").lower() == "done")
+    running = sum(1 for c in commands if str(c.get("status") or "").lower() == "running")
+    retry = sum(1 for c in commands if str(c.get("status") or "").lower() == "retry")
+    failed = sum(
+        1
+        for c in commands
+        if str(c.get("status") or "").lower() in ("error", "failed", "dead")
+    )
+
+    return {
+        "done": done,
+        "running": running,
+        "retry": retry,
+        "failed": failed,
+    }
+
+
+def _sort_flow_commands(commands: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _key(c: Dict[str, Any]):
+        step_index = c.get("step_index")
+        try:
+            step_value = int(step_index) if step_index is not None else 10**9
+        except Exception:
+            step_value = 10**9
+
+        created_at = c.get("created_at") or ""
+        return (step_value, str(created_at))
+
+    return sorted(commands, key=_key)
+
+
+def _build_flows_from_command_items(commands: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    grouped: Dict[str, Dict[str, Any]] = {}
+
+    for cmd in commands:
+        flow_id = cmd.get("flow_id")
+        root_event_id = cmd.get("root_event_id")
+
+        if isinstance(flow_id, str) and flow_id.strip():
+            resolved_flow_id = flow_id.strip()
+            is_synthetic = False
+        elif isinstance(root_event_id, str) and root_event_id.strip():
+            resolved_flow_id = f"root:{root_event_id.strip()}"
+            is_synthetic = True
+        else:
+            resolved_flow_id = f"no-flow:{cmd.get('id')}"
+            is_synthetic = True
+
+        if resolved_flow_id not in grouped:
+            grouped[resolved_flow_id] = {
+                "flow_id": resolved_flow_id,
+                "root_event_id": root_event_id if isinstance(root_event_id, str) and root_event_id.strip() else None,
+                "is_synthetic": is_synthetic,
+                "commands": [],
+            }
+
+        group = grouped[resolved_flow_id]
+
+        if not group.get("root_event_id") and isinstance(root_event_id, str) and root_event_id.strip():
+            group["root_event_id"] = root_event_id.strip()
+
+        group["commands"].append(cmd)
+
+    flows: List[Dict[str, Any]] = []
+
+    for _, group in grouped.items():
+        steps = _sort_flow_commands(group["commands"])
+        summary = _flow_summary_from_commands(steps)
+        status = _flow_status_from_commands(steps)
+
+        first_created_at = steps[0].get("created_at") if steps else None
+        last_finished_at = None
+        if steps:
+            last_finished_at = steps[-1].get("finished_at") or steps[-1].get("created_at")
+
+        flows.append(
+            {
+                "flow_id": group["flow_id"],
+                "root_event_id": group.get("root_event_id"),
+                "status": status,
+                "is_synthetic": bool(group.get("is_synthetic")),
+                "commands_count": len(steps),
+                "done": summary["done"],
+                "running": summary["running"],
+                "retry": summary["retry"],
+                "failed": summary["failed"],
+                "first_created_at": first_created_at,
+                "last_finished_at": last_finished_at,
+                "steps": steps,
+            }
+        )
+
+    flows.sort(
+        key=lambda f: str(f.get("last_finished_at") or f.get("first_created_at") or ""),
+        reverse=True,
+    )
+
+    return flows
+
+
 @app.get("/commands")
 def get_commands(limit: int = 30) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=30, minimum=1, maximum=100)
@@ -6373,7 +6495,66 @@ def get_commands(limit: int = 30) -> Dict[str, Any]:
         "commands": commands,
         "ts": utc_now_iso(),
     }
+@app.get("/flows")
+def get_flows(limit: int = 50) -> Dict[str, Any]:
+    limit = _safe_limit(limit, default=50, minimum=1, maximum=200)
+    records, meta = _safe_records_from_view(
+        COMMANDS_TABLE_NAME,
+        COMMANDS_DASHBOARD_VIEW_NAME,
+        limit,
+    )
 
+    commands: List[Dict[str, Any]] = []
+
+    for r in records:
+        f = r.get("fields", {}) or {}
+        status = _read_command_status(f)
+        flow_meta = _extract_flow_metadata_from_command_fields(f)
+
+        commands.append(
+            {
+                "id": r.get("id"),
+                "capability": f.get("Capability"),
+                "status": status,
+                "priority": f.get("Priority"),
+                "retry_count": f.get("Retry_Count"),
+                "retry_max": f.get("Retry_Max"),
+                "scheduled_at": f.get("Scheduled_At"),
+                "next_retry_at": f.get("Next_Retry_At"),
+                "is_locked": f.get("Is_Locked"),
+                "locked_by": f.get("Locked_By"),
+                "idempotency_key": f.get("Idempotency_Key"),
+                "flow_id": flow_meta["flow_id"],
+                "root_event_id": flow_meta["root_event_id"],
+                "parent_command_id": flow_meta["parent_command_id"],
+                "step_index": flow_meta["step_index"],
+                "input_json": flow_meta["input_json"],
+                "result_json": flow_meta["result_json"],
+                "worker": f.get("Locked_By") or f.get("Worker"),
+                "workspace_id": f.get("Workspace_ID") or f.get("workspace_id"),
+                "started_at": f.get("Started_At"),
+                "finished_at": f.get("Finished_At"),
+                "created_at": f.get("Created_At") or f.get("created_at"),
+            }
+        )
+
+    flows = _build_flows_from_command_items(commands)
+
+    linked_count = sum(1 for flow in flows if not flow.get("is_synthetic"))
+    synthetic_count = sum(1 for flow in flows if flow.get("is_synthetic"))
+
+    return {
+        "ok": bool(meta.get("ok")),
+        "source": meta,
+        "count": len(flows),
+        "stats": {
+            "linked": linked_count,
+            "synthetic": synthetic_count,
+        },
+        "flows": flows,
+        "ts": utc_now_iso(),
+    }
+    
 @app.get("/sla")
 def get_sla(limit: int = 50) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=50, minimum=1, maximum=200)
@@ -6526,7 +6707,7 @@ def _build_webhook_event_fields(
         fields["Idempotency_Key"] = idempotency_key
 
     return fields
-    
+
 # ============================================================
 # Event endpoints
 # ============================================================
