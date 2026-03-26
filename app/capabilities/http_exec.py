@@ -1,8 +1,13 @@
+# app/capabilities/http_exec.py
+
 from __future__ import annotations
 
+import ipaddress
+import json
+import socket
 import time
 from copy import deepcopy
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import requests
@@ -14,6 +19,16 @@ DEFAULT_RETRY_DELAY_SECONDS = 10
 DEFAULT_MAX_DEPTH = 8
 
 REQUEST_SESSION = requests.Session()
+
+FORBIDDEN_HOSTS = {
+    "localhost",
+    "127.0.0.1",
+    "::1",
+    "0.0.0.0",
+    "169.254.169.254",
+    "metadata.google.internal",
+    "metadata",
+}
 
 
 def _now_ts() -> str:
@@ -45,584 +60,704 @@ def _to_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
-def _safe_str(value: Any) -> str:
+def _to_float(value: Any, default: float) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _safe_json_dumps(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except Exception:
+        try:
+            return json.dumps(str(value), ensure_ascii=False)
+        except Exception:
+            return "{}"
+
+
+def _trim_text(value: Any, limit: int = 2000) -> str:
     if value is None:
         return ""
-    try:
-        return str(value)
-    except Exception:
-        return ""
-
-
-def _safe_dict(value: Any) -> Dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def _clip(value: int, min_value: int, max_value: int) -> int:
-    return max(min_value, min(value, max_value))
-
-
-def _first_non_empty(payload: Dict[str, Any], keys: List[str], default: Any = None) -> Any:
-    for key in keys:
-        if key in payload:
-            value = payload.get(key)
-            if value is not None and value != "":
-                return value
-    return default
-
-
-def _normalize_headers(value: Any) -> Dict[str, str]:
-    raw = _safe_dict(value)
-    out: Dict[str, str] = {}
-    for k, v in raw.items():
-        key = _safe_str(k).strip()
-        if not key:
-            continue
-        out[key] = _safe_str(v)
-    return out
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "…"
 
 
 def _normalize_method(value: Any) -> str:
-    method = _safe_str(value).strip().upper()
-    if not method:
+    method = str(value or "GET").strip().upper()
+    if method not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
         return "GET"
-
-    allowed = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
-    return method if method in allowed else "GET"
+    return method
 
 
-def _coerce_payload(payload: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Dict[str, Any]:
-    if isinstance(payload, dict):
-        return payload
+def _normalize_headers(value: Any) -> Dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
 
-    candidate = kwargs.get("input_data")
-    if isinstance(candidate, dict):
-        return candidate
-
-    candidate = kwargs.get("payload")
-    if isinstance(candidate, dict):
-        return candidate
-
-    return {}
+    result: Dict[str, str] = {}
+    for k, v in value.items():
+        key = str(k).strip()
+        if not key:
+            continue
+        result[key] = "" if v is None else str(v)
+    return result
 
 
-def _extract_flow_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
-    flow_id = _safe_str(
-        _first_non_empty(payload, ["flow_id", "flowid", "Flow_ID", "FlowId"], "")
-    ).strip()
+def _normalize_params(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return dict(value)
 
-    root_event_id = _safe_str(
-        _first_non_empty(payload, ["root_event_id", "rooteventid", "rootEventId", "event_id"], "")
-    ).strip()
 
-    parent_command_id = _safe_str(
-        _first_non_empty(payload, ["parent_command_id", "parentcommandid", "command_id", "commandid"], "")
-    ).strip()
+def _normalize_json_body(value: Any) -> Optional[Any]:
+    if value is None or value == "":
+        return None
+    return value
+
+
+def _normalize_text_body(value: Any) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, (dict, list)):
+        return _safe_json_dumps(value)
+    return str(value)
+
+
+def _sanitize_headers_for_logs(headers: Dict[str, Any]) -> Dict[str, Any]:
+    secret_markers = {
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "api-key",
+        "apikey",
+        "cookie",
+        "set-cookie",
+        "x-auth-token",
+    }
+
+    sanitized: Dict[str, Any] = {}
+    for k, v in (headers or {}).items():
+        key = str(k)
+        if key.strip().lower() in secret_markers:
+            sanitized[key] = "***REDACTED***"
+        else:
+            sanitized[key] = v
+    return sanitized
+
+
+def _extract_retry_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
+    flow_id = str(payload.get("flow_id", "") or "")
+    root_event_id = str(payload.get("root_event_id", "") or "")
+    parent_command_id = str(
+        payload.get("parent_command_id")
+        or payload.get("parent_id")
+        or payload.get("linked_command_id")
+        or ""
+    )
+
+    step_index = _to_int(payload.get("step_index"), 0)
+    retry_count = _to_int(payload.get("retry_count"), 0)
+    retry_max = _to_int(payload.get("retry_max"), DEFAULT_RETRY_MAX)
+    retry_delay_seconds = _to_int(
+        payload.get("retry_delay_seconds"),
+        _to_int(payload.get("retry_delay_sec"), DEFAULT_RETRY_DELAY_SECONDS),
+    )
 
     return {
         "flow_id": flow_id,
         "root_event_id": root_event_id,
         "parent_command_id": parent_command_id,
+        "step_index": step_index,
+        "retry_count": retry_count,
+        "retry_max": retry_max,
+        "retry_delay_seconds": retry_delay_seconds,
     }
 
 
-def _extract_retry_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
-    retry_count = _to_int(_first_non_empty(payload, ["retry_count", "retrycount"], 0), 0)
-    retry_max = _to_int(
-        _first_non_empty(payload, ["retry_max", "retrymax"], DEFAULT_RETRY_MAX),
-        DEFAULT_RETRY_MAX,
+def _compute_backoff_seconds(payload: Dict[str, Any], retry_count_after_failure: int) -> int:
+    fixed_delay = _to_int(
+        payload.get("retry_delay_seconds"),
+        _to_int(payload.get("retry_delay_sec"), DEFAULT_RETRY_DELAY_SECONDS),
     )
-    retry_delay_seconds = _to_int(
-        _first_non_empty(
-            payload,
-            ["retry_delay_seconds", "retrydelayseconds", "retry_delay"],
-            DEFAULT_RETRY_DELAY_SECONDS,
-        ),
-        DEFAULT_RETRY_DELAY_SECONDS,
-    )
-    step_index = _to_int(_first_non_empty(payload, ["step_index", "stepindex"], 0), 0)
-    max_depth = _to_int(
-        _first_non_empty(payload, ["max_depth", "maxdepth"], DEFAULT_MAX_DEPTH),
-        DEFAULT_MAX_DEPTH,
-    )
+    base = max(1, fixed_delay)
 
-    return {
-        "retry_count": max(0, retry_count),
-        "retry_max": _clip(retry_max, 0, 100),
-        "retry_delay_seconds": max(0, retry_delay_seconds),
-        "step_index": max(0, step_index),
-        "max_depth": max(1, max_depth),
-    }
+    if _to_bool(payload.get("retry_backoff_exponential"), False):
+        max_delay = max(base, _to_int(payload.get("retry_backoff_max_seconds"), 300))
+        return min(base * (2 ** max(0, retry_count_after_failure - 1)), max_delay)
+
+    return base
 
 
-def _extract_execution_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
-    timeout_seconds = _clip(
-        _to_int(
-            _first_non_empty(payload, ["timeout_seconds", "timeoutseconds"], DEFAULT_TIMEOUT_SECONDS),
-            DEFAULT_TIMEOUT_SECONDS,
-        ),
-        1,
-        300,
-    )
-
-    dry_run = _to_bool(_first_non_empty(payload, ["dry_run", "dryrun"], False), False)
-    allow_redirects = _to_bool(
-        _first_non_empty(payload, ["allow_redirects", "allowredirects"], False),
-        False,
-    )
-
-    max_depth = max(
-        1,
-        _to_int(
-            _first_non_empty(payload, ["max_depth", "maxdepth"], DEFAULT_MAX_DEPTH),
-            DEFAULT_MAX_DEPTH,
-        ),
-    )
-
-    return {
-        "timeout_seconds": timeout_seconds,
-        "dry_run": dry_run,
-        "allow_redirects": allow_redirects,
-        "max_depth": max_depth,
-    }
+def _build_next_retry_at(delay_seconds: int) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + max(0, delay_seconds)))
 
 
-def _extract_http_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    body = _first_non_empty(payload, ["body"], None)
-    json_body = _first_non_empty(payload, ["json"], None)
-
-    if json_body is None and isinstance(body, (dict, list)):
-        json_body = deepcopy(body)
-        body = None
-
-    url = _safe_str(
-        _first_non_empty(
-            payload,
-            ["url", "URL", "http_target", "httptarget", "target_url", "targeturl"],
-            "",
-        )
-    ).strip()
-
-    method = _normalize_method(
-        _first_non_empty(payload, ["method", "HTTP_Method", "HTTPMethod", "http_method"], "GET")
-    )
-
-    headers = _normalize_headers(
-        _first_non_empty(payload, ["headers", "HTTP_Headers_JSON", "http_headers_json"], {})
-    )
-
-    params = _safe_dict(_first_non_empty(payload, ["params"], {}))
-
-    return {
-        "url": url,
-        "method": method,
-        "headers": headers,
-        "params": params,
-        "json": deepcopy(json_body) if isinstance(json_body, (dict, list)) else json_body,
-        "body": body,
-    }
+def _get_depth(payload: Dict[str, Any]) -> int:
+    return _to_int(payload.get("_depth"), 0)
 
 
-def _compose_clean_command_input(
-    payload: Dict[str, Any],
-    *,
-    retry_count: Optional[int] = None,
-    step_index: Optional[int] = None,
-) -> Dict[str, Any]:
-    flow_meta = _extract_flow_meta(payload)
-    retry_meta = _extract_retry_meta(payload)
-    exec_meta = _extract_execution_meta(payload)
-    http_payload = _extract_http_payload(payload)
-
-    if retry_count is not None:
-        retry_meta["retry_count"] = max(0, retry_count)
-    if step_index is not None:
-        retry_meta["step_index"] = max(0, step_index)
-
-    clean: Dict[str, Any] = {
-        **flow_meta,
-        **retry_meta,
-        **exec_meta,
-        **http_payload,
-    }
-
-    return {k: v for k, v in clean.items() if v is not None and v != ""}
+def _increment_depth(payload: Dict[str, Any]) -> int:
+    return _get_depth(payload) + 1
 
 
-def _is_input_polluted(payload: Dict[str, Any]) -> Dict[str, bool]:
-    polluted_keys = {
-        "event_type",
-        "event_name",
-        "event_status",
-        "payload",
-        "event_payload",
-        "raw_event",
-        "airtable_event",
-    }
-    return {key: key in payload for key in polluted_keys if key in payload}
+def _parse_allowlist(payload: Dict[str, Any]) -> List[str]:
+    raw = payload.get("allowed_hosts") or payload.get("host_allowlist") or []
+    if isinstance(raw, str):
+        items = [x.strip() for x in raw.split(",")]
+    elif isinstance(raw, list):
+        items = [str(x).strip() for x in raw]
+    else:
+        items = []
+
+    cleaned = [x.lower() for x in items if x]
+    return cleaned
 
 
-def _has_reached_retry_limit(retry_count: int, retry_max: int) -> bool:
-    return retry_count >= retry_max
-
-
-def _has_reached_depth_limit(step_index: int, max_depth: int) -> bool:
-    return step_index >= max_depth
-
-
-def _should_retry(status_code: int, request_error: str) -> bool:
-    if request_error:
+def _host_matches_allowlist(host: str, allowlist: List[str]) -> bool:
+    if not allowlist:
         return True
-    if status_code in (408, 409, 425, 429):
-        return True
-    if 500 <= status_code <= 599:
-        return True
+
+    host_l = host.lower()
+    for allowed in allowlist:
+        if not allowed:
+            continue
+        if host_l == allowed:
+            return True
+        if allowed.startswith("*."):
+            suffix = allowed[1:]
+            if host_l.endswith(suffix) and host_l != suffix.lstrip("."):
+                return True
+        elif host_l.endswith("." + allowed):
+            return True
     return False
 
 
-def _make_retry_command(
-    payload: Dict[str, Any],
-    *,
-    clean_input: Dict[str, Any],
-    flow_meta: Dict[str, Any],
-    retry_count: int,
-    retry_max: int,
-    retry_delay_seconds: int,
-    step_index: int,
-    max_depth: int,
-    status_code: int,
-    request_error: str,
-) -> Dict[str, Any]:
-    workspace_id = _safe_str(
-        _first_non_empty(payload, ["workspace_id", "workspaceid"], "")
-    ).strip()
+def _ip_is_forbidden(ip_text: str) -> bool:
+    try:
+        ip_obj = ipaddress.ip_address(ip_text)
+        return bool(
+            ip_obj.is_private
+            or ip_obj.is_loopback
+            or ip_obj.is_link_local
+            or ip_obj.is_multicast
+            or ip_obj.is_reserved
+            or ip_obj.is_unspecified
+        )
+    except Exception:
+        return True
 
-    error_type = ""
-    retry_reason = ""
 
-    if request_error:
-        retry_reason = request_error
-        error_type = "request_exception"
-    elif status_code == 429:
-        retry_reason = "http_429"
-        error_type = "http_429"
-    elif status_code == 408:
-        retry_reason = "http_408"
-        error_type = "http_408"
-    elif status_code == 409:
-        retry_reason = "http_409"
-        error_type = "http_409"
-    elif status_code == 425:
-        retry_reason = "http_425"
-        error_type = "http_425"
-    elif 500 <= status_code <= 599:
-        retry_reason = "http_5xx"
-        error_type = "http_5xx"
-    else:
-        retry_reason = f"http_{status_code}" if status_code else "retry_requested"
+def _resolve_host_ips(host: str) -> List[str]:
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except Exception:
+        return []
 
-    return {
-        "capability": "retry_router",
-        "command_input": {
-            "target_capability": "http_exec",
-            "original_input": clean_input,
-            "flow_id": flow_meta["flow_id"],
-            "root_event_id": flow_meta["root_event_id"],
-            "workspace_id": workspace_id,
-            "parent_command_id": flow_meta["parent_command_id"],
-            "retry_count": retry_count,
-            "retry_max": retry_max,
-            "retry_delay_seconds": max(0, retry_delay_seconds),
-            "step_index": step_index,
-            "max_depth": max_depth,
-            "retry_reason": retry_reason,
-            "error_type": error_type,
-            "http_status": status_code if status_code else None,
-            "request_error": request_error,
-        },
+    ips: List[str] = []
+    for info in infos:
+        sockaddr = info[4]
+        if not sockaddr:
+            continue
+        ip = sockaddr[0]
+        if ip and ip not in ips:
+            ips.append(ip)
+    return ips
+
+
+def _validate_url(url: str, allowlist: List[str]) -> Tuple[bool, str, Dict[str, Any]]:
+    parsed = urlparse(url)
+    scheme = (parsed.scheme or "").lower()
+    host = (parsed.hostname or "").strip().lower()
+
+    debug = {
+        "scheme": scheme,
+        "host": host,
+        "port": parsed.port,
+        "path": parsed.path,
     }
 
+    if scheme not in {"http", "https"}:
+        return False, "invalid_scheme", debug
 
-def _safe_response_preview(response: Optional[requests.Response]) -> Dict[str, Any]:
-    if response is None:
-        return {}
+    if not host:
+        return False, "missing_host", debug
 
-    content_type = _safe_str(response.headers.get("Content-Type")).lower()
-    text = ""
+    if host in FORBIDDEN_HOSTS:
+        return False, "forbidden_host", debug
 
-    try:
-        text = response.text or ""
-    except Exception:
-        text = ""
+    if not _host_matches_allowlist(host, allowlist):
+        return False, "host_not_allowed", debug
 
-    preview = text[:1000] if text else ""
+    ips = _resolve_host_ips(host)
+    debug["resolved_ips"] = ips
 
-    data: Dict[str, Any] = {
-        "status_code": response.status_code,
+    if not ips:
+        return False, "dns_resolution_failed", debug
+
+    for ip in ips:
+        if _ip_is_forbidden(ip):
+            debug["blocked_ip"] = ip
+            return False, "forbidden_ip", debug
+
+    return True, "ok", debug
+
+
+def _extract_response_payload(response: requests.Response) -> Dict[str, Any]:
+    content_type = str(response.headers.get("Content-Type", "") or "")
+    text = response.text if response.text is not None else ""
+
+    body_json: Optional[Any] = None
+    if "application/json" in content_type.lower():
+        try:
+            body_json = response.json()
+        except Exception:
+            body_json = None
+
+    return {
+        "status_code": int(response.status_code),
+        "ok": bool(response.ok),
         "content_type": content_type,
         "headers": dict(response.headers),
-        "text_preview": preview,
+        "body_text": _trim_text(text, 4000),
+        "body_json": body_json,
+        "elapsed_ms": int(getattr(response.elapsed, "total_seconds", lambda: 0.0)() * 1000),
     }
 
-    if "application/json" in content_type:
-        try:
-            data["json_preview"] = response.json()
-        except Exception:
-            pass
 
-    return data
-
-
-def _build_log_summary(
+def _build_incident_router_command(
     *,
-    payload: Dict[str, Any],
-    status_code: int,
-    request_error: str,
-    retry_scheduled: bool,
-    blocked_by_retry_limit: bool,
-    blocked_by_depth_limit: bool,
-    duration_ms: int,
+    original_payload: Dict[str, Any],
+    meta: Dict[str, Any],
+    error_code: str,
+    error_message: str,
+    http_status: Optional[int],
+    request_summary: Dict[str, Any],
+    response_summary: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    http_payload = _extract_http_payload(payload)
-    retry_meta = _extract_retry_meta(payload)
+    next_depth = _increment_depth(original_payload)
 
-    parsed = urlparse(http_payload["url"])
-    polluted = _is_input_polluted(payload)
+    incident_input = {
+        "flow_id": meta["flow_id"],
+        "root_event_id": meta["root_event_id"],
+        "parent_command_id": meta["parent_command_id"],
+        "step_index": meta["step_index"] + 1,
+        "_depth": next_depth,
+        "source_capability": "http_exec",
+        "incident_type": "http_exec_failure",
+        "incident_code": error_code,
+        "incident_message": error_message,
+        "http_status": http_status,
+        "request": request_summary,
+        "response": response_summary or {},
+        "failed_at": _now_ts(),
+        "retry_count": meta["retry_count"],
+        "retry_max": meta["retry_max"],
+        "final_failure": True,
+    }
 
     return {
-        "ts": _now_ts(),
-        "target_host": parsed.netloc,
-        "method": http_payload["method"],
-        "retry_count": retry_meta["retry_count"],
-        "retry_max": retry_meta["retry_max"],
-        "step_index": retry_meta["step_index"],
-        "max_depth": retry_meta["max_depth"],
-        "status_code": status_code,
-        "request_error": request_error,
-        "retry_scheduled": retry_scheduled,
-        "blocked_by_retry_limit": blocked_by_retry_limit,
-        "blocked_by_depth_limit": blocked_by_depth_limit,
-        "duration_ms": duration_ms,
-        "input_pollution_detected": polluted,
+        "capability": "incident_router",
+        "input": incident_input,
     }
 
 
-def capability_http_exec(payload: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Dict[str, Any]:
-    started_at = time.time()
-    payload = _coerce_payload(payload, **kwargs)
+def capability_http_exec(payload: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    context = context or {}
+    original_payload = deepcopy(payload or {})
+    meta = _extract_retry_meta(original_payload)
 
     if not HTTP_EXEC_ENABLED:
         return {
             "ok": False,
-            "status": "disabled",
-            "capability": "http_exec",
-            "message": "http_exec disabled",
+            "status": "blocked",
+            "error": "http_exec_disabled",
             "ts": _now_ts(),
+            "flow_id": meta["flow_id"],
+            "root_event_id": meta["root_event_id"],
+            "step_index": meta["step_index"],
+            "retry_planned": False,
             "next_commands": [],
         }
 
-    flow_meta = _extract_flow_meta(payload)
-    retry_meta = _extract_retry_meta(payload)
-    exec_meta = _extract_execution_meta(payload)
-    http_payload = _extract_http_payload(payload)
-
-    retry_count = retry_meta["retry_count"]
-    retry_max = retry_meta["retry_max"]
-    retry_delay_seconds = retry_meta["retry_delay_seconds"]
-    step_index = retry_meta["step_index"]
-    max_depth = retry_meta["max_depth"]
-
-    if _has_reached_depth_limit(step_index, max_depth):
-        duration_ms = int((time.time() - started_at) * 1000)
+    if _get_depth(original_payload) >= _to_int(original_payload.get("max_depth"), DEFAULT_MAX_DEPTH):
         return {
             "ok": False,
             "status": "blocked",
-            "capability": "http_exec",
-            "message": "max_depth reached",
-            "flow_id": flow_meta["flow_id"],
-            "root_event_id": flow_meta["root_event_id"],
-            "retry_count": retry_count,
-            "retry_max": retry_max,
-            "step_index": step_index,
-            "max_depth": max_depth,
-            "duration_ms": duration_ms,
+            "error": "max_depth_exceeded",
             "ts": _now_ts(),
-            "log": _build_log_summary(
-                payload=payload,
-                status_code=0,
-                request_error="",
-                retry_scheduled=False,
-                blocked_by_retry_limit=False,
-                blocked_by_depth_limit=True,
-                duration_ms=duration_ms,
-            ),
+            "flow_id": meta["flow_id"],
+            "root_event_id": meta["root_event_id"],
+            "step_index": meta["step_index"],
+            "retry_planned": False,
             "next_commands": [],
         }
 
-    if not http_payload["url"]:
-        duration_ms = int((time.time() - started_at) * 1000)
+    url = str(original_payload.get("url") or "").strip()
+    method = _normalize_method(original_payload.get("method"))
+    timeout_seconds = max(
+        1,
+        _to_int(original_payload.get("timeout_seconds"), DEFAULT_TIMEOUT_SECONDS),
+    )
+    params = _normalize_params(original_payload.get("params"))
+    headers = _normalize_headers(original_payload.get("headers"))
+    json_body = _normalize_json_body(original_payload.get("json"))
+    data_body = _normalize_text_body(original_payload.get("data"))
+    allow_redirects = _to_bool(original_payload.get("follow_redirects"), False)
+    verify_tls = _to_bool(original_payload.get("verify_tls"), True)
+    dry_run = _to_bool(original_payload.get("dry_run"), False)
+
+    allowlist = _parse_allowlist(original_payload)
+    if not url:
         return {
             "ok": False,
             "status": "error",
-            "capability": "http_exec",
-            "message": "missing url",
-            "flow_id": flow_meta["flow_id"],
-            "root_event_id": flow_meta["root_event_id"],
-            "retry_count": retry_count,
-            "retry_max": retry_max,
-            "step_index": step_index,
-            "max_depth": max_depth,
-            "duration_ms": duration_ms,
+            "error": "missing_url",
             "ts": _now_ts(),
-            "log": _build_log_summary(
-                payload=payload,
-                status_code=0,
-                request_error="missing url",
-                retry_scheduled=False,
-                blocked_by_retry_limit=False,
-                blocked_by_depth_limit=False,
-                duration_ms=duration_ms,
-            ),
+            "flow_id": meta["flow_id"],
+            "root_event_id": meta["root_event_id"],
+            "step_index": meta["step_index"],
+            "retry_planned": False,
             "next_commands": [],
         }
 
-    clean_input = _compose_clean_command_input(payload)
-    next_commands: List[Dict[str, Any]] = []
+    allowed, allow_reason, url_debug = _validate_url(url, allowlist)
+    request_summary = {
+        "method": method,
+        "url": url,
+        "params": params,
+        "headers": _sanitize_headers_for_logs(headers),
+        "has_json": json_body is not None,
+        "has_data": data_body is not None,
+        "timeout_seconds": timeout_seconds,
+        "follow_redirects": allow_redirects,
+        "verify_tls": verify_tls,
+        "url_debug": url_debug,
+    }
 
-    if exec_meta["dry_run"]:
-        duration_ms = int((time.time() - started_at) * 1000)
+    if not allowed:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "error": allow_reason,
+            "error_message": f"URL blocked: {allow_reason}",
+            "ts": _now_ts(),
+            "flow_id": meta["flow_id"],
+            "root_event_id": meta["root_event_id"],
+            "step_index": meta["step_index"],
+            "request": request_summary,
+            "retry_planned": False,
+            "next_commands": [],
+        }
+
+    if dry_run:
         return {
             "ok": True,
-            "status": "dry_run",
-            "capability": "http_exec",
-            "message": "dry run only",
-            "flow_id": flow_meta["flow_id"],
-            "root_event_id": flow_meta["root_event_id"],
-            "retry_count": retry_count,
-            "retry_max": retry_max,
-            "step_index": step_index,
-            "max_depth": max_depth,
-            "duration_ms": duration_ms,
+            "status": "done",
+            "dry_run": True,
             "ts": _now_ts(),
-            "request": {
-                "url": http_payload["url"],
-                "method": http_payload["method"],
-                "headers": http_payload["headers"],
-                "params": http_payload["params"],
-                "json": http_payload["json"],
-                "body": http_payload["body"],
-                "timeout_seconds": exec_meta["timeout_seconds"],
-                "allow_redirects": exec_meta["allow_redirects"],
+            "flow_id": meta["flow_id"],
+            "root_event_id": meta["root_event_id"],
+            "step_index": meta["step_index"],
+            "request": request_summary,
+            "response": {
+                "status_code": 0,
+                "ok": True,
+                "content_type": "application/json",
+                "headers": {},
+                "body_text": "",
+                "body_json": {"dry_run": True},
+                "elapsed_ms": 0,
             },
-            "clean_command_input": clean_input,
-            "log": _build_log_summary(
-                payload=payload,
-                status_code=0,
-                request_error="",
-                retry_scheduled=False,
-                blocked_by_retry_limit=False,
-                blocked_by_depth_limit=False,
-                duration_ms=duration_ms,
-            ),
+            "retry_planned": False,
             "next_commands": [],
         }
 
-    response: Optional[requests.Response] = None
-    request_error = ""
-    status_code = 0
+    started_at = time.time()
 
     try:
         response = REQUEST_SESSION.request(
-            method=http_payload["method"],
-            url=http_payload["url"],
-            headers=http_payload["headers"],
-            params=http_payload["params"] or None,
-            json=http_payload["json"],
-            data=http_payload["body"] if http_payload["json"] is None else None,
-            timeout=exec_meta["timeout_seconds"],
-            allow_redirects=exec_meta["allow_redirects"],
+            method=method,
+            url=url,
+            params=params or None,
+            headers=headers or None,
+            json=json_body,
+            data=data_body,
+            timeout=timeout_seconds,
+            allow_redirects=allow_redirects,
+            verify=verify_tls,
         )
-        status_code = int(response.status_code)
+
+        elapsed_ms = int((time.time() - started_at) * 1000)
+        response_payload = _extract_response_payload(response)
+        response_payload["elapsed_ms"] = elapsed_ms
+
+        success_statuses = original_payload.get("success_statuses")
+        if isinstance(success_statuses, list) and success_statuses:
+            is_success = int(response.status_code) in {
+                _to_int(x, -999999) for x in success_statuses
+            }
+        else:
+            is_success = 200 <= int(response.status_code) < 300
+
+        if is_success:
+            return {
+                "ok": True,
+                "status": "done",
+                "ts": _now_ts(),
+                "flow_id": meta["flow_id"],
+                "root_event_id": meta["root_event_id"],
+                "step_index": meta["step_index"],
+                "request": request_summary,
+                "response": response_payload,
+                "status_code": int(response.status_code),
+                "retry_planned": False,
+                "next_commands": [],
+            }
+
+        retry_count_after_failure = meta["retry_count"] + 1
+        retry_allowed = retry_count_after_failure <= meta["retry_max"]
+
+        result: Dict[str, Any] = {
+            "ok": False,
+            "status": "error",
+            "ts": _now_ts(),
+            "flow_id": meta["flow_id"],
+            "root_event_id": meta["root_event_id"],
+            "step_index": meta["step_index"],
+            "request": request_summary,
+            "response": response_payload,
+            "status_code": int(response.status_code),
+            "error": "http_status_error",
+            "error_message": f"HTTP request failed with status {response.status_code}",
+            "retry_count": retry_count_after_failure,
+            "retry_max": meta["retry_max"],
+            "retry_planned": False,
+            "next_commands": [],
+        }
+
+        if retry_allowed:
+            delay_seconds = _compute_backoff_seconds(original_payload, retry_count_after_failure)
+            next_retry_at = _build_next_retry_at(delay_seconds)
+
+            retry_input = deepcopy(original_payload)
+            retry_input["retry_count"] = retry_count_after_failure
+            retry_input["next_retry_at"] = next_retry_at
+            retry_input["_depth"] = _increment_depth(original_payload)
+
+            result["retry_planned"] = True
+            result["next_retry_at"] = next_retry_at
+            result["next_commands"] = [
+                {
+                    "capability": "retry_router",
+                    "input": retry_input,
+                }
+            ]
+            return result
+
+        incident_command = _build_incident_router_command(
+            original_payload=original_payload,
+            meta=meta,
+            error_code="http_status_error",
+            error_message=f"HTTP request failed with status {response.status_code}",
+            http_status=int(response.status_code),
+            request_summary=request_summary,
+            response_summary=response_payload,
+        )
+
+        result["next_commands"] = [incident_command]
+        return result
+
+    except requests.Timeout as exc:
+        elapsed_ms = int((time.time() - started_at) * 1000)
+        retry_count_after_failure = meta["retry_count"] + 1
+        retry_allowed = retry_count_after_failure <= meta["retry_max"]
+
+        result = {
+            "ok": False,
+            "status": "error",
+            "ts": _now_ts(),
+            "flow_id": meta["flow_id"],
+            "root_event_id": meta["root_event_id"],
+            "step_index": meta["step_index"],
+            "request": request_summary,
+            "response": {
+                "status_code": None,
+                "ok": False,
+                "content_type": "",
+                "headers": {},
+                "body_text": "",
+                "body_json": None,
+                "elapsed_ms": elapsed_ms,
+            },
+            "status_code": None,
+            "error": "timeout",
+            "error_message": _trim_text(str(exc), 1000) or "Request timeout",
+            "retry_count": retry_count_after_failure,
+            "retry_max": meta["retry_max"],
+            "retry_planned": False,
+            "next_commands": [],
+        }
+
+        if retry_allowed:
+            delay_seconds = _compute_backoff_seconds(original_payload, retry_count_after_failure)
+            next_retry_at = _build_next_retry_at(delay_seconds)
+
+            retry_input = deepcopy(original_payload)
+            retry_input["retry_count"] = retry_count_after_failure
+            retry_input["next_retry_at"] = next_retry_at
+            retry_input["_depth"] = _increment_depth(original_payload)
+
+            result["retry_planned"] = True
+            result["next_retry_at"] = next_retry_at
+            result["next_commands"] = [
+                {
+                    "capability": "retry_router",
+                    "input": retry_input,
+                }
+            ]
+            return result
+
+        incident_command = _build_incident_router_command(
+            original_payload=original_payload,
+            meta=meta,
+            error_code="timeout",
+            error_message=_trim_text(str(exc), 1000) or "Request timeout",
+            http_status=None,
+            request_summary=request_summary,
+            response_summary=result["response"],
+        )
+        result["next_commands"] = [incident_command]
+        return result
+
     except requests.RequestException as exc:
-        request_error = _safe_str(exc).strip() or exc.__class__.__name__
+        elapsed_ms = int((time.time() - started_at) * 1000)
+        retry_count_after_failure = meta["retry_count"] + 1
+        retry_allowed = retry_count_after_failure <= meta["retry_max"]
+
+        result = {
+            "ok": False,
+            "status": "error",
+            "ts": _now_ts(),
+            "flow_id": meta["flow_id"],
+            "root_event_id": meta["root_event_id"],
+            "step_index": meta["step_index"],
+            "request": request_summary,
+            "response": {
+                "status_code": None,
+                "ok": False,
+                "content_type": "",
+                "headers": {},
+                "body_text": "",
+                "body_json": None,
+                "elapsed_ms": elapsed_ms,
+            },
+            "status_code": None,
+            "error": "request_exception",
+            "error_message": _trim_text(str(exc), 1000) or exc.__class__.__name__,
+            "retry_count": retry_count_after_failure,
+            "retry_max": meta["retry_max"],
+            "retry_planned": False,
+            "next_commands": [],
+        }
+
+        if retry_allowed:
+            delay_seconds = _compute_backoff_seconds(original_payload, retry_count_after_failure)
+            next_retry_at = _build_next_retry_at(delay_seconds)
+
+            retry_input = deepcopy(original_payload)
+            retry_input["retry_count"] = retry_count_after_failure
+            retry_input["next_retry_at"] = next_retry_at
+            retry_input["_depth"] = _increment_depth(original_payload)
+
+            result["retry_planned"] = True
+            result["next_retry_at"] = next_retry_at
+            result["next_commands"] = [
+                {
+                    "capability": "retry_router",
+                    "input": retry_input,
+                }
+            ]
+            return result
+
+        incident_command = _build_incident_router_command(
+            original_payload=original_payload,
+            meta=meta,
+            error_code="request_exception",
+            error_message=_trim_text(str(exc), 1000) or exc.__class__.__name__,
+            http_status=None,
+            request_summary=request_summary,
+            response_summary=result["response"],
+        )
+        result["next_commands"] = [incident_command]
+        return result
+
     except Exception as exc:
-        request_error = _safe_str(exc).strip() or exc.__class__.__name__
+        elapsed_ms = int((time.time() - started_at) * 1000)
+        retry_count_after_failure = meta["retry_count"] + 1
+        retry_allowed = retry_count_after_failure <= meta["retry_max"]
 
-    blocked_by_retry_limit = False
-    blocked_by_depth_limit = False
-    retry_scheduled = False
+        result = {
+            "ok": False,
+            "status": "error",
+            "ts": _now_ts(),
+            "flow_id": meta["flow_id"],
+            "root_event_id": meta["root_event_id"],
+            "step_index": meta["step_index"],
+            "request": request_summary,
+            "response": {
+                "status_code": None,
+                "ok": False,
+                "content_type": "",
+                "headers": {},
+                "body_text": "",
+                "body_json": None,
+                "elapsed_ms": elapsed_ms,
+            },
+            "status_code": None,
+            "error": "unexpected_exception",
+            "error_message": _trim_text(f"{exc.__class__.__name__}: {exc}", 1000),
+            "retry_count": retry_count_after_failure,
+            "retry_max": meta["retry_max"],
+            "retry_planned": False,
+            "next_commands": [],
+        }
 
-    if _should_retry(status_code, request_error):
-        if _has_reached_retry_limit(retry_count, retry_max):
-            blocked_by_retry_limit = True
-        elif _has_reached_depth_limit(step_index + 1, max_depth):
-            blocked_by_depth_limit = True
-        else:
-            retry_scheduled = True
-            next_commands.append(
-                _make_retry_command(
-                    payload,
-                    clean_input=clean_input,
-                    flow_meta=flow_meta,
-                    retry_count=retry_count,
-                    retry_max=retry_max,
-                    retry_delay_seconds=retry_delay_seconds,
-                    step_index=step_index,
-                    max_depth=max_depth,
-                    status_code=status_code,
-                    request_error=request_error,
-                )
-            )
+        if retry_allowed:
+            delay_seconds = _compute_backoff_seconds(original_payload, retry_count_after_failure)
+            next_retry_at = _build_next_retry_at(delay_seconds)
 
-    duration_ms = int((time.time() - started_at) * 1000)
-    response_preview = _safe_response_preview(response)
+            retry_input = deepcopy(original_payload)
+            retry_input["retry_count"] = retry_count_after_failure
+            retry_input["next_retry_at"] = next_retry_at
+            retry_input["_depth"] = _increment_depth(original_payload)
 
-    if request_error:
-        final_ok = False
-        final_status = "blocked" if blocked_by_retry_limit or blocked_by_depth_limit else "error"
-        message = request_error
-    else:
-        final_ok = 200 <= status_code < 300
-        if final_ok:
-            final_status = "done"
-            message = "request completed"
-        else:
-            final_status = "blocked" if blocked_by_retry_limit or blocked_by_depth_limit else "error"
-            message = f"http status {status_code}"
+            result["retry_planned"] = True
+            result["next_retry_at"] = next_retry_at
+            result["next_commands"] = [
+                {
+                    "capability": "retry_router",
+                    "input": retry_input,
+                }
+            ]
+            return result
 
-    return {
-        "ok": final_ok,
-        "status": final_status,
-        "capability": "http_exec",
-        "message": message,
-        "flow_id": flow_meta["flow_id"],
-        "root_event_id": flow_meta["root_event_id"],
-        "parent_command_id": flow_meta["parent_command_id"],
-        "retry_count": retry_count,
-        "retry_max": retry_max,
-        "retry_delay_seconds": retry_delay_seconds,
-        "step_index": step_index,
-        "max_depth": max_depth,
-        "duration_ms": duration_ms,
-        "ts": _now_ts(),
-        "request": {
-            "url": http_payload["url"],
-            "method": http_payload["method"],
-        },
-        "response": response_preview,
-        "clean_command_input": clean_input,
-        "log": _build_log_summary(
-            payload=payload,
-            status_code=status_code,
-            request_error=request_error,
-            retry_scheduled=retry_scheduled,
-            blocked_by_retry_limit=blocked_by_retry_limit,
-            blocked_by_depth_limit=blocked_by_depth_limit,
-            duration_ms=duration_ms,
-        ),
-        "next_commands": next_commands,
-    }
+        incident_command = _build_incident_router_command(
+            original_payload=original_payload,
+            meta=meta,
+            error_code="unexpected_exception",
+            error_message=_trim_text(f"{exc.__class__.__name__}: {exc}", 1000),
+            http_status=None,
+            request_summary=request_summary,
+            response_summary=result["response"],
+        )
+        result["next_commands"] = [incident_command]
+        return result
 
 
-def run(payload: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Dict[str, Any]:
-    return capability_http_exec(payload=payload, **kwargs)
+def run(payload: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    return capability_http_exec(payload, context)
