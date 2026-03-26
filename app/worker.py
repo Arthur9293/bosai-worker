@@ -3131,6 +3131,25 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             workspace_id = str(fields.get("Workspace_ID") or "production").strip() or "production"
             root_event_id = _infer_root_event_id(fields, idem)
 
+            if isinstance(result_obj, dict):
+                next_commands = result_obj.get("next_commands")
+                if isinstance(next_commands, list):
+                    for child in next_commands:
+                        if not isinstance(child, dict):
+                            continue
+
+                        child_input = child.get("input") or {}
+                        if not isinstance(child_input, dict):
+                            child_input = {}
+
+                        if not str(child_input.get("parent_command_id") or "").strip():
+                            child_input["parent_command_id"] = cid
+
+                        child["input"] = child_input
+
+                        if not str(child.get("parent_command_id") or "").strip():
+                            child["parent_command_id"] = cid
+
             spawn_res = _spawn_next_commands_from_result(
                 parent_command_id=cid,
                 parent_idempotency_key=idem,
