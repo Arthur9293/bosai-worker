@@ -6199,11 +6199,101 @@ def get_runs(limit: int = 20) -> Dict[str, Any]:
         "ts": utc_now_iso(),
     }
 
+def _coerce_json_obj(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
 
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+
+    return {}
+
+
+def _extract_flow_metadata_from_command_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
+    input_json = _coerce_json_obj(
+        fields.get("Input_JSON")
+        or fields.get("input_json")
+    )
+
+    result_json = _coerce_json_obj(
+        fields.get("Result_JSON")
+        or fields.get("result_json")
+    )
+
+    flow_id = (
+        fields.get("Flow_ID")
+        or fields.get("flow_id")
+        or input_json.get("flow_id")
+        or input_json.get("flowid")
+        or input_json.get("flowId")
+        or result_json.get("flow_id")
+        or result_json.get("flowid")
+        or result_json.get("flowId")
+    )
+
+    root_event_id = (
+        fields.get("Root_Event_ID")
+        or fields.get("root_event_id")
+        or fields.get("Event_ID")
+        or input_json.get("root_event_id")
+        or input_json.get("rooteventid")
+        or input_json.get("event_id")
+        or result_json.get("root_event_id")
+        or result_json.get("rooteventid")
+        or result_json.get("event_id")
+    )
+
+    parent_command_id = (
+        fields.get("Parent_Command_ID")
+        or fields.get("parent_command_id")
+        or input_json.get("parent_command_id")
+        or input_json.get("parentcommand_id")
+        or result_json.get("parent_command_id")
+        or result_json.get("parentcommand_id")
+    )
+
+    step_index = (
+        fields.get("Step_Index")
+        or fields.get("step_index")
+        or input_json.get("step_index")
+        or input_json.get("stepindex")
+        or result_json.get("step_index")
+        or result_json.get("stepindex")
+    )
+
+    try:
+        if step_index is not None and str(step_index).strip() != "":
+            step_index = int(step_index)
+        else:
+            step_index = None
+    except Exception:
+        step_index = None
+
+    return {
+        "flow_id": str(flow_id).strip() if flow_id is not None and str(flow_id).strip() else None,
+        "root_event_id": str(root_event_id).strip()
+        if root_event_id is not None and str(root_event_id).strip()
+        else None,
+        "parent_command_id": str(parent_command_id).strip()
+        if parent_command_id is not None and str(parent_command_id).strip()
+        else None,
+        "step_index": step_index,
+        "input_json": input_json if input_json else None,
+        "result_json": result_json if result_json else None,
+    }
+    
 @app.get("/commands")
 def get_commands(limit: int = 30) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=30, minimum=1, maximum=100)
-    records, meta = _safe_records_from_view(COMMANDS_TABLE_NAME, COMMANDS_DASHBOARD_VIEW_NAME, limit)
+    records, meta = _safe_records_from_view(
+        COMMANDS_TABLE_NAME,
+        COMMANDS_DASHBOARD_VIEW_NAME,
+        limit,
+    )
 
     commands: List[Dict[str, Any]] = []
     stats = {
@@ -6222,6 +6312,7 @@ def get_commands(limit: int = 30) -> Dict[str, Any]:
         f = r.get("fields", {}) or {}
         status = _read_command_status(f)
         key = status.lower()
+        flow_meta = _extract_flow_metadata_from_command_fields(f)
 
         if key in ("queued", "queue"):
             stats["queued"] += 1
@@ -6255,6 +6346,17 @@ def get_commands(limit: int = 30) -> Dict[str, Any]:
                 "is_locked": f.get("Is_Locked"),
                 "locked_by": f.get("Locked_By"),
                 "idempotency_key": f.get("Idempotency_Key"),
+                "flow_id": flow_meta["flow_id"],
+                "root_event_id": flow_meta["root_event_id"],
+                "parent_command_id": flow_meta["parent_command_id"],
+                "step_index": flow_meta["step_index"],
+                "input_json": flow_meta["input_json"],
+                "result_json": flow_meta["result_json"],
+                "worker": f.get("Locked_By") or f.get("Worker"),
+                "workspace_id": f.get("Workspace_ID") or f.get("workspace_id"),
+                "started_at": f.get("Started_At"),
+                "finished_at": f.get("Finished_At"),
+                "created_at": f.get("Created_At") or f.get("created_at"),
             }
         )
 
@@ -6266,7 +6368,6 @@ def get_commands(limit: int = 30) -> Dict[str, Any]:
         "commands": commands,
         "ts": utc_now_iso(),
     }
-
 
 @app.get("/sla")
 def get_sla(limit: int = 50) -> Dict[str, Any]:
