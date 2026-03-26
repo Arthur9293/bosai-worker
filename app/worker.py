@@ -6211,8 +6211,7 @@ def _coerce_json_obj(value: Any) -> Dict[str, Any]:
             return {}
 
     return {}
-
-
+    
 def _extract_flow_metadata_from_command_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
     input_json = _coerce_json_obj(
         fields.get("Input_JSON")
@@ -6224,41 +6223,52 @@ def _extract_flow_metadata_from_command_fields(fields: Dict[str, Any]) -> Dict[s
         or fields.get("result_json")
     )
 
-    flow_id = (
-        fields.get("Flow_ID")
-        or fields.get("flow_id")
-        or input_json.get("flow_id")
-        or input_json.get("flowid")
-        or input_json.get("flowId")
-        or result_json.get("flow_id")
-        or result_json.get("flowid")
-        or result_json.get("flowId")
+    def pick(*values):
+        for v in values:
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return None
+
+    flow_id = pick(
+        fields.get("Flow_ID"),
+        fields.get("flow_id"),
+        fields.get("flowid"),
+        input_json.get("flow_id"),
+        input_json.get("flowid"),
+        input_json.get("flowId"),
+        result_json.get("flow_id"),
+        result_json.get("flowid"),
+        result_json.get("flowId"),
     )
 
-    root_event_id = (
-        fields.get("Root_Event_ID")
-        or fields.get("root_event_id")
-        or fields.get("Event_ID")
-        or input_json.get("root_event_id")
-        or input_json.get("rooteventid")
-        or input_json.get("event_id")
-        or result_json.get("root_event_id")
-        or result_json.get("rooteventid")
-        or result_json.get("event_id")
+    root_event_id = pick(
+        fields.get("Root_Event_ID"),
+        fields.get("root_event_id"),
+        fields.get("rooteventid"),
+        fields.get("Event_ID"),
+        fields.get("event_id"),
+        input_json.get("root_event_id"),
+        input_json.get("rooteventid"),
+        input_json.get("event_id"),
+        result_json.get("root_event_id"),
+        result_json.get("rooteventid"),
+        result_json.get("event_id"),
     )
 
-    parent_command_id = (
-        fields.get("Parent_Command_ID")
-        or fields.get("parent_command_id")
-        or input_json.get("parent_command_id")
-        or input_json.get("parentcommand_id")
-        or result_json.get("parent_command_id")
-        or result_json.get("parentcommand_id")
+    parent_command_id = pick(
+        fields.get("Parent_Command_ID"),
+        fields.get("parent_command_id"),
+        fields.get("parentcommand_id"),
+        input_json.get("parent_command_id"),
+        input_json.get("parentcommand_id"),
+        result_json.get("parent_command_id"),
+        result_json.get("parentcommand_id"),
     )
 
-    step_index = (
+    step_index_raw = (
         fields.get("Step_Index")
         or fields.get("step_index")
+        or fields.get("stepindex")
         or input_json.get("step_index")
         or input_json.get("stepindex")
         or result_json.get("step_index")
@@ -6266,21 +6276,14 @@ def _extract_flow_metadata_from_command_fields(fields: Dict[str, Any]) -> Dict[s
     )
 
     try:
-        if step_index is not None and str(step_index).strip() != "":
-            step_index = int(step_index)
-        else:
-            step_index = None
+        step_index = int(step_index_raw) if step_index_raw is not None and str(step_index_raw).strip() != "" else None
     except Exception:
         step_index = None
 
     return {
-        "flow_id": str(flow_id).strip() if flow_id is not None and str(flow_id).strip() else None,
-        "root_event_id": str(root_event_id).strip()
-        if root_event_id is not None and str(root_event_id).strip()
-        else None,
-        "parent_command_id": str(parent_command_id).strip()
-        if parent_command_id is not None and str(parent_command_id).strip()
-        else None,
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "parent_command_id": parent_command_id,
         "step_index": step_index,
         "input_json": input_json if input_json else None,
         "result_json": result_json if result_json else None,
