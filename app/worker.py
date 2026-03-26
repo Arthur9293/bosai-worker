@@ -4557,6 +4557,12 @@ def _create_command_from_next_command(
     if not isinstance(raw_input, dict):
         return {"ok": False, "error": "invalid_input"}
 
+    parent_command_id = str(
+        next_cmd.get("parent_command_id")
+        or raw_input.get("parent_command_id")
+        or ""
+    ).strip()
+
     command_input = dict(raw_input)
     command_input = _normalize_keys_deep(command_input)
     command_input = _unwrap_command_payload(command_input)
@@ -4593,6 +4599,9 @@ def _create_command_from_next_command(
 
     command_input.pop("flowid", None)
     command_input.pop("rooteventid", None)
+
+    if parent_command_id:
+        command_input["parent_command_id"] = parent_command_id
 
     if effective_workspace_id and not str(command_input.get("workspace_id") or "").strip():
         command_input["workspace_id"] = effective_workspace_id
@@ -4638,6 +4647,7 @@ def _create_command_from_next_command(
             "inherited_input_idem": inherited_input_idem,
             "flow_id": flow_id,
             "root_event_id": root_event_id,
+            "parent_command_id": parent_command_id,
             "retry_count": retry_count,
             "step_index": step_index,
         },
@@ -4653,6 +4663,7 @@ def _create_command_from_next_command(
                 "existing_record_id": str(existing.get("id") or "").strip(),
                 "flow_id": flow_id,
                 "root_event_id": root_event_id,
+                "parent_command_id": parent_command_id,
                 "retry_count": retry_count,
                 "step_index": step_index,
             },
@@ -4667,6 +4678,7 @@ def _create_command_from_next_command(
             "parent_run_id": parent_run_id,
             "flow_id": flow_id,
             "root_event_id": root_event_id,
+            "parent_command_id": parent_command_id,
         }
 
     print(
@@ -4677,6 +4689,7 @@ def _create_command_from_next_command(
             "workspace_id": effective_workspace_id,
             "flow_id": flow_id,
             "root_event_id": root_event_id,
+            "parent_command_id": parent_command_id,
             "retry_count": retry_count,
             "step_index": step_index,
             "command_input": command_input,
@@ -4714,6 +4727,7 @@ def _create_command_from_next_command(
         "parent_run_id": parent_run_id,
         "flow_id": flow_id,
         "root_event_id": root_event_id,
+        "parent_command_id": parent_command_id,
     }
     
 def _create_incident_log_record(incident_payload: Dict[str, Any]) -> Dict[str, Any]:
