@@ -754,14 +754,19 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
 
         candidates: List[str] = []
 
+        # brut
         candidates.append(raw_text)
+
+        # guillemets échappés
         candidates.append(raw_text.replace('\\"', '"'))
 
+        # unicode escape
         try:
             candidates.append(bytes(raw_text, "utf-8").decode("unicode_escape"))
         except Exception:
             pass
 
+        # retire les backslashes invalides devant underscore
         candidates.append(raw_text.replace("\\_", "_"))
         candidates.append(raw_text.replace('\\"', '"').replace("\\_", "_"))
 
@@ -771,6 +776,7 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             pass
 
+        # dédoublonne
         seen = set()
         unique_candidates: List[str] = []
         for c in candidates:
@@ -915,6 +921,7 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
                 response_obj = json.loads(base["response"].replace('\\"', '"'))
             except Exception:
                 response_obj = None
+
         if isinstance(response_obj, dict):
             base["response"] = response_obj
 
@@ -923,7 +930,7 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     base = _normalize_flow_keys(base)
 
     # ------------------------------------------------------------
-    # FLOW / ROOT fallbacks CRITIQUES
+    # FLOW / ROOT fallbacks critiques
     # ------------------------------------------------------------
     parent_command_id = str(
         fields.get("id")
@@ -947,6 +954,7 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
 
     if not str(base.get("flow_id") or "").strip():
         fallback_flow_id = ""
+
         if parent_command_id:
             fallback_flow_id = f"flow_{parent_command_id}"
         elif str(base.get("root_event_id") or "").strip():
@@ -969,8 +977,13 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         base["step_index"] = 0
 
     if parse_errors:
-        print(f"[compose_command_input] parse_errors={json.dumps(parse_errors, ensure_ascii=False)}")
-    print(f"[compose_command_input] final_base={json.dumps(base, ensure_ascii=False)}")
+        print(
+            f"[compose_command_input] parse_errors={json.dumps(parse_errors, ensure_ascii=False)}"
+        )
+
+    print(
+        f"[compose_command_input] final_base={json.dumps(base, ensure_ascii=False)}"
+    )
 
     return base
     
