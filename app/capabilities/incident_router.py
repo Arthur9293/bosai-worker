@@ -67,20 +67,76 @@ def _extract_input(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "flow_id": _to_str(payload.get("flow_id")),
-        "root_event_id": _to_str(payload.get("root_event_id")),
-        "parent_command_id": _to_str(payload.get("parent_command_id")),
-        "parent_capability": _to_str(payload.get("parent_capability")),
-        "step_index": _to_int(payload.get("step_index"), 0),
-        "retry_count": _to_int(payload.get("retry_count"), 0),
-        "depth": _to_int(
-            payload.get("depth") if payload.get("depth") is not None else payload.get("_depth"),
+        "flow_id": _to_str(
+            payload.get("flow_id")
+            or payload.get("flowid")
+            or payload.get("flowId")
+            or ""
+        ),
+        "root_event_id": _to_str(
+            payload.get("root_event_id")
+            or payload.get("rooteventid")
+            or payload.get("rootEventId")
+            or payload.get("event_id")
+            or payload.get("eventid")
+            or payload.get("eventId")
+            or ""
+        ),
+        "parent_command_id": _to_str(
+            payload.get("parent_command_id")
+            or payload.get("parentcommand_id")
+            or payload.get("parentCommandId")
+            or ""
+        ),
+        "parent_capability": _to_str(
+            payload.get("parent_capability")
+            or payload.get("parentcapability")
+            or payload.get("parentCapability")
+            or ""
+        ),
+        "step_index": _to_int(
+            payload.get("step_index")
+            if payload.get("step_index") is not None
+            else payload.get("stepindex")
+            if payload.get("stepindex") is not None
+            else payload.get("stepIndex"),
             0,
         ),
-        "workspace_id": _to_str(payload.get("workspace_id")),
-        "tenant_id": _to_str(payload.get("tenant_id")),
-        "app_name": _to_str(payload.get("app_name")),
-        "source": _to_str(payload.get("source")),
+        "retry_count": _to_int(
+            payload.get("retry_count")
+            if payload.get("retry_count") is not None
+            else payload.get("retrycount")
+            if payload.get("retrycount") is not None
+            else payload.get("retryCount"),
+            0,
+        ),
+        "depth": _to_int(
+            payload.get("depth")
+            if payload.get("depth") is not None
+            else payload.get("_depth")
+            if payload.get("_depth") is not None
+            else payload.get("Depth"),
+            0,
+        ),
+        "workspace_id": _to_str(
+            payload.get("workspace_id")
+            or payload.get("workspaceid")
+            or payload.get("workspaceId")
+            or "production"
+        ),
+        "tenant_id": _to_str(
+            payload.get("tenant_id")
+            or payload.get("tenantid")
+            or payload.get("tenantId")
+            or ""
+        ),
+        "app_name": _to_str(
+            payload.get("app_name")
+            or payload.get("appname")
+            or payload.get("appName")
+            or ""
+        ),
+        "source": _to_str(payload.get("source") or "incident_router"),
     }
 
 
@@ -96,6 +152,8 @@ def _normalize_incident(payload: Dict[str, Any]) -> Dict[str, Any]:
     http_status = (
         payload.get("http_status")
         if payload.get("http_status") is not None
+        else payload.get("httpstatus")
+        if payload.get("httpstatus") is not None
         else response_obj.get("status_code")
     )
     if http_status is None:
@@ -107,18 +165,24 @@ def _normalize_incident(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     incident_code = (
         payload.get("incident_code")
+        or payload.get("incidentcode")
         or error_obj.get("incident_code")
         or error_obj.get("code")
         or diagnostics.get("incident_code")
         or incident_meta.get("incident_code")
+        or ""
     )
 
     final_failure = (
         payload.get("final_failure")
-        or error_obj.get("final_failure")
-        or diagnostics.get("final_failure")
-        or payload.get("finalfailure")
-        or False
+        if payload.get("final_failure") is not None
+        else payload.get("finalfailure")
+        if payload.get("finalfailure") is not None
+        else error_obj.get("final_failure")
+        if error_obj.get("final_failure") is not None
+        else diagnostics.get("final_failure")
+        if diagnostics.get("final_failure") is not None
+        else False
     )
 
     normalized = {
@@ -129,27 +193,41 @@ def _normalize_incident(payload: Dict[str, Any]) -> Dict[str, Any]:
         "error_message": _to_str(
             payload.get("incident_message")
             or payload.get("error_message")
+            or payload.get("errormessage")
             or error_obj.get("message")
             or payload.get("message")
             or diagnostics.get("message")
+            or ""
         ),
         "failed_capability": _to_str(
             payload.get("failed_capability")
+            or payload.get("failedcapability")
             or payload.get("capability")
             or error_obj.get("capability")
             or payload.get("source_capability")
+            or ""
         ),
         "target_url": _to_str(
             payload.get("target_url")
+            or payload.get("targeturl")
             or request_obj.get("url")
             or http_meta.get("url")
             or payload.get("url")
+            or ""
         ),
         "method": _to_str(
             payload.get("method")
             or request_obj.get("method")
             or http_meta.get("method")
+            or "GET"
         ).upper(),
+        "log_record_id": _to_str(
+            payload.get("log_record_id")
+            or payload.get("logrecordid")
+            or payload.get("incident_record_id")
+            or payload.get("incidentrecordid")
+            or ""
+        ),
         "raw_payload": deepcopy(payload),
     }
 
@@ -167,8 +245,6 @@ def _classify_incident(incident: Dict[str, Any]) -> Dict[str, Any]:
     severity = "medium"
     category = "unknown_incident"
 
-    # 🔥 FIX CRITIQUE
-    # Si 5xx → on escalate même sans final_failure
     if 500 <= http_status <= 599:
         decision = "escalate"
         reason = "http_5xx_detected"
@@ -187,12 +263,19 @@ def _classify_incident(incident: Dict[str, Any]) -> Dict[str, Any]:
         severity = "medium"
         category = "http_failure"
 
+    elif incident_code in {"auth_error", "permission_denied", "forbidden"}:
+        decision = "escalate"
+        reason = "authorization_failure"
+        severity = "high"
+        category = "auth_failure"
+
     return {
         "decision": decision,
         "reason": reason,
         "severity": severity,
         "category": category,
     }
+
 
 def _build_next_commands(
     meta: Dict[str, Any],
@@ -220,6 +303,14 @@ def _build_next_commands(
         "tenant_id": meta.get("tenant_id", ""),
         "app_name": meta.get("app_name", ""),
         "source": "incident_router",
+        "goal": "incident_escalation",
+        "reason": classification.get("reason", "unclassified_incident"),
+        "severity": classification.get("severity", "medium"),
+        "http_status": incident.get("http_status", 0),
+        "failed_goal": "incident_router",
+        "failed_url": incident.get("target_url", ""),
+        "sla_status": "",
+        "log_record_id": incident.get("log_record_id", ""),
         "incident": {
             "decision": classification.get("decision"),
             "reason": classification.get("reason"),
@@ -239,7 +330,8 @@ def _build_next_commands(
     return [
         {
             "capability": "internal_escalate",
-            "command_input": next_input,
+            "priority": 1,
+            "input": next_input,
         }
     ]
 
@@ -249,9 +341,6 @@ def run(
     context: Optional[Any] = None,
     **kwargs: Any,
 ) -> Dict[str, Any]:
-    raise RuntimeError("INCIDENT_ROUTER_V2_MARKER")
-    print("INCIDENT_ROUTER_V2_LOADED")
-
     if payload is not None and hasattr(payload, "input"):
         payload = getattr(payload, "input", {}) or {}
     elif not isinstance(payload, dict):
@@ -262,8 +351,8 @@ def run(
     incident = _normalize_incident(data)
     classification = _classify_incident(incident)
 
-    print("DEBUG INCIDENT", incident)
-    print("DEBUG CLASSIFICATION", classification)
+    print("[incident_router] incident =", incident)
+    print("[incident_router] classification =", classification)
 
     next_commands = _build_next_commands(meta, incident, classification)
 
