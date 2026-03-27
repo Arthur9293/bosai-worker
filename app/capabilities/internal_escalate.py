@@ -88,7 +88,13 @@ def capability_internal_escalate(
     payload = req.input or {}
 
     flow_id = str(payload.get("flow_id") or "").strip()
-    root_event_id = str(payload.get("root_event_id") or "").strip()
+
+    root_event_id = str(
+        payload.get("root_event_id")
+        or payload.get("event_id")
+        or payload.get("id")
+        or ""
+    ).strip()
 
     log_record_id = str(
         payload.get("log_record_id")
