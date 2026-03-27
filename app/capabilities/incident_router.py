@@ -167,16 +167,20 @@ def _classify_incident(incident: Dict[str, Any]) -> Dict[str, Any]:
     severity = "medium"
     category = "unknown_incident"
 
-    if 500 <= http_status <= 599 and final_failure:
+    # 🔥 FIX CRITIQUE
+    # Si 5xx → on escalate même sans final_failure
+    if 500 <= http_status <= 599:
         decision = "escalate"
-        reason = "http_5xx_exhausted"
+        reason = "http_5xx_detected"
         severity = "high"
         category = "http_failure"
+
     elif incident_code == "timeout" and final_failure:
         decision = "escalate"
         reason = "timeout_exhausted"
         severity = "high"
         category = "timeout"
+
     elif http_status == 429:
         decision = "escalate"
         reason = "rate_limit_exhausted"
@@ -189,7 +193,6 @@ def _classify_incident(incident: Dict[str, Any]) -> Dict[str, Any]:
         "severity": severity,
         "category": category,
     }
-
 
 def _build_next_commands(
     meta: Dict[str, Any],
