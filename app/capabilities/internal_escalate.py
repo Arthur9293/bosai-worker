@@ -162,8 +162,8 @@ def capability_internal_escalate(
     print("[INTERNAL_ESCALATE] update_res =", _safe_json(update_res))
 
     if isinstance(update_res, dict):
-    for idx, attempt in enumerate(update_res.get("attempts", []), start=1):
-        print(f"[INTERNAL_ESCALATE] attempt_{idx} =", _safe_json(attempt))
+        for idx, attempt in enumerate(update_res.get("attempts", []), start=1):
+            print(f"[INTERNAL_ESCALATE] attempt_{idx} =", _safe_json(attempt))
 
     if not update_res.get("ok"):
         return {
