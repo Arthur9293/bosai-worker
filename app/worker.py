@@ -4657,37 +4657,46 @@ def _event_mark_processed(
     attempts = []
 
     linked_command_value = [command_record_id] if command_record_id else None
+    processed_at_value = utc_now_iso()
 
     candidate_fields_list = [
         {
             "Status_select": "Processed",
+            "Processed_At": processed_at_value,
         },
         {
             "Status_select": "Processed",
+            "Processed_At": processed_at_value,
             "Command_Created": True if command_created else False,
         },
         {
             "Status_select": "Processed",
+            "Processed_At": processed_at_value,
             "Idempotency_Key": idempotency_key,
         },
         {
             "Status_select": "Processed",
+            "Processed_At": processed_at_value,
             "Command_Created": True if command_created else False,
             "Idempotency_Key": idempotency_key,
         },
         {
             "Status_select": "Processed",
+            "Processed_At": processed_at_value,
             "Linked_Command": linked_command_value,
         } if linked_command_value else {
             "Status_select": "Processed",
+            "Processed_At": processed_at_value,
         },
         {
             "Status_select": "Processed",
+            "Processed_At": processed_at_value,
             "Linked_Command": linked_command_value,
             "Command_Created": True if command_created else False,
             "Idempotency_Key": idempotency_key,
         } if linked_command_value else {
             "Status_select": "Processed",
+            "Processed_At": processed_at_value,
             "Command_Created": True if command_created else False,
             "Idempotency_Key": idempotency_key,
         },
@@ -4718,6 +4727,7 @@ def _event_mark_processed(
         "event_record_id": event_record_id,
         "attempts": attempts,
     }
+    
 def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
     fields = event_record.get("fields", {}) or {}
     event_record_id = str(event_record.get("id") or "").strip()
