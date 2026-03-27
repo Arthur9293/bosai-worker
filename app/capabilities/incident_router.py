@@ -51,18 +51,7 @@ def _safe_dict(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _safe_list(value: Any) -> List[Any]:
-    return value if isinstance(value, list) else []
-
-
 def _extract_input(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Tolère plusieurs formes d'entrée :
-    - payload direct
-    - payload["input"]
-    - payload["command_input"]
-    - payload["incident"]
-    """
     if not isinstance(payload, dict):
         return {}
 
@@ -84,7 +73,10 @@ def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
         "parent_capability": _to_str(payload.get("parent_capability")),
         "step_index": _to_int(payload.get("step_index"), 0),
         "retry_count": _to_int(payload.get("retry_count"), 0),
-        "depth": _to_int(payload.get("depth"), 0),
+        "depth": _to_int(
+            payload.get("depth") if payload.get("depth") is not None else payload.get("_depth"),
+            0,
+        ),
         "workspace_id": _to_str(payload.get("workspace_id")),
         "tenant_id": _to_str(payload.get("tenant_id")),
         "app_name": _to_str(payload.get("app_name")),
@@ -94,6 +86,8 @@ def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def _normalize_incident(payload: Dict[str, Any]) -> Dict[str, Any]:
     error_obj = _safe_dict(payload.get("error"))
+    request_obj = _safe_dict(payload.get("request"))
+    response_obj = _safe_dict(payload.get("response"))
     http_meta = _safe_dict(payload.get("http"))
     incident_meta = _safe_dict(payload.get("incident_meta"))
     diagnostics = _safe_dict(payload.get("diagnostics"))
@@ -102,8 +96,10 @@ def _normalize_incident(payload: Dict[str, Any]) -> Dict[str, Any]:
     http_status = (
         payload.get("http_status")
         if payload.get("http_status") is not None
-        else error_obj.get("http_status")
+        else response_obj.get("status_code")
     )
+    if http_status is None:
+        http_status = error_obj.get("http_status")
     if http_status is None:
         http_status = http_meta.get("status_code")
     if http_status is None:
@@ -129,7 +125,8 @@ def _normalize_incident(payload: Dict[str, Any]) -> Dict[str, Any]:
         "incident_code": _to_str(incident_code).strip().lower(),
         "final_failure": _to_bool(final_failure, False),
         "error_message": _to_str(
-            payload.get("error_message")
+            payload.get("incident_message")
+            or payload.get("error_message")
             or error_obj.get("message")
             or payload.get("message")
             or diagnostics.get("message")
@@ -142,11 +139,13 @@ def _normalize_incident(payload: Dict[str, Any]) -> Dict[str, Any]:
         ),
         "target_url": _to_str(
             payload.get("target_url")
+            or request_obj.get("url")
             or http_meta.get("url")
             or payload.get("url")
         ),
         "method": _to_str(
             payload.get("method")
+            or request_obj.get("method")
             or http_meta.get("method")
         ).upper(),
         "raw_payload": deepcopy(payload),
@@ -209,7 +208,7 @@ def _build_next_commands(
         "parent_capability": "incident_router",
         "parent_command_id": meta.get("parent_command_id", ""),
         "step_index": step_index + 1,
-        "depth": depth + 1,
+        "_depth": depth + 1,
         "workspace_id": meta.get("workspace_id", ""),
         "tenant_id": meta.get("tenant_id", ""),
         "app_name": meta.get("app_name", ""),
@@ -238,7 +237,16 @@ def _build_next_commands(
     ]
 
 
-def run(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def run(
+    payload: Optional[Any] = None,
+    context: Optional[Any] = None,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    if payload is not None and hasattr(payload, "input"):
+        payload = getattr(payload, "input", {}) or {}
+    elif not isinstance(payload, dict):
+        payload = {}
+
     data = _extract_input(payload or {})
     meta = _extract_meta(data)
     incident = _normalize_incident(data)
@@ -251,6 +259,7 @@ def run(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     result = {
         "ok": True,
         "capability": "incident_router",
+        "status": "done",
         "ts": _now_ts(),
         "flow_id": meta.get("flow_id", ""),
         "root_event_id": meta.get("root_event_id", ""),
