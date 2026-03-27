@@ -7,6 +7,9 @@ import threading
 import time
 import traceback
 import uuid
+
+print("WORKER_MAIN_FILE_MARKER")
+
 from dotenv import load_dotenv
 
 from datetime import datetime, timedelta, timezone
