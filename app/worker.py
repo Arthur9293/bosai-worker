@@ -3161,8 +3161,11 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             )
 
             _command_lock_heartbeat(cid, lock_token)
-            result_obj = fn(cmd_req, run_record_id)
 
+            print("DISPATCH CAPABILITY:", capability)
+            print("DISPATCH FN:", fn)
+
+            result_obj = fn(cmd_req, run_record_id)
             if isinstance(result_obj, dict):
                 current_flow_id = (
                     result_obj.get("flow_id")
