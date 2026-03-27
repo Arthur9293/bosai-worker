@@ -716,6 +716,30 @@ def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     return normalized
 
+
+def _resolve_flow_step_index(payload: Dict[str, Any], default: int = 0) -> int:
+    if not isinstance(payload, dict):
+        return default
+
+    raw_value = (
+        payload.get("step_index")
+        if payload.get("step_index") is not None
+        else payload.get("stepindex")
+        if payload.get("stepindex") is not None
+        else payload.get("stepIndex")
+        if payload.get("stepIndex") is not None
+        else payload.get("Step_Index")
+        if payload.get("Step_Index") is not None
+        else payload.get("StepIndex")
+    )
+
+    try:
+        if raw_value is None or str(raw_value).strip() == "":
+            return default
+        return int(raw_value)
+    except Exception:
+        return default
+
 def _parse_float(val: Any) -> Optional[float]:
     if val is None:
         return None
