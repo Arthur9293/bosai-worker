@@ -930,7 +930,7 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     base = _normalize_flow_keys(base)
 
     # ------------------------------------------------------------
-    # FLOW / ROOT fallbacks critiques
+    # FLOW / ROOT propagation stricte
     # ------------------------------------------------------------
     parent_command_id = str(
         fields.get("id")
@@ -940,6 +940,7 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         or ""
     ).strip()
 
+    # workspace
     if not str(base.get("workspace_id") or "").strip():
         workspace_id = str(
             fields.get("Workspace_ID")
@@ -949,30 +950,36 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         if workspace_id:
             base["workspace_id"] = workspace_id
 
+    # parent
     if not str(base.get("parent_command_id") or "").strip() and parent_command_id:
         base["parent_command_id"] = parent_command_id
 
-    if not str(base.get("flow_id") or "").strip():
-        fallback_flow_id = ""
+    # ROOT_EVENT_ID prioritaire
+    root_event_id = str(
+        base.get("root_event_id")
+        or fields.get("Root_Event_ID")
+        or fields.get("root_event_id")
+        or ""
+    ).strip()
 
-        if parent_command_id:
-            fallback_flow_id = f"flow_{parent_command_id}"
-        elif str(base.get("root_event_id") or "").strip():
-            fallback_flow_id = str(base.get("root_event_id")).strip()
-        elif str(fields.get("Root_Event_ID") or "").strip():
-            fallback_flow_id = str(fields.get("Root_Event_ID")).strip()
+    if not root_event_id:
+        print("[compose_command_input][WARNING] missing root_event_id")
+    else:
+        base["root_event_id"] = root_event_id
 
-        if fallback_flow_id:
-            base["flow_id"] = fallback_flow_id
+    # FLOW_ID dépend du root, sinon parent en dernier secours
+    flow_id = str(base.get("flow_id") or "").strip()
 
-    if not str(base.get("root_event_id") or "").strip():
-        fallback_root = (
-            str(fields.get("Root_Event_ID") or "").strip()
-            or str(base.get("flow_id") or "").strip()
-        )
-        if fallback_root:
-            base["root_event_id"] = fallback_root
+    if not flow_id:
+        if root_event_id:
+            flow_id = root_event_id
+        elif parent_command_id:
+            flow_id = f"flow_{parent_command_id}"
 
+    if flow_id:
+        base["flow_id"] = flow_id
+
+    # STEP INDEX
     if base.get("step_index") in (None, ""):
         base["step_index"] = 0
 
