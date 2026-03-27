@@ -5654,7 +5654,7 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
         or ""
     ).strip()
 
-    reason = str(
+    original_reason = str(
         payload.get("reason")
         or payload.get("retry_reason")
         or payload.get("retryreason")
@@ -5666,6 +5666,8 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
         payload.get("error")
         or payload.get("last_error")
         or payload.get("Error")
+        or payload.get("incident_message")
+        or payload.get("error_message")
         or ""
     ).strip()
 
@@ -5679,6 +5681,7 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
     failed_url = str(
         payload.get("failed_url")
         or payload.get("failedurl")
+        or payload.get("target_url")
         or payload.get("url")
         or payload.get("http_target")
         or payload.get("httptarget")
@@ -5732,6 +5735,50 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
     except Exception:
         http_status = None
 
+    incident_code = str(
+        payload.get("incident_code")
+        or payload.get("error_code")
+        or payload.get("incidentcode")
+        or payload.get("Incident_Code")
+        or ""
+    ).strip().lower()
+
+    final_failure_raw = payload.get("final_failure")
+    if final_failure_raw is None:
+        final_failure_raw = payload.get("finalfailure")
+    if final_failure_raw is None:
+        final_failure_raw = payload.get("Final_Failure")
+
+    if isinstance(final_failure_raw, bool):
+        final_failure = final_failure_raw
+    elif final_failure_raw is None:
+        final_failure = False
+    else:
+        final_failure = str(final_failure_raw).strip().lower() in {
+            "1", "true", "yes", "y", "on"
+        }
+
+    decision = "log_only"
+    classified_reason = "unclassified_incident"
+    severity = "medium"
+    category = "unknown_incident"
+
+    if http_status is not None and 500 <= http_status <= 599 and final_failure:
+        decision = "escalate"
+        classified_reason = "http_5xx_exhausted"
+        severity = "high"
+        category = "http_failure"
+    elif incident_code == "timeout" and final_failure:
+        decision = "escalate"
+        classified_reason = "timeout_exhausted"
+        severity = "high"
+        category = "timeout"
+    elif http_status == 429:
+        decision = "escalate"
+        classified_reason = "rate_limit_exhausted"
+        severity = "medium"
+        category = "http_failure"
+
     incident_key = "|".join(
         [
             flow_id or "no_flow",
@@ -5740,7 +5787,9 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
             failed_method or "no_method",
             failed_url or "no_url",
             str(http_status or "no_status"),
-            reason or "no_reason",
+            incident_code or "no_incident_code",
+            classified_reason or "no_reason",
+            "final" if final_failure else "not_final",
         ]
     )
 
@@ -5749,8 +5798,14 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
         "root_event_id": root_event_id,
         "step_index": step_index,
         "goal": goal,
-        "reason": reason,
+        "reason": classified_reason,
+        "original_reason": original_reason,
+        "decision": decision,
+        "severity": severity,
+        "category": category,
         "error": error_text,
+        "incident_code": incident_code,
+        "final_failure": final_failure,
         "original_capability": original_capability,
         "failed_url": failed_url,
         "failed_method": failed_method,
@@ -5768,7 +5823,7 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
 
     next_commands: List[Dict[str, Any]] = []
 
-    if incident_create_ok:
+    if decision in {"escalate", "critical_escalate"}:
         next_commands.append(
             {
                 "capability": "internal_escalate",
@@ -5777,9 +5832,15 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
                     "step_index": step_index + 1,
+                    "workspace_id": workspace_id,
                     "goal": "incident_escalation",
-                    "reason": reason,
+                    "decision": decision,
+                    "reason": classified_reason,
+                    "severity": severity,
+                    "category": category,
                     "error": error_text,
+                    "incident_code": incident_code,
+                    "final_failure": final_failure,
                     "original_capability": original_capability,
                     "failed_url": failed_url,
                     "failed_method": failed_method,
@@ -5789,11 +5850,14 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
                     "incident_record_id": incident_record_id,
                     "log_record_id": incident_record_id,
                     "run_record_id": run_record_id,
-                    "workspace_id": workspace_id,
                 },
                 "terminal": False,
             }
         )
+
+    next_commands = next_commands[:1]
+
+    wrapper_status = "done"
 
     _append_flow_step_safe(
         flow_id=flow_id,
@@ -5801,10 +5865,15 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
         step_obj={
             "step_index": step_index,
             "capability": "incident_router",
-            "status": "done" if incident_create_ok else "incident_create_failed",
+            "status": wrapper_status,
             "goal": goal,
-            "reason": reason,
+            "decision": decision,
+            "reason": classified_reason,
+            "severity": severity,
+            "category": category,
             "http_status": http_status,
+            "incident_code": incident_code,
+            "final_failure": final_failure,
             "failed_url": failed_url,
             "failed_method": failed_method,
             "incident_record_id": incident_record_id,
@@ -5815,25 +5884,38 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
     _update_flow_registry_safe(
         flow_id=flow_id,
         workspace_id=workspace_id,
-        status="Running" if incident_create_ok else "Error",
+        status="Running" if next_commands else "Done",
         current_step=step_index,
-        last_decision="incident_created" if incident_create_ok else "incident_create_failed",
+        last_decision=decision,
         memory_obj={
             "last_incident": {
                 "goal": goal,
-                "reason": reason,
+                "decision": decision,
+                "reason": classified_reason,
+                "severity": severity,
+                "category": category,
                 "http_status": http_status,
+                "incident_code": incident_code,
+                "final_failure": final_failure,
                 "failed_url": failed_url,
                 "incident_record_id": incident_record_id,
+                "incident_create_ok": incident_create_ok,
             }
         },
         result_obj={
             "incident_router_result": {
-                "ok": incident_create_ok,
-                "record_id": incident_record_id,
-                "reason": reason,
+                "ok": True,
+                "decision": decision,
+                "reason": classified_reason,
+                "severity": severity,
+                "category": category,
                 "http_status": http_status,
+                "incident_code": incident_code,
+                "final_failure": final_failure,
+                "incident_record_id": incident_record_id,
+                "incident_create_ok": incident_create_ok,
                 "create_res": create_res,
+                "spawned_count": len(next_commands),
             }
         },
         linked_run=[run_record_id],
@@ -5842,15 +5924,20 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
     return {
         "ok": True,
         "capability": "incident_router",
-        "status": "incident_created" if incident_create_ok else "incident_create_failed",
+        "status": wrapper_status,
         "run_record_id": run_record_id,
         "workspace_id": workspace_id,
         "flow_id": flow_id,
         "root_event_id": root_event_id,
         "step_index": step_index,
         "goal": goal,
-        "reason": reason,
+        "decision": decision,
+        "reason": classified_reason,
+        "severity": severity,
+        "category": category,
         "error": error_text,
+        "incident_code": incident_code,
+        "final_failure": final_failure,
         "original_capability": original_capability,
         "failed_url": failed_url,
         "failed_method": failed_method,
@@ -5860,8 +5947,9 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
         "incident_record_id": incident_record_id,
         "log_record_id": incident_record_id,
         "incident_create_ok": incident_create_ok,
+        "spawned_count": len(next_commands),
         "next_commands": next_commands,
-        "terminal": not incident_create_ok,
+        "terminal": len(next_commands) == 0,
     }
     
 def capability_complete_flow(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
