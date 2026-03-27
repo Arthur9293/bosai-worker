@@ -134,17 +134,13 @@ def capability_internal_escalate(
     }
 
     try:
-        print("[INTERNAL_ESCALATE] table =", logs_errors_table_name)
-        print("[INTERNAL_ESCALATE] log_record_id =", log_record_id)
-        print("[INTERNAL_ESCALATE] run_record_id =", run_record_id)
-        print("[INTERNAL_ESCALATE] flow_id =", flow_id)
-        print("[INTERNAL_ESCALATE] root_event_id =", root_event_id)
-        print(
-            "[INTERNAL_ESCALATE] direct test fields =",
-            _safe_json({"Result_JSON": escalation_result}),
-        )
+    print("[INTERNAL_ESCALATE] table =", logs_errors_table_name)
+    print("[INTERNAL_ESCALATE] log_record_id =", log_record_id)
+    print("[INTERNAL_ESCALATE] run_record_id =", run_record_id)
+    print("[INTERNAL_ESCALATE] flow_id =", flow_id)
+    print("[INTERNAL_ESCALATE] root_event_id =", root_event_id)
 
-        update_res = _best_effort_update_logs_error(
+    update_res = _best_effort_update_logs_error(
         airtable_update=airtable_update,
         logs_errors_table_name=logs_errors_table_name,
         log_record_id=log_record_id,
@@ -175,19 +171,18 @@ def capability_internal_escalate(
             "run_record_id": run_record_id,
             "update_res": update_res,
             "terminal": True,
-         }
-
-    except Exception as e:
-        return {
-            "ok": False,
-            "error": "airtable_update_failed:" + repr(e),
-            "flow_id": flow_id,
-            "root_event_id": root_event_id,
-            "log_record_id": log_record_id,
-            "run_record_id": run_record_id,
-            "terminal": True,
         }
 
+except Exception as e:
+    return {
+        "ok": False,
+        "error": "airtable_update_failed:" + repr(e),
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "log_record_id": log_record_id,
+        "run_record_id": run_record_id,
+        "terminal": True,
+    }
     return {
         "ok": True,
         "mode": "internal_escalate",
