@@ -1,9 +1,130 @@
 import json
 from datetime import datetime, timezone
+from typing import Any, Dict, List
 
 
 def utc_now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def _safe_json(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except Exception:
+        return "{}"
+
+
+def _try_update_one(
+    airtable_update,
+    table_name: str,
+    record_id: str,
+    fields: Dict[str, Any],
+) -> Dict[str, Any]:
+    try:
+        airtable_update(table_name, record_id, fields)
+        return {"ok": True, "fields": fields}
+    except Exception as e:
+        return {"ok": False, "fields": fields, "error": repr(e)}
+
+
+def _best_effort_update_logs_error(
+    airtable_update,
+    logs_errors_table_name: str,
+    log_record_id: str,
+    escalation_result: Dict[str, Any],
+    reason: str,
+    severity: str,
+    goal: str,
+    http_status: Any,
+    failed_goal: str,
+    failed_url: str,
+    sla_status: str,
+    run_record_id: str,
+) -> Dict[str, Any]:
+    ts_now = utc_now_iso()
+
+    payload_redacted = _safe_json(
+        {
+            "severity": severity,
+            "goal": goal,
+            "http_status": http_status,
+            "failed_goal": failed_goal,
+            "failed_url": failed_url,
+            "sla_status": sla_status,
+        }
+    )
+
+    result_json = _safe_json(escalation_result)
+
+    attempts: List[Dict[str, Any]] = [
+        # Bloc moderne / probable
+        {
+            "SLA_Status": "Escalated",
+            "Last_SLA_Check": ts_now,
+            "Linked_Run": run_record_id,
+            "Result_JSON": result_json,
+        },
+        # Variante FR incident
+        {
+            "Statut_incident": "Escaladé",
+            "Linked_Run": run_record_id,
+            "Result_JSON": result_json,
+        },
+        # Variante avec message
+        {
+            "Statut_incident": "Escaladé",
+            "Error_Message": reason,
+            "Linked_Run": run_record_id,
+            "Result_JSON": result_json,
+        },
+        # Variante payload brut réduit
+        {
+            "Payload_Redacted": payload_redacted,
+            "Result_JSON": result_json,
+            "Linked_Run": run_record_id,
+        },
+        # Variante checkbox historique si elle existe
+        {
+            "Escalation_Sent": True,
+            "Result_JSON": result_json,
+            "Linked_Run": run_record_id,
+        },
+        {
+            "Escalation_Sent": True,
+            "Escalation_Queued": False,
+            "Escalation_Queued_At": ts_now,
+            "Result_JSON": result_json,
+            "Linked_Run": run_record_id,
+        },
+        # Update minimal de secours
+        {
+            "Result_JSON": result_json,
+        },
+    ]
+
+    results: List[Dict[str, Any]] = []
+
+    for fields in attempts:
+        res = _try_update_one(
+            airtable_update=airtable_update,
+            table_name=logs_errors_table_name,
+            record_id=log_record_id,
+            fields=fields,
+        )
+        results.append(res)
+
+        if res.get("ok"):
+            return {
+                "ok": True,
+                "chosen_fields": fields,
+                "attempts": results,
+            }
+
+    return {
+        "ok": False,
+        "chosen_fields": {},
+        "attempts": results,
+    }
 
 
 def capability_internal_escalate(
@@ -61,43 +182,45 @@ def capability_internal_escalate(
         "ts": utc_now_iso(),
     }
 
-    update_fields = {
-        "Escalation_Sent": True,
-        "Escalation_Queued": False,
-        "Escalation_Queued_At": utc_now_iso(),
-        "Statut_incident": "Escaladé",
-        "Error_Message": reason,
-        "Payload_Redacted": json.dumps(
-            {
-                "severity": severity,
-                "goal": goal,
-                "http_status": http_status,
-                "failed_goal": failed_goal,
-                "failed_url": failed_url,
-                "sla_status": sla_status,
-            },
-            ensure_ascii=False,
-        ),
-        "Result_JSON": json.dumps(escalation_result, ensure_ascii=False),
-        "Linked_Run": [run_record_id],
-    }
-
     try:
         print("[INTERNAL_ESCALATE] table =", logs_errors_table_name)
         print("[INTERNAL_ESCALATE] log_record_id =", log_record_id)
         print("[INTERNAL_ESCALATE] run_record_id =", run_record_id)
         print("[INTERNAL_ESCALATE] flow_id =", flow_id)
         print("[INTERNAL_ESCALATE] root_event_id =", root_event_id)
-        print(
-            "[INTERNAL_ESCALATE] update_fields =",
-            json.dumps(update_fields, ensure_ascii=False),
+
+        update_res = _best_effort_update_logs_error(
+            airtable_update=airtable_update,
+            logs_errors_table_name=logs_errors_table_name,
+            log_record_id=log_record_id,
+            escalation_result=escalation_result,
+            reason=reason,
+            severity=severity,
+            goal=goal,
+            http_status=http_status,
+            failed_goal=failed_goal,
+            failed_url=failed_url,
+            sla_status=sla_status,
+            run_record_id=run_record_id,
         )
 
-        airtable_update(
-            logs_errors_table_name,
-            log_record_id,
-            update_fields,
+        print(
+            "[INTERNAL_ESCALATE] update_res =",
+            _safe_json(update_res),
         )
+
+        if not update_res.get("ok"):
+            return {
+                "ok": False,
+                "error": "airtable_update_failed_no_matching_fields",
+                "flow_id": flow_id,
+                "root_event_id": root_event_id,
+                "log_record_id": log_record_id,
+                "run_record_id": run_record_id,
+                "update_res": update_res,
+                "terminal": True,
+            }
+
     except Exception as e:
         return {
             "ok": False,
@@ -127,6 +250,7 @@ def capability_internal_escalate(
                     "root_event_id": root_event_id,
                     "step_index": int(payload.get("step_index") or 0) + 1,
                     "goal": "escalation_sent",
+                    "workspace_id": str(payload.get("workspace_id") or "").strip(),
                 },
             }
         ],
