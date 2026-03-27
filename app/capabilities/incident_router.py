@@ -113,11 +113,13 @@ def _normalize_incident(payload: Dict[str, Any]) -> Dict[str, Any]:
         or incident_meta.get("incident_code")
     )
 
-    final_failure = payload.get("final_failure")
-    if final_failure is None:
-        final_failure = error_obj.get("final_failure")
-    if final_failure is None:
-        final_failure = diagnostics.get("final_failure")
+    final_failure = (
+        payload.get("final_failure")
+        or error_obj.get("final_failure")
+        or diagnostics.get("final_failure")
+        or payload.get("finalfailure")
+        or False
+    )
 
     normalized = {
         "ts": _now_ts(),
@@ -150,6 +152,8 @@ def _normalize_incident(payload: Dict[str, Any]) -> Dict[str, Any]:
         ).upper(),
         "raw_payload": deepcopy(payload),
     }
+
+    print("[incident_router] normalized =", normalized)
     return normalized
 
 
