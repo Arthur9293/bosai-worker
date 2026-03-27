@@ -242,6 +242,8 @@ def run(
     context: Optional[Any] = None,
     **kwargs: Any,
 ) -> Dict[str, Any]:
+    print("INCIDENT_ROUTER_V2_LOADED")
+
     if payload is not None and hasattr(payload, "input"):
         payload = getattr(payload, "input", {}) or {}
     elif not isinstance(payload, dict):
