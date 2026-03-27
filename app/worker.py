@@ -1464,76 +1464,86 @@ def _coerce_non_empty_str(value):
         return ""
     return str(value).strip()
 
-def _event_mark_processed(
-    event_record_id: str,
-    *,
-    command_record_id: str = "",
-    command_created: bool = False,
-    idempotency_key: str = "",
-):
-    attempts = []
+def process_events() -> Dict[str, Any]:
+    fetched = fetch_events_source()  # garde ton appel existant
+    source_meta = fetched.get("meta", {}) if isinstance(fetched, dict) else {}
+    records = fetched.get("records", []) if isinstance(fetched, dict) else []
 
-    linked_command_value = [command_record_id] if command_record_id else None
+    scanned = 0
+    created = 0
+    failed = 0
+    skipped = 0
+    event_record_ids: List[str] = []
+    errors: List[Any] = []
 
-    candidate_fields_list = [
-        {
-            "Status_select": "Processed",
-        },
-        {
-            "Status_select": "Processed",
-            "Command_Created": True if command_created else False,
-        },
-        {
-            "Status_select": "Processed",
-            "Idempotency_Key": idempotency_key,
-        },
-        {
-            "Status_select": "Processed",
-            "Command_Created": True if command_created else False,
-            "Idempotency_Key": idempotency_key,
-        },
-        {
-            "Status_select": "Processed",
-            "Linked_Command": linked_command_value,
-        } if linked_command_value else {
-            "Status_select": "Processed",
-        },
-        {
-            "Status_select": "Processed",
-            "Linked_Command": linked_command_value,
-            "Command_Created": True if command_created else False,
-            "Idempotency_Key": idempotency_key,
-        } if linked_command_value else {
-            "Status_select": "Processed",
-            "Command_Created": True if command_created else False,
-            "Idempotency_Key": idempotency_key,
-        },
-    ]
+    for event_record in records:
+        fields = event_record.get("fields", {}) or {}
+        event_record_id = str(event_record.get("id") or "").strip()
 
-    for fields in candidate_fields_list:
-        clean_fields = {
-            k: v for k, v in fields.items()
-            if v not in ("", None)
-        }
+        status = str(
+            fields.get("Status_select")
+            or fields.get("Status")
+            or ""
+        ).strip()
+
+        mapped_capability = str(
+            fields.get("Mapped_Capability")
+            or fields.get("mapped_capability")
+            or ""
+        ).strip()
+
+        print(
+            f"[events/process] handling event_id={event_record_id} "
+            f"status={status.lower() if status else ''} "
+            f"mapped={mapped_capability or 'None'}"
+        )
+
+        if not event_record_id:
+            skipped += 1
+            continue
+
+        if status not in ("New", "Queued"):
+            skipped += 1
+            continue
+
+        scanned += 1
 
         try:
-            airtable_update(EVENTS_TABLE_NAME, event_record_id, clean_fields)
-            print("[event_mark_processed]", event_record_id, clean_fields)
-            return {"ok": True, "fields": clean_fields}
+            res = _create_command_from_event(event_record)
+
+            if res.get("ok"):
+                created += 1
+                event_record_ids.append(event_record_id)
+            else:
+                failed += 1
+                errors.append(
+                    {
+                        "event_id": event_record_id,
+                        "error": res.get("error"),
+                        "res": res,
+                    }
+                )
+
         except Exception as e:
-            attempts.append(
+            failed += 1
+            errors.append(
                 {
-                    "ok": False,
-                    "fields": clean_fields,
+                    "event_id": event_record_id,
                     "error": repr(e),
                 }
             )
-            print("[event_mark_processed][ERROR]", repr(e))
+            print(f"[events/process][ERROR] event_id={event_record_id} error={repr(e)}")
 
     return {
-        "ok": False,
-        "event_record_id": event_record_id,
-        "attempts": attempts,
+        "ok": True,
+        "source": source_meta,
+        "scanned": scanned,
+        "created": created,
+        "failed": failed,
+        "skipped": skipped,
+        "event_record_ids": event_record_ids,
+        "errors": errors,
+        "ts": utc_now_iso() if "utc_now_iso" in globals() else datetime.now(timezone.utc).isoformat(),
     }
         
 def _resolve_flow_context_from_event(event_record_id, fields, payload_obj):
