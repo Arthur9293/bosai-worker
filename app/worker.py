@@ -4526,6 +4526,18 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         payload_obj=payload_obj,
     )
 
+    source_event_id = str(
+        payload_obj.get("event_id")
+        or payload_obj.get("Event_ID")
+        or fields.get("Event_ID")
+        or fields.get("event_id")
+        or event_record_id
+        or ""
+    ).strip()
+
+    if source_event_id and not root_event_id:
+        root_event_id = source_event_id
+
     # ------------------------------------------------------------
     # EXISTING LOGIC
     # ------------------------------------------------------------
@@ -4535,8 +4547,14 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         command_input = {}
 
     # Force stable flow context as early as possible
-    command_input["flow_id"] = flow_id
-    command_input["root_event_id"] = root_event_id
+    if flow_id:
+        command_input["flow_id"] = flow_id
+
+    if root_event_id:
+        command_input["root_event_id"] = root_event_id
+
+    if source_event_id:
+        command_input["event_id"] = source_event_id
 
     # Remove alternate legacy keys if present
     command_input.pop("flowid", None)
@@ -4596,11 +4614,17 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
     command_input = _normalize_flow_keys(command_input)
 
     # Re-assert flow context after normalization/unwrapping
-    if not str(command_input.get("flow_id") or "").strip():
+    if not str(command_input.get("flow_id") or "").strip() and flow_id:
         command_input["flow_id"] = flow_id
 
     if not str(command_input.get("root_event_id") or "").strip():
-        command_input["root_event_id"] = root_event_id
+        command_input["root_event_id"] = (
+            str(command_input.get("event_id") or "").strip()
+            or root_event_id
+        )
+
+    if not str(command_input.get("event_id") or "").strip() and source_event_id:
+        command_input["event_id"] = source_event_id
 
     if mapped_capability == "http_exec":
         command_input = _normalize_http_exec_input(command_input)
@@ -4623,10 +4647,13 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         "complete_flow",
         "complete_flow_demo",
     ):
-        if not str(command_input.get("flow_id") or "").strip():
+        if not str(command_input.get("flow_id") or "").strip() and flow_id:
             command_input["flow_id"] = flow_id
         if not str(command_input.get("root_event_id") or "").strip():
-            command_input["root_event_id"] = root_event_id
+            command_input["root_event_id"] = (
+                str(command_input.get("event_id") or "").strip()
+                or root_event_id
+            )
 
     existing = find_command_by_idem(effective_idempotency_key)
     if existing:
