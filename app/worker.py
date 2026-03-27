@@ -1457,13 +1457,57 @@ def _resolve_flow_context_from_command_input(command_input, fallback_command_id=
         root_event_id = flow_id
 
     return flow_id, root_event_id
+
+
 def _coerce_non_empty_str(value):
     if value is None:
         return ""
     return str(value).strip()
 
-_resolve_flow_context_from_event 
-    
+
+def _resolve_flow_context_from_event(event_record_id, fields, payload_obj):
+    event_id = (
+        _coerce_non_empty_str(payload_obj.get("event_id"))
+        or _coerce_non_empty_str(payload_obj.get("eventid"))
+        or _coerce_non_empty_str(payload_obj.get("eventId"))
+        or _coerce_non_empty_str(fields.get("Event_ID"))
+        or _coerce_non_empty_str(fields.get("event_id"))
+        or _coerce_non_empty_str(fields.get("eventid"))
+    )
+
+    flow_id = (
+        _coerce_non_empty_str(payload_obj.get("flow_id"))
+        or _coerce_non_empty_str(payload_obj.get("flowid"))
+        or _coerce_non_empty_str(payload_obj.get("flowId"))
+        or _coerce_non_empty_str(fields.get("Flow_ID"))
+        or _coerce_non_empty_str(fields.get("flow_id"))
+        or _coerce_non_empty_str(fields.get("flowid"))
+    )
+
+    root_event_id = (
+        _coerce_non_empty_str(payload_obj.get("root_event_id"))
+        or _coerce_non_empty_str(payload_obj.get("rooteventid"))
+        or _coerce_non_empty_str(payload_obj.get("rootEventId"))
+        or _coerce_non_empty_str(fields.get("Root_Event_ID"))
+        or _coerce_non_empty_str(fields.get("root_event_id"))
+        or _coerce_non_empty_str(fields.get("rooteventid"))
+    )
+
+    if event_id:
+        root_event_id = event_id
+
+    if not flow_id and root_event_id:
+        flow_id = root_event_id
+
+    if not flow_id:
+        flow_id = event_record_id
+
+    if not root_event_id:
+        root_event_id = event_record_id
+
+    return flow_id, root_event_id
+
+
 def _resolve_flow_ids(payload: Dict[str, Any]) -> Tuple[str, str]:
     if not isinstance(payload, dict):
         payload = {}
@@ -1482,12 +1526,6 @@ def _resolve_flow_ids(payload: Dict[str, Any]) -> Tuple[str, str]:
     ).strip()
 
     return flow_id, (root_event_id or flow_id)
-
-def _resolve_flow_step_index(payload: Dict[str, Any], default: int = 0) -> int:
-    try:
-        return int(payload.get("step_index") or default)
-    except Exception:
-        return default
 
 
 def _append_flow_step_safe(
