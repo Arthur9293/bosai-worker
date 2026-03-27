@@ -4285,8 +4285,78 @@ def _event_build_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         raw_input = fields.get("Payload_JSON")
         command_input = _json_load_maybe(raw_input)
 
-    command_input = _normalize_flow_keys(command_input if isinstance(command_input, dict) else {})
+    if not isinstance(command_input, dict):
+        command_input = {}
 
+    command_input = _normalize_keys_deep(command_input)
+    command_input = _unwrap_command_payload(command_input)
+    command_input = _normalize_flow_keys(command_input)
+
+    # ------------------------------------------------------------
+    # Event / Root / Flow stabilization
+    # ------------------------------------------------------------
+    event_id = str(
+        command_input.get("event_id")
+        or command_input.get("eventid")
+        or command_input.get("eventId")
+        or fields.get("event_id")
+        or fields.get("eventid")
+        or fields.get("eventId")
+        or fields.get("Event_ID")
+        or ""
+    ).strip()
+
+    root_event_id = str(
+        command_input.get("root_event_id")
+        or command_input.get("rooteventid")
+        or command_input.get("rootEventId")
+        or fields.get("root_event_id")
+        or fields.get("rooteventid")
+        or fields.get("rootEventId")
+        or fields.get("Root_Event_ID")
+        or ""
+    ).strip()
+
+    flow_id = str(
+        command_input.get("flow_id")
+        or command_input.get("flowid")
+        or command_input.get("flowId")
+        or fields.get("flow_id")
+        or fields.get("flowid")
+        or fields.get("flowId")
+        or fields.get("Flow_ID")
+        or ""
+    ).strip()
+
+    workspace_id = str(
+        command_input.get("workspace_id")
+        or command_input.get("workspaceid")
+        or command_input.get("workspaceId")
+        or fields.get("workspace_id")
+        or fields.get("workspaceid")
+        or fields.get("workspaceId")
+        or fields.get("Workspace_ID")
+        or ""
+    ).strip()
+
+    if event_id and not str(command_input.get("event_id") or "").strip():
+        command_input["event_id"] = event_id
+
+    # priorité métier : si event_id existe, root_event_id doit s’aligner dessus
+    if event_id:
+        command_input["root_event_id"] = event_id
+    elif root_event_id and not str(command_input.get("root_event_id") or "").strip():
+        command_input["root_event_id"] = root_event_id
+
+    if flow_id and not str(command_input.get("flow_id") or "").strip():
+        command_input["flow_id"] = flow_id
+
+    if workspace_id and not str(command_input.get("workspace_id") or "").strip():
+        command_input["workspace_id"] = workspace_id
+
+    # ------------------------------------------------------------
+    # HTTP normalization
+    # ------------------------------------------------------------
     http_target = str(
         fields.get("http_target")
         or fields.get("URL")
@@ -4297,9 +4367,10 @@ def _event_build_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         or ""
     ).strip()
 
-    if http_target and "url" not in command_input:
+    if http_target and not str(command_input.get("url") or "").strip():
         command_input["url"] = http_target
-    if http_target and "http_target" not in command_input:
+
+    if http_target and not str(command_input.get("http_target") or "").strip():
         command_input["http_target"] = http_target
 
     http_method = str(
@@ -4310,64 +4381,11 @@ def _event_build_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         or ""
     ).strip()
 
-    if http_method and "method" not in command_input:
+    if http_method and not str(command_input.get("method") or "").strip():
         command_input["method"] = http_method
 
-    print("[compose_command_input] parsed_input=", command_input)
+    print("[event_build_command_input] final_input=", json.dumps(command_input, ensure_ascii=False))
     return command_input
-
-def _event_mark_processed(
-    event_record_id: str,
-    *,
-    command_record_id: Optional[str] = None,
-    command_created: bool = True,
-    idempotency_key: str = "",
-) -> Dict[str, Any]:
-    candidates: List[Dict[str, Any]] = []
-
-    if command_record_id:
-        candidates.extend(
-            [
-                {
-                    "Linked_Command": [command_record_id],
-                    "Command_ID": command_record_id,
-                    "Status_select": "Processed",
-                    "Status": "Processed",
-                    "Command_Created": command_created,
-                    "Processed_At": utc_now_iso(),
-                    "Idempotency_Key": idempotency_key,
-                },
-                {
-                    "Linked_Command": [command_record_id],
-                    "Status_select": "Processed",
-                    "Status": "Processed",
-                    "Command_Created": command_created,
-                    "Processed_At": utc_now_iso(),
-                    "Idempotency_Key": idempotency_key,
-                },
-                {
-                    "Command_ID": command_record_id,
-                    "Status_select": "Processed",
-                    "Status": "Processed",
-                    "Command_Created": command_created,
-                    "Processed_At": utc_now_iso(),
-                    "Idempotency_Key": idempotency_key,
-                },
-            ]
-        )
-
-    candidates.append(
-        {
-            "Status_select": "Processed",
-            "Status": "Processed",
-            "Command_Created": command_created,
-            "Processed_At": utc_now_iso(),
-            "Idempotency_Key": idempotency_key,
-        }
-    )
-
-    return _airtable_update_best_effort(EVENTS_TABLE_NAME, event_record_id, candidates)
-
 
 def _event_mark_ignored(event_record_id: str, message: str) -> Dict[str, Any]:
     return _airtable_update_best_effort(
