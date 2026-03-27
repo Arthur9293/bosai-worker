@@ -1471,30 +1471,84 @@ def _event_mark_processed(
     command_created: bool = False,
     idempotency_key: str = "",
 ):
-    try:
-        fields = {
+    attempts = []
+
+    candidate_fields_list = [
+        {
             "Status_select": "Processed",
+        },
+        {
+            "Status_select": "Processed",
+            "Command_Created": True if command_created else False,
+        },
+        {
+            "Status_select": "Processed",
+            "Idempotency_Key": idempotency_key,
+        },
+        {
+            "Status_select": "Processed",
+            "Command_Created": True if command_created else False,
+            "Idempotency_Key": idempotency_key,
+        },
+        {
+            "Status_select": "Processed",
+            "Linked_Command": command_record_id,
+        } if command_record_id else {
+            "Status_select": "Processed",
+        },
+        {
+            "Status_select": "Processed",
+            "Command_Record_ID": command_record_id,
+        } if command_record_id else {
+            "Status_select": "Processed",
+        },
+        {
+            "Status_select": "Processed",
+            "Linked_Command": command_record_id,
+            "Command_Created": True if command_created else False,
+            "Idempotency_Key": idempotency_key,
+        } if command_record_id else {
+            "Status_select": "Processed",
+            "Command_Created": True if command_created else False,
+            "Idempotency_Key": idempotency_key,
+        },
+        {
+            "Status_select": "Processed",
+            "Command_Record_ID": command_record_id,
+            "Command_Created": True if command_created else False,
+            "Idempotency_Key": idempotency_key,
+        } if command_record_id else {
+            "Status_select": "Processed",
+            "Command_Created": True if command_created else False,
+            "Idempotency_Key": idempotency_key,
+        },
+    ]
+
+    for fields in candidate_fields_list:
+        clean_fields = {
+            k: v for k, v in fields.items()
+            if v not in ("", None)
         }
 
-        if command_record_id:
-            fields["Command_Record_ID"] = command_record_id
+        try:
+            airtable_update(EVENTS_TABLE_NAME, event_record_id, clean_fields)
+            print("[event_mark_processed]", event_record_id, clean_fields)
+            return {"ok": True, "fields": clean_fields}
+        except Exception as e:
+            attempts.append(
+                {
+                    "ok": False,
+                    "fields": clean_fields,
+                    "error": repr(e),
+                }
+            )
+            print("[event_mark_processed][ERROR]", repr(e))
 
-        if command_created:
-            fields["Command_Created"] = True
-
-        if idempotency_key:
-            fields["Idempotency_Key"] = idempotency_key
-
-        airtable_update(EVENTS_TABLE_NAME, event_record_id, fields)
-
-        print(
-            "[event_mark_processed]",
-            event_record_id,
-            fields,
-        )
-
-    except Exception as e:
-        print("[event_mark_processed][ERROR]", repr(e))
+    return {
+        "ok": False,
+        "event_record_id": event_record_id,
+        "attempts": attempts,
+    }
         
 def _resolve_flow_context_from_event(event_record_id, fields, payload_obj):
     event_id = (
