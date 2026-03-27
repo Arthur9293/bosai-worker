@@ -616,8 +616,7 @@ def _json_load_maybe(val: Any) -> Dict[str, Any]:
         pass
 
     print("[_json_load_maybe] JSON PARSE FAILED:", s)
-    return {}
-    
+    return {}  
     
 def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
@@ -631,6 +630,14 @@ def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
         or normalized.get("flowId")
         or normalized.get("Flow_ID")
         or normalized.get("FlowId")
+        or ""
+    ).strip()
+
+    event_id = str(
+        normalized.get("event_id")
+        or normalized.get("eventid")
+        or normalized.get("eventId")
+        or normalized.get("Event_ID")
         or ""
     ).strip()
 
@@ -672,7 +679,13 @@ def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
     if flow_id:
         normalized["flow_id"] = flow_id
 
-    if root_event_id:
+    if event_id:
+        normalized["event_id"] = event_id
+
+    # priorité absolue au vrai event
+    if event_id:
+        normalized["root_event_id"] = event_id
+    elif root_event_id:
         normalized["root_event_id"] = root_event_id
 
     if goal:
@@ -685,6 +698,10 @@ def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
     normalized.pop("flowId", None)
     normalized.pop("Flow_ID", None)
     normalized.pop("FlowId", None)
+
+    normalized.pop("eventid", None)
+    normalized.pop("eventId", None)
+    normalized.pop("Event_ID", None)
 
     normalized.pop("rooteventid", None)
     normalized.pop("rootEventId", None)
