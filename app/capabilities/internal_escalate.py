@@ -88,7 +88,7 @@ def capability_internal_escalate(
     payload = req.input or {}
 
     flow_id = str(payload.get("flow_id") or "").strip()
-    root_event_id = str(payload.get("root_event_id") or flow_id).strip()
+    root_event_id = str(payload.get("root_event_id") or "").strip()
 
     log_record_id = str(
         payload.get("log_record_id")
@@ -105,6 +105,14 @@ def capability_internal_escalate(
     failed_goal = str(payload.get("failed_goal") or "").strip()
     failed_url = str(payload.get("failed_url") or "").strip()
     sla_status = str(payload.get("sla_status") or "").strip()
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+
+    # Fallbacks robustes pour garder la continuité du flow
+    if not flow_id and log_record_id:
+        flow_id = f"flow_internal_escalate_{log_record_id}"
+
+    if not root_event_id:
+        root_event_id = flow_id
 
     if not log_record_id:
         return {
@@ -130,6 +138,8 @@ def capability_internal_escalate(
         "sla_status": sla_status,
         "log_record_id": log_record_id,
         "run_record_id": run_record_id,
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
         "ts": utc_now_iso(),
     }
 
@@ -202,7 +212,7 @@ def capability_internal_escalate(
                     "root_event_id": root_event_id,
                     "step_index": int(payload.get("step_index") or 0) + 1,
                     "goal": "escalation_sent",
-                    "workspace_id": str(payload.get("workspace_id") or "").strip(),
+                    "workspace_id": workspace_id,
                 },
             }
         ],
