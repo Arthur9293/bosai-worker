@@ -754,19 +754,14 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
 
         candidates: List[str] = []
 
-        # brut
         candidates.append(raw_text)
-
-        # guillemets échappés
         candidates.append(raw_text.replace('\\"', '"'))
 
-        # unicode escape
         try:
             candidates.append(bytes(raw_text, "utf-8").decode("unicode_escape"))
         except Exception:
             pass
 
-        # retire les backslashes invalides devant underscore
         candidates.append(raw_text.replace("\\_", "_"))
         candidates.append(raw_text.replace('\\"', '"').replace("\\_", "_"))
 
@@ -776,7 +771,6 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             pass
 
-        # dédoublonne
         seen = set()
         unique_candidates: List[str] = []
         for c in candidates:
@@ -927,6 +921,52 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     base = _normalize_keys_deep(base)
     base = _unwrap_command_payload(base)
     base = _normalize_flow_keys(base)
+
+    # ------------------------------------------------------------
+    # FLOW / ROOT fallbacks CRITIQUES
+    # ------------------------------------------------------------
+    parent_command_id = str(
+        fields.get("id")
+        or fields.get("record_id")
+        or fields.get("Command_ID")
+        or base.get("parent_command_id")
+        or ""
+    ).strip()
+
+    if not str(base.get("workspace_id") or "").strip():
+        workspace_id = str(
+            fields.get("Workspace_ID")
+            or fields.get("workspace_id")
+            or ""
+        ).strip()
+        if workspace_id:
+            base["workspace_id"] = workspace_id
+
+    if not str(base.get("parent_command_id") or "").strip() and parent_command_id:
+        base["parent_command_id"] = parent_command_id
+
+    if not str(base.get("flow_id") or "").strip():
+        fallback_flow_id = ""
+        if parent_command_id:
+            fallback_flow_id = f"flow_{parent_command_id}"
+        elif str(base.get("root_event_id") or "").strip():
+            fallback_flow_id = str(base.get("root_event_id")).strip()
+        elif str(fields.get("Root_Event_ID") or "").strip():
+            fallback_flow_id = str(fields.get("Root_Event_ID")).strip()
+
+        if fallback_flow_id:
+            base["flow_id"] = fallback_flow_id
+
+    if not str(base.get("root_event_id") or "").strip():
+        fallback_root = (
+            str(fields.get("Root_Event_ID") or "").strip()
+            or str(base.get("flow_id") or "").strip()
+        )
+        if fallback_root:
+            base["root_event_id"] = fallback_root
+
+    if base.get("step_index") in (None, ""):
+        base["step_index"] = 0
 
     if parse_errors:
         print(f"[compose_command_input] parse_errors={json.dumps(parse_errors, ensure_ascii=False)}")
