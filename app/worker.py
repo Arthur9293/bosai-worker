@@ -1473,6 +1473,8 @@ def _event_mark_processed(
 ):
     attempts = []
 
+    linked_command_value = [command_record_id] if command_record_id else None
+
     candidate_fields_list = [
         {
             "Status_select": "Processed",
@@ -1492,32 +1494,16 @@ def _event_mark_processed(
         },
         {
             "Status_select": "Processed",
-            "Linked_Command": command_record_id,
-        } if command_record_id else {
+            "Linked_Command": linked_command_value,
+        } if linked_command_value else {
             "Status_select": "Processed",
         },
         {
             "Status_select": "Processed",
-            "Command_Record_ID": command_record_id,
-        } if command_record_id else {
-            "Status_select": "Processed",
-        },
-        {
-            "Status_select": "Processed",
-            "Linked_Command": command_record_id,
+            "Linked_Command": linked_command_value,
             "Command_Created": True if command_created else False,
             "Idempotency_Key": idempotency_key,
-        } if command_record_id else {
-            "Status_select": "Processed",
-            "Command_Created": True if command_created else False,
-            "Idempotency_Key": idempotency_key,
-        },
-        {
-            "Status_select": "Processed",
-            "Command_Record_ID": command_record_id,
-            "Command_Created": True if command_created else False,
-            "Idempotency_Key": idempotency_key,
-        } if command_record_id else {
+        } if linked_command_value else {
             "Status_select": "Processed",
             "Command_Created": True if command_created else False,
             "Idempotency_Key": idempotency_key,
