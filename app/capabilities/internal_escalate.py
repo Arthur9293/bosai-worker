@@ -145,36 +145,37 @@ def capability_internal_escalate(
         )
 
         update_res = _best_effort_update_logs_error(
-            airtable_update=airtable_update,
-            logs_errors_table_name=logs_errors_table_name,
-            log_record_id=log_record_id,
-            escalation_result=escalation_result,
-            reason=reason,
-            severity=severity,
-            goal=goal,
-            http_status=http_status,
-            failed_goal=failed_goal,
-            failed_url=failed_url,
-            sla_status=sla_status,
-            run_record_id=run_record_id,
-        )
+        airtable_update=airtable_update,
+        logs_errors_table_name=logs_errors_table_name,
+        log_record_id=log_record_id,
+        escalation_result=escalation_result,
+        reason=reason,
+        severity=severity,
+        goal=goal,
+        http_status=http_status,
+        failed_goal=failed_goal,
+        failed_url=failed_url,
+        sla_status=sla_status,
+        run_record_id=run_record_id,
+    )
 
-        print(
-            "[INTERNAL_ESCALATE] update_res =",
-            _safe_json(update_res),
-        )
+    print("[INTERNAL_ESCALATE] update_res =", _safe_json(update_res))
 
-        if not update_res.get("ok"):
-            return {
-                "ok": False,
-                "error": "airtable_update_failed_no_matching_fields",
-                "flow_id": flow_id,
-                "root_event_id": root_event_id,
-                "log_record_id": log_record_id,
-                "run_record_id": run_record_id,
-                "update_res": update_res,
-                "terminal": True,
-            }
+    if isinstance(update_res, dict):
+    for idx, attempt in enumerate(update_res.get("attempts", []), start=1):
+        print(f"[INTERNAL_ESCALATE] attempt_{idx} =", _safe_json(attempt))
+
+    if not update_res.get("ok"):
+        return {
+            "ok": False,
+            "error": "airtable_update_failed_no_matching_fields",
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
+            "log_record_id": log_record_id,
+            "run_record_id": run_record_id,
+            "update_res": update_res,
+            "terminal": True,
+         }
 
     except Exception as e:
         return {
