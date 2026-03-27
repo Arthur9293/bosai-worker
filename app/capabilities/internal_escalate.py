@@ -133,7 +133,7 @@ def capability_internal_escalate(
         "ts": utc_now_iso(),
     }
 
-    try:
+try:
     print("[INTERNAL_ESCALATE] table =", logs_errors_table_name)
     print("[INTERNAL_ESCALATE] log_record_id =", log_record_id)
     print("[INTERNAL_ESCALATE] run_record_id =", run_record_id)
