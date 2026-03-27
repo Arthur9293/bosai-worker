@@ -5114,7 +5114,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
     print("[HTTP_EXEC_WRAPPER_RESULT]", result)
 
-    def _spawn_commands(next_commands: List[Dict[str, Any]], idem_suffix: str) -> None:
+       def _spawn_commands(next_commands: List[Dict[str, Any]], idem_suffix: str) -> None:
         for next_cmd in next_commands:
             if not isinstance(next_cmd, dict):
                 continue
@@ -5123,7 +5123,11 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             if not next_capability:
                 continue
 
-            next_input = next_cmd.get("input", {}) or {}
+            next_input = (
+                next_cmd.get("input")
+                or next_cmd.get("command_input")
+                or {}
+            )
             next_priority = int(next_cmd.get("priority") or 1)
 
             if not isinstance(next_input, dict):
@@ -5193,107 +5197,62 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             _airtable_create(COMMANDS_TABLE_NAME, spawn_fields)
 
     # ------------------------------------------------------------
-    # FAILURE PATH -> incident_router / retry_router / decision_engine
+    # FAILURE PATH -> incident_router
     # ------------------------------------------------------------
     if (result.get("ok") is False) or (isinstance(status_code, int) and status_code >= 400):
         incident_input = {
             "flow_id": flow_id,
             "root_event_id": root_event_id,
             "step_index": step_index + 1,
+            "_depth": _to_int(payload.get("_depth"), 0) + 1,
             "workspace_id": workspace_id,
             "goal": payload.get("goal") or payload.get("failed_goal") or "incident_probe",
             "reason": payload.get("reason") or payload.get("retry_reason") or "http_status_error",
             "retry_reason": payload.get("retry_reason") or payload.get("reason") or "http_status_error",
             "error": result.get("error") or payload.get("error"),
+            "error_message": result.get("error_message") or payload.get("error_message"),
+            "incident_message": result.get("error_message") or payload.get("error_message"),
             "http_status": status_code,
             "status_code": status_code,
             "retry_count": payload.get("retry_count", 0),
             "retry_max": payload.get("retry_max", 2),
+            "final_failure": True,
+            "source_capability": "http_exec",
             "original_capability": "http_exec",
             "failed_goal": payload.get("failed_goal") or payload.get("goal") or "retry_probe",
             "failed_url": payload.get("failed_url") or payload.get("url") or payload.get("http_target"),
             "failed_method": payload.get("failed_method") or payload.get("method") or "GET",
+            "target_url": payload.get("url") or payload.get("failed_url") or payload.get("http_target"),
             "url": payload.get("url") or payload.get("failed_url") or payload.get("http_target"),
             "http_target": payload.get("http_target") or payload.get("url") or payload.get("failed_url"),
             "method": payload.get("method") or payload.get("failed_method") or "GET",
+            "request": result.get("request") if isinstance(result.get("request"), dict) else {},
+            "response": result.get("response") if isinstance(result.get("response"), dict) else {},
+            "incident_code": (
+                result.get("error")
+                or payload.get("incident_code")
+                or payload.get("retry_reason")
+                or "http_status_error"
+            ),
             "original_input": payload,
             "run_record_id": run_record_id,
+            "parent_command_id": payload.get("parent_command_id") or "",
         }
 
-        incident_result = capability_incident_router_run(incident_input, run_record_id)
+        print("[worker.wrapper] incident_input =", incident_input)
+
+        incident_result = capability_incident_router_run(incident_input)
+
+        print("[worker.wrapper] incident_result =", incident_result)
 
         if isinstance(incident_result, dict) and isinstance(incident_result.get("next_commands"), list) and incident_result.get("next_commands"):
             _spawn_commands(incident_result.get("next_commands", []), "incident-router")
 
-            result["flow_id"] = flow_id
-            result["root_event_id"] = root_event_id
-            result["next_commands"] = incident_result.get("next_commands", [])
-            result["terminal"] = bool(incident_result.get("terminal", False))
-            result["incident_result"] = incident_result
-            return result
-
-        if incident_result.get("decision") == "retry":
-            retry_input = {
-                "flow_id": flow_id,
-                "root_event_id": root_event_id,
-                "step_index": step_index + 1,
-                "workspace_id": workspace_id,
-                "original_capability": "http_exec",
-                "original_input": payload,
-                "retry_reason": incident_result.get("reason") or payload.get("retry_reason") or "http_status_error",
-                "reason": incident_result.get("reason") or payload.get("reason") or payload.get("retry_reason") or "http_status_error",
-                "retry_count": incident_result.get("retry_count") or payload.get("retry_count", 0),
-                "retry_max": incident_result.get("retry_max") or payload.get("retry_max", 2),
-                "http_status": incident_result.get("http_status") or payload.get("http_status") or payload.get("status_code"),
-                "status_code": incident_result.get("http_status") or payload.get("http_status") or payload.get("status_code"),
-                "error": incident_result.get("error") or payload.get("error"),
-                "failed_url": payload.get("failed_url") or payload.get("url") or payload.get("http_target"),
-                "url": payload.get("url") or payload.get("failed_url") or payload.get("http_target"),
-                "http_target": payload.get("http_target") or payload.get("url") or payload.get("failed_url"),
-                "method": payload.get("method") or payload.get("failed_method") or "GET",
-                "failed_method": payload.get("failed_method") or payload.get("method") or "GET",
-                "failed_goal": payload.get("failed_goal") or payload.get("goal") or "retry_probe",
-                "incident_record_id": incident_result.get("incident_record_id"),
-            }
-
-            retry_result = capability_retry_router_run(retry_input)
-            if isinstance(retry_result, dict) and isinstance(retry_result.get("next_commands"), list) and retry_result.get("next_commands"):
-                _spawn_commands(retry_result.get("next_commands", []), "retry-router")
-
-            result["flow_id"] = flow_id
-            result["root_event_id"] = root_event_id
-            result["next_commands"] = retry_result.get("next_commands", []) if isinstance(retry_result, dict) else []
-            result["terminal"] = bool(retry_result.get("terminal", False)) if isinstance(retry_result, dict) else True
-            result["incident_result"] = incident_result
-            result["retry_result"] = retry_result
-            return result
-
-        decision_input = {
-            "flow_id": flow_id,
-            "root_event_id": root_event_id,
-            "step_index": step_index + 1,
-            "workspace_id": workspace_id,
-            "incident_decision": incident_result.get("decision"),
-            "incident_reason": incident_result.get("reason"),
-            "http_status": incident_result.get("http_status"),
-            "retry_count": incident_result.get("retry_count"),
-            "retry_max": incident_result.get("retry_max"),
-            "original_capability": "http_exec",
-            "original_input": payload,
-            "incident_record_id": incident_result.get("incident_record_id"),
-        }
-
-        decision_result = capability_decision_engine(decision_input)
-
-        if isinstance(decision_result, dict) and isinstance(decision_result.get("next_commands"), list) and decision_result.get("next_commands"):
-            _spawn_commands(decision_result.get("next_commands", []), "decision-engine")
-
         result["flow_id"] = flow_id
         result["root_event_id"] = root_event_id
-        result["next_commands"] = decision_result.get("next_commands", []) if isinstance(decision_result, dict) else []
-        result["terminal"] = bool(decision_result.get("terminal", False)) if isinstance(decision_result, dict) else True
+        result["next_commands"] = incident_result.get("next_commands", []) if isinstance(incident_result, dict) else []
+        result["terminal"] = bool(incident_result.get("terminal", False)) if isinstance(incident_result, dict) else True
         result["incident_result"] = incident_result
-        result["decision_result"] = decision_result
         return result
 
     # ------------------------------------------------------------
