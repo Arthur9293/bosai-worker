@@ -105,9 +105,17 @@ def capability_internal_escalate(
     failed_goal = str(payload.get("failed_goal") or "").strip()
     failed_url = str(payload.get("failed_url") or "").strip()
     sla_status = str(payload.get("sla_status") or "").strip()
-    workspace_id = str(payload.get("workspace_id") or "").strip()
 
-    # Fallbacks robustes pour garder la continuité du flow
+    workspace_id = str(
+        payload.get("workspace_id")
+        or payload.get("Workspace_ID")
+        or payload.get("workspaceId")
+        or ""
+    ).strip()
+
+    if not workspace_id:
+        workspace_id = "production"
+
     if not flow_id and log_record_id:
         flow_id = f"flow_internal_escalate_{log_record_id}"
 
@@ -140,6 +148,7 @@ def capability_internal_escalate(
         "run_record_id": run_record_id,
         "flow_id": flow_id,
         "root_event_id": root_event_id,
+        "workspace_id": workspace_id,
         "ts": utc_now_iso(),
     }
 
@@ -149,6 +158,7 @@ def capability_internal_escalate(
         print("[INTERNAL_ESCALATE] run_record_id =", run_record_id)
         print("[INTERNAL_ESCALATE] flow_id =", flow_id)
         print("[INTERNAL_ESCALATE] root_event_id =", root_event_id)
+        print("[INTERNAL_ESCALATE] workspace_id =", workspace_id)
 
         update_res = _best_effort_update_logs_error(
             airtable_update=airtable_update,
