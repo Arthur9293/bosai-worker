@@ -769,5 +769,14 @@ def capability_http_exec(
         return result
 
 
-def run(payload: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    return capability_http_exec(payload, context)
+def run(
+    payload: Optional[Any] = None,
+    context: Optional[Any] = None,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    if payload is not None and hasattr(payload, "input"):
+        payload = getattr(payload, "input", {}) or {}
+    elif not isinstance(payload, dict):
+        payload = {}
+
+    return capability_http_exec(payload=payload, context=context, **kwargs)
