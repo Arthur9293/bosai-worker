@@ -260,6 +260,10 @@ def run(
     meta = _extract_meta(data)
     incident = _normalize_incident(data)
     classification = _classify_incident(incident)
+
+    print("DEBUG INCIDENT", incident)
+    print("DEBUG CLASSIFICATION", classification)
+
     next_commands = _build_next_commands(meta, incident, classification)
 
     decision = _to_str(classification.get("decision"))
