@@ -7153,7 +7153,8 @@ def create_event(evt: EventCreate) -> Dict[str, Any]:
 def process_events(limit: int = 50) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=50, minimum=1, maximum=100)
 
-    formula = "OR({Status_select}='New',{Status_select}='Queued',{Status}='New',{Status}='Queued')"
+    # Source de vérité = Status_select
+    formula = "OR({Status_select}='New',{Status_select}='Queued')"
     view_name = (EVENTS_VIEW_NAME or "Queue").strip()
 
     try:
@@ -7196,6 +7197,7 @@ def process_events(limit: int = 50) -> Dict[str, Any]:
                 "error": repr(e2),
                 "previous_error": repr(e),
             }
+
     print(f"[events/process] fetched={len(records)} meta={meta}")
 
     scanned = 0
@@ -7208,7 +7210,12 @@ def process_events(limit: int = 50) -> Dict[str, Any]:
     for event_record in records:
         event_id = str(event_record.get("id") or "").strip()
         fields = event_record.get("fields", {}) or {}
-        status = _event_status(fields).lower()
+
+        status = str(
+            fields.get("Status_select")
+            or fields.get("Status")
+            or ""
+        ).strip().lower()
 
         if status not in ("new", "queued"):
             skipped += 1
@@ -7224,7 +7231,14 @@ def process_events(limit: int = 50) -> Dict[str, Any]:
             f"name={fields.get('Name')}"
         )
 
-        res = _create_command_from_event(event_record)
+        try:
+            res = _create_command_from_event(event_record)
+        except Exception as e:
+            failed += 1
+            errors.append(f"{event_id}: {repr(e)}")
+            print(f"[events/process] exception event_id={event_id} error={repr(e)}")
+            _event_mark_error(event_id, repr(e))
+            continue
 
         if res.get("ok"):
             created += 1
