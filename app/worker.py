@@ -895,17 +895,23 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         "body": ("body", "HTTP_Payload_JSON"),
         "json": ("json", "JSON", "Payload_JSON"),
         "timeout": ("timeout",),
+
         "flow_id": ("flow_id", "flowid", "flowId", "Flow_ID"),
-        "event_id": ("event_id", "Event_ID"),
-        "root_event_id": (
-            "root_event_id",
+
+        "event_id": (
             "event_id",
             "eventid",
             "eventId",
+            "Event_ID",
+        ),
+
+        "root_event_id": (
+            "root_event_id",
             "rooteventid",
             "rootEventId",
             "Root_Event_ID",
         ),
+
         "step_index": ("step_index", "stepindex", "stepIndex", "Step_Index"),
         "goal": ("goal", "Goal", "failed_goal", "failedgoal", "Failed_Goal"),
         "reason": ("reason", "retry_reason", "retryreason", "Reason"),
@@ -980,14 +986,12 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     if not str(base.get("parent_command_id") or "").strip() and parent_command_id:
         base["parent_command_id"] = parent_command_id
 
-    # ROOT_EVENT_ID prioritaire
+    # ROOT_EVENT_ID prioritaire : event_id d'abord
     root_event_id = str(
         base.get("root_event_id")
         or base.get("event_id")
         or fields.get("event_id")
         or fields.get("Event_ID")
-        or fields.get("Root_Event_ID")
-        or fields.get("root_event_id")
         or ""
     ).strip()
 
@@ -996,11 +1000,20 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     else:
         base["root_event_id"] = root_event_id
 
-    # FLOW_ID dépend du root, sinon parent en dernier secours
+    # FLOW_ID dépend du flow, sinon root, sinon parent
     flow_id = str(base.get("flow_id") or "").strip()
 
     if not flow_id:
-        if root_event_id:
+        explicit_flow = str(
+            fields.get("flow_id")
+            or fields.get("Flow_ID")
+            or fields.get("flowid")
+            or ""
+        ).strip()
+
+        if explicit_flow:
+            flow_id = explicit_flow
+        elif root_event_id:
             flow_id = root_event_id
         elif parent_command_id:
             flow_id = f"flow_{parent_command_id}"
