@@ -1464,7 +1464,38 @@ def _coerce_non_empty_str(value):
         return ""
     return str(value).strip()
 
+def _event_mark_processed(
+    event_record_id: str,
+    *,
+    command_record_id: str = "",
+    command_created: bool = False,
+    idempotency_key: str = "",
+):
+    try:
+        fields = {
+            "Status_select": "Processed",
+        }
 
+        if command_record_id:
+            fields["Command_Record_ID"] = command_record_id
+
+        if command_created:
+            fields["Command_Created"] = True
+
+        if idempotency_key:
+            fields["Idempotency_Key"] = idempotency_key
+
+        airtable_update(EVENTS_TABLE_NAME, event_record_id, fields)
+
+        print(
+            "[event_mark_processed]",
+            event_record_id,
+            fields,
+        )
+
+    except Exception as e:
+        print("[event_mark_processed][ERROR]", repr(e))
+        
 def _resolve_flow_context_from_event(event_record_id, fields, payload_obj):
     event_id = (
         _coerce_non_empty_str(payload_obj.get("event_id"))
