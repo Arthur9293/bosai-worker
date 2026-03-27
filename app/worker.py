@@ -4623,7 +4623,77 @@ def _build_command_fields_candidates(
     candidates.append(base_fields)
 
     return candidates
+def _event_mark_processed(
+    event_record_id: str,
+    *,
+    command_record_id: str = "",
+    command_created: bool = False,
+    idempotency_key: str = "",
+):
+    attempts = []
 
+    linked_command_value = [command_record_id] if command_record_id else None
+
+    candidate_fields_list = [
+        {
+            "Status_select": "Processed",
+        },
+        {
+            "Status_select": "Processed",
+            "Command_Created": True if command_created else False,
+        },
+        {
+            "Status_select": "Processed",
+            "Idempotency_Key": idempotency_key,
+        },
+        {
+            "Status_select": "Processed",
+            "Command_Created": True if command_created else False,
+            "Idempotency_Key": idempotency_key,
+        },
+        {
+            "Status_select": "Processed",
+            "Linked_Command": linked_command_value,
+        } if linked_command_value else {
+            "Status_select": "Processed",
+        },
+        {
+            "Status_select": "Processed",
+            "Linked_Command": linked_command_value,
+            "Command_Created": True if command_created else False,
+            "Idempotency_Key": idempotency_key,
+        } if linked_command_value else {
+            "Status_select": "Processed",
+            "Command_Created": True if command_created else False,
+            "Idempotency_Key": idempotency_key,
+        },
+    ]
+
+    for fields in candidate_fields_list:
+        clean_fields = {
+            k: v for k, v in fields.items()
+            if v not in ("", None)
+        }
+
+        try:
+            airtable_update(EVENTS_TABLE_NAME, event_record_id, clean_fields)
+            print("[event_mark_processed]", event_record_id, clean_fields)
+            return {"ok": True, "fields": clean_fields}
+        except Exception as e:
+            attempts.append(
+                {
+                    "ok": False,
+                    "fields": clean_fields,
+                    "error": repr(e),
+                }
+            )
+            print("[event_mark_processed][ERROR]", repr(e))
+
+    return {
+        "ok": False,
+        "event_record_id": event_record_id,
+        "attempts": attempts,
+    }
 def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
     fields = event_record.get("fields", {}) or {}
     event_record_id = str(event_record.get("id") or "").strip()
