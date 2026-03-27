@@ -5114,13 +5114,16 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
     print("[HTTP_EXEC_WRAPPER_RESULT]", result)
 
-       def _spawn_commands(next_commands: List[Dict[str, Any]], idem_suffix: str) -> None:
+
+    def _spawn_commands(next_commands: List[Dict[str, Any]], idem_suffix: str) -> None:
         for next_cmd in next_commands:
             if not isinstance(next_cmd, dict):
+                print("[spawn] skipped non-dict next_cmd =", next_cmd)
                 continue
 
             next_capability = str(next_cmd.get("capability") or "").strip()
             if not next_capability:
+                print("[spawn] skipped empty capability next_cmd =", next_cmd)
                 continue
 
             next_input = (
@@ -5131,6 +5134,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             next_priority = int(next_cmd.get("priority") or 1)
 
             if not isinstance(next_input, dict):
+                print("[spawn] next_input not dict, fallback to {} =", next_input)
                 next_input = {}
 
             next_input = _normalize_flow_keys(dict(next_input))
@@ -5172,6 +5176,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
             if next_capability == "http_exec" and not next_input.get("url"):
                 print("[spawn] skipped http_exec without url")
+                print("[spawn] rejected next_input =", next_input)
                 continue
 
             spawn_fields = {
@@ -5190,11 +5195,13 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             if root_event_id:
                 spawn_fields["Root_Event_ID"] = root_event_id
 
-            print("[SPAWN next_capability]", next_capability)
-            print("[SPAWN next_input]", next_input)
-            print("[SPAWN Input_JSON]", json.dumps(next_input, ensure_ascii=False))
+            print("[SPAWN next_capability] =", next_capability)
+            print("[SPAWN next_input] =", next_input)
+            print("[SPAWN Input_JSON] =", json.dumps(next_input, ensure_ascii=False))
+            print("[SPAWN fields] =", spawn_fields)
 
-            _airtable_create(COMMANDS_TABLE_NAME, spawn_fields)
+            create_res = _airtable_create(COMMANDS_TABLE_NAME, spawn_fields)
+            print("[SPAWN create_res] =", create_res)
 
     # ------------------------------------------------------------
     # FAILURE PATH -> incident_router
@@ -5239,6 +5246,9 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             "parent_command_id": payload.get("parent_command_id") or "",
         }
 
+        print("[worker.wrapper] failure_path status_code =", status_code)
+        print("[worker.wrapper] failure_path payload =", payload)
+        print("[worker.wrapper] failure_path result =", result)
         print("[worker.wrapper] incident_input =", incident_input)
 
         incident_result = capability_incident_router_run(incident_input)
@@ -5246,148 +5256,19 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         print("[worker.wrapper] incident_result =", incident_result)
 
         if isinstance(incident_result, dict) and isinstance(incident_result.get("next_commands"), list) and incident_result.get("next_commands"):
+            print("[worker.wrapper] incident_result next_commands =", incident_result.get("next_commands", []))
             _spawn_commands(incident_result.get("next_commands", []), "incident-router")
+        else:
+            print("[worker.wrapper] no next_commands from incident_result")
 
         result["flow_id"] = flow_id
         result["root_event_id"] = root_event_id
         result["next_commands"] = incident_result.get("next_commands", []) if isinstance(incident_result, dict) else []
         result["terminal"] = bool(incident_result.get("terminal", False)) if isinstance(incident_result, dict) else True
         result["incident_result"] = incident_result
+
+        print("[worker.wrapper] returning failure result =", result)
         return result
-
-    # ------------------------------------------------------------
-    # SUCCESS PATH -> flow memory / next step
-    # ------------------------------------------------------------
-    if flow_id:
-        _append_flow_step_safe(
-            flow_id=flow_id,
-            workspace_id=workspace_id,
-            step_obj={
-                "step_index": step_index,
-                "capability": "http_exec",
-                "status": "done",
-                "goal": goal,
-                "url": payload.get("url") or payload.get("http_target"),
-                "result": {
-                    "status_code": status_code,
-                    "ok": result.get("ok"),
-                },
-                "run_record_id": run_record_id,
-            },
-        )
-
-        current = flow_state_get(flow_id, workspace_id=workspace_id)
-        state_obj = current.get("state") or {}
-        steps = state_obj.get("steps") or []
-
-        http_exec_done_count = len(
-            [
-                s
-                for s in steps
-                if isinstance(s, dict)
-                and s.get("capability") == "http_exec"
-                and s.get("status") == "done"
-            ]
-        )
-
-        _update_flow_registry_safe(
-            flow_id=flow_id,
-            workspace_id=workspace_id,
-            status="Running",
-            current_step=step_index,
-            last_decision=f"http_exec_done:{goal or 'unknown'}",
-            memory_obj={
-                "last_http_exec": {
-                    "goal": goal,
-                    "step_index": step_index,
-                    "status_code": status_code,
-                    "ok": result.get("ok"),
-                },
-                "http_exec_done_count": http_exec_done_count,
-                "steps_count": len(steps),
-            },
-            linked_run=[run_record_id],
-        )
-
-        result["flow_id"] = flow_id
-        result["root_event_id"] = root_event_id
-        result["http_exec_done_count"] = http_exec_done_count
-
-        goal_lower = goal.lower()
-
-        if goal_lower in (
-            "create_incident",
-            "alert_incident",
-            "sla_probe",
-            "sla_warning_probe",
-        ):
-            next_commands = []
-
-        elif goal_lower == "escalation_send":
-            next_commands = [
-                {
-                    "capability": "complete_flow_demo",
-                    "priority": 1,
-                    "input": {
-                        "flow_id": flow_id,
-                        "root_event_id": root_event_id,
-                        "step_index": step_index + 1,
-                        "goal": "escalation_sent",
-                        "workspace_id": workspace_id,
-                    },
-                    "terminal": False,
-                }
-            ]
-
-        elif http_exec_done_count >= 2:
-            next_commands = [
-                {
-                    "capability": "complete_flow_demo",
-                    "priority": 1,
-                    "input": {
-                        "flow_id": flow_id,
-                        "root_event_id": root_event_id,
-                        "step_index": step_index + 1,
-                        "goal": "complete_flow",
-                        "workspace_id": workspace_id,
-                    },
-                    "terminal": False,
-                }
-            ]
-
-        else:
-            next_commands = [
-                {
-                    "capability": "decision_router",
-                    "priority": 1,
-                    "input": {
-                        "flow_id": flow_id,
-                        "root_event_id": root_event_id,
-                        "step_index": step_index + 1,
-                        "goal": "continue_flow",
-                        "workspace_id": workspace_id,
-                        "http_status": status_code,
-                        "last_capability": "http_exec",
-                        "last_url": payload.get("url") or payload.get("http_target"),
-                    },
-                    "terminal": False,
-                }
-            ]
-
-        if next_commands:
-            result["next_commands"] = next_commands
-            result["terminal"] = False
-        else:
-            result["next_commands"] = []
-            result["terminal"] = True
-
-        print(
-            "[worker.wrapper] http_exec success next_commands =",
-            [x.get("capability") for x in (result.get("next_commands") or [])]
-            if isinstance(result, dict) else "not_dict"
-        )
-
-    return result
     
 def capability_retry_router_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
