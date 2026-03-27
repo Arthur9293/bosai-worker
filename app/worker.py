@@ -879,6 +879,7 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         "json": ("json", "JSON", "Payload_JSON"),
         "timeout": ("timeout",),
         "flow_id": ("flow_id", "flowid", "flowId", "Flow_ID"),
+        "event_id": ("event_id", "Event_ID"),
         "root_event_id": (
             "root_event_id",
             "event_id",
@@ -962,9 +963,7 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     if not str(base.get("parent_command_id") or "").strip() and parent_command_id:
         base["parent_command_id"] = parent_command_id
 
-    # -----------------------------
-    # ROOT_EVENT_ID (PRIORITAIRE)
-    # -----------------------------
+    # ROOT_EVENT_ID prioritaire
     root_event_id = str(
         base.get("root_event_id")
         or base.get("event_id")
@@ -974,11 +973,6 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         or fields.get("root_event_id")
         or ""
     ).strip()
-
-    if not root_event_id:
-        print("[compose_command_input][WARNING] missing root_event_id")
-    else:
-        base["root_event_id"] = root_event_id
 
     if not root_event_id:
         print("[compose_command_input][WARNING] missing root_event_id")
