@@ -21,9 +21,13 @@ def _try_update_one(
     fields: Dict[str, Any],
 ) -> Dict[str, Any]:
     try:
+        print("[TRY_UPDATE_ONE] table =", table_name)
+        print("[TRY_UPDATE_ONE] record_id =", record_id)
+        print("[TRY_UPDATE_ONE] fields =", _safe_json(fields))
         airtable_update(table_name, record_id, fields)
         return {"ok": True, "fields": fields}
     except Exception as e:
+        print("[TRY_UPDATE_ONE] error =", repr(e))
         return {"ok": False, "fields": fields, "error": repr(e)}
 
 
@@ -41,65 +45,12 @@ def _best_effort_update_logs_error(
     sla_status: str,
     run_record_id: str,
 ) -> Dict[str, Any]:
-    ts_now = utc_now_iso()
-
-    payload_redacted = _safe_json(
-        {
-            "severity": severity,
-            "goal": goal,
-            "http_status": http_status,
-            "failed_goal": failed_goal,
-            "failed_url": failed_url,
-            "sla_status": sla_status,
-        }
-    )
-
     result_json = _safe_json(escalation_result)
 
     attempts: List[Dict[str, Any]] = [
-        # Bloc moderne / probable
-        {
-            "SLA_Status": "Escalated",
-            "Last_SLA_Check": ts_now,
-            "Linked_Run": run_record_id,
-            "Result_JSON": result_json,
-        },
-        # Variante FR incident
-        {
-            "Statut_incident": "Escaladé",
-            "Linked_Run": run_record_id,
-            "Result_JSON": result_json,
-        },
-        # Variante avec message
-        {
-            "Statut_incident": "Escaladé",
-            "Error_Message": reason,
-            "Linked_Run": run_record_id,
-            "Result_JSON": result_json,
-        },
-        # Variante payload brut réduit
-        {
-            "Payload_Redacted": payload_redacted,
-            "Result_JSON": result_json,
-            "Linked_Run": run_record_id,
-        },
-        # Variante checkbox historique si elle existe
-        {
-            "Escalation_Sent": True,
-            "Result_JSON": result_json,
-            "Linked_Run": run_record_id,
-        },
-        {
-            "Escalation_Sent": True,
-            "Escalation_Queued": False,
-            "Escalation_Queued_At": ts_now,
-            "Result_JSON": result_json,
-            "Linked_Run": run_record_id,
-        },
-        # Update minimal de secours
         {
             "Result_JSON": result_json,
-        },
+        }
     ]
 
     results: List[Dict[str, Any]] = []
@@ -188,6 +139,10 @@ def capability_internal_escalate(
         print("[INTERNAL_ESCALATE] run_record_id =", run_record_id)
         print("[INTERNAL_ESCALATE] flow_id =", flow_id)
         print("[INTERNAL_ESCALATE] root_event_id =", root_event_id)
+        print(
+            "[INTERNAL_ESCALATE] direct test fields =",
+            _safe_json({"Result_JSON": escalation_result}),
+        )
 
         update_res = _best_effort_update_logs_error(
             airtable_update=airtable_update,
