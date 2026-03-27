@@ -745,6 +745,79 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     base: Dict[str, Any] = {}
     parse_errors: List[Dict[str, Any]] = []
 
+    def _try_parse_json_dict(raw_text: str) -> Optional[Dict[str, Any]]:
+        if not raw_text:
+            return None
+
+        candidates: List[str] = []
+
+        # brut
+        candidates.append(raw_text)
+
+        # guillemets échappés
+        candidates.append(raw_text.replace('\\"', '"'))
+
+        # unicode escape
+        try:
+            candidates.append(bytes(raw_text, "utf-8").decode("unicode_escape"))
+        except Exception:
+            pass
+
+        # retire les backslashes invalides devant underscore
+        candidates.append(raw_text.replace("\\_", "_"))
+        candidates.append(raw_text.replace('\\"', '"').replace("\\_", "_"))
+
+        try:
+            decoded = bytes(raw_text, "utf-8").decode("unicode_escape")
+            candidates.append(decoded.replace("\\_", "_"))
+        except Exception:
+            pass
+
+        # dédoublonne
+        seen = set()
+        unique_candidates: List[str] = []
+        for c in candidates:
+            if c not in seen:
+                seen.add(c)
+                unique_candidates.append(c)
+
+        for candidate in unique_candidates:
+            try:
+                obj = json.loads(candidate)
+            except Exception:
+                continue
+
+            if isinstance(obj, dict):
+                return obj
+
+            if isinstance(obj, str):
+                inner = obj.strip()
+                if not inner:
+                    continue
+
+                inner_candidates = [
+                    inner,
+                    inner.replace('\\"', '"'),
+                    inner.replace("\\_", "_"),
+                    inner.replace('\\"', '"').replace("\\_", "_"),
+                ]
+
+                inner_seen = set()
+                for inner_candidate in inner_candidates:
+                    if inner_candidate in inner_seen:
+                        continue
+                    inner_seen.add(inner_candidate)
+
+                    try:
+                        obj2 = json.loads(inner_candidate)
+                    except Exception:
+                        continue
+
+                    if isinstance(obj2, dict):
+                        return obj2
+
+        return None
+
     for source_key in ("Input_JSON", "Command_JSON", "Command_Input_JSON"):
         raw_val = fields.get(source_key)
 
@@ -760,45 +833,19 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
             if not raw_text:
                 continue
 
-            obj: Any = None
+            parsed_obj = _try_parse_json_dict(raw_text)
 
-            try:
-                obj = json.loads(raw_text)
-            except Exception:
-                try:
-                    obj = json.loads(raw_text.replace('\\"', '"'))
-                except Exception:
-                    try:
-                        fixed = bytes(raw_text, "utf-8").decode("unicode_escape")
-                        obj = json.loads(fixed)
-                    except Exception as e:
-                        parse_errors.append(
-                            {
-                                "source": source_key,
-                                "error": repr(e),
-                                "raw_preview": raw_text[:500],
-                            }
-                        )
-                        continue
-
-            if isinstance(obj, dict):
-                parsed = obj
-            elif isinstance(obj, str):
-                inner = obj.strip()
-                if inner:
-                    try:
-                        obj2 = json.loads(inner)
-                        if isinstance(obj2, dict):
-                            parsed = obj2
-                    except Exception as e:
-                        parse_errors.append(
-                            {
-                                "source": source_key,
-                                "error": f"double_decode_failed: {repr(e)}",
-                                "raw_preview": inner[:500],
-                            }
-                        )
-                        continue
+            if isinstance(parsed_obj, dict):
+                parsed = parsed_obj
+            else:
+                parse_errors.append(
+                    {
+                        "source": source_key,
+                        "error": "json_parse_failed",
+                        "raw_preview": raw_text[:500],
+                    }
+                )
+                continue
 
         if not isinstance(parsed, dict) or not parsed:
             continue
