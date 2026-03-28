@@ -33,6 +33,7 @@ from app.capabilities.decision_engine import run as capability_decision_engine
 from app.capabilities.retry_router import run as capability_retry_router_run
 from app.capabilities.incident_create import run as capability_incident_create
 from app.capabilities.complete_flow_incident import run as capability_complete_flow_incident
+from app.capabilities.incident_deduplicate import run as capability_incident_deduplicate
 
 
 # ============================================================
@@ -5995,6 +5996,7 @@ EVENT_CAPABILITY_ALLOWLIST = {
     "decision_engine",
     "incident_create",
     "complete_flow_incident",
+    "incident_deduplicate",
 }
 
 EXECUTABLE_CAPABILITY_ALLOWLIST = {
@@ -6016,6 +6018,7 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "decision_engine",
     "incident_create",
     "complete_flow_incident",
+    "incident_deduplicate",
 }
 
 def _to_int(value: Any, default: int = 0) -> int:
@@ -6451,6 +6454,7 @@ CAPABILITIES = {
     "incident_router": capability_incident_router_wrapped,
     "incident_create": capability_incident_create_wrapped,
     "complete_flow_incident": capability_complete_flow_incident,
+    "incident_deduplicate": capability_incident_deduplicate,
 }
   
 # ============================================================
