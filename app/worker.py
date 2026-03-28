@@ -32,6 +32,7 @@ from app.capabilities.incident_router import run as capability_incident_router_r
 from app.capabilities.decision_engine import run as capability_decision_engine
 from app.capabilities.retry_router import run as capability_retry_router_run
 from app.capabilities.incident_create import run as capability_incident_create
+from app.capabilities.complete_flow_incident import run as capability_complete_flow_incident
 
 
 # ============================================================
@@ -5993,6 +5994,7 @@ EVENT_CAPABILITY_ALLOWLIST = {
     "complete_flow",
     "decision_engine",
     "incident_create",
+    "complete_flow_incident",
 }
 
 EXECUTABLE_CAPABILITY_ALLOWLIST = {
@@ -6013,6 +6015,7 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "flow_state_append_step",
     "decision_engine",
     "incident_create"
+    "complete_flow_incident",
 }
 
 def _to_int(value: Any, default: int = 0) -> int:
@@ -6447,6 +6450,7 @@ CAPABILITIES = {
     "decision_router": capability_decision_router,
     "incident_router": capability_incident_router_wrapped,
     "incident_create": capability_incident_create_wrapped,
+    "complete_flow_incident": capability_complete_flow_incident,
 }
   
 # ============================================================
