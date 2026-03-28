@@ -35,6 +35,8 @@ from app.capabilities.incident_create import run as capability_incident_create
 from app.capabilities.complete_flow_incident import run as capability_complete_flow_incident
 from app.capabilities.incident_deduplicate import run as capability_incident_deduplicate
 from app.capabilities.incident_update import run as capability_incident_update
+from app.capabilities.resolve_incident import run as capability_resolve_incident
+from app.capabilities.close_incident import run as capability_close_incident
 
 
 # ============================================================
@@ -5980,6 +5982,24 @@ def capability_incident_create_wrapped(req: RunRequest, run_record_id: str) -> D
         airtable_create=_airtable_create,
         incidents_table_name=INCIDENTS_TABLE_NAME,
     )
+
+
+def capability_resolve_incident_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    return capability_resolve_incident(
+        req,
+        run_record_id,
+        airtable_update=airtable_update,
+        incidents_table_name=INCIDENTS_TABLE_NAME,
+    )
+
+
+def capability_close_incident_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    return capability_close_incident(
+        req,
+        run_record_id,
+        airtable_update=airtable_update,
+        incidents_table_name=INCIDENTS_TABLE_NAME,
+    )
     
 EVENT_CAPABILITY_ALLOWLIST = {
     "http_exec",
@@ -5998,6 +6018,8 @@ EVENT_CAPABILITY_ALLOWLIST = {
     "incident_create",
     "complete_flow_incident",
     "incident_deduplicate",
+    "resolve_incident",
+    "close_incident",
 }
 
 EXECUTABLE_CAPABILITY_ALLOWLIST = {
@@ -6020,6 +6042,8 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "incident_create",
     "complete_flow_incident",
     "incident_deduplicate",
+    "resolve_incident",
+    "close_incident",
 }
 
 def _to_int(value: Any, default: int = 0) -> int:
@@ -6156,6 +6180,8 @@ CAPABILITIES = {
     "complete_flow_incident": capability_complete_flow_incident,
     "incident_deduplicate": capability_incident_deduplicate_wrapped,
     "incident_update": capability_incident_update_wrapped,
+    "resolve_incident": capability_resolve_incident_wrapped,
+"close_incident": capability_close_incident_wrapped,
 }
   
 # ============================================================
