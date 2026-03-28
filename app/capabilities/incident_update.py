@@ -256,74 +256,7 @@ def run(
             "terminal": True,
         }
 
-    next_input = {
-        "flow_id": meta.get("flow_id", ""),
-        "root_event_id": meta.get("root_event_id", ""),
-        "step_index": _to_int(meta.get("step_index"), 0) + 1,
-        "_depth": depth + 1,
-        "workspace_id": meta.get("workspace_id", ""),
-        "tenant_id": meta.get("tenant_id", ""),
-        "app_name": meta.get("app_name", ""),
-        "goal": "incident_escalation",
-        "decision": _to_str(data.get("decision") or ""),
-        "reason": _to_str(data.get("reason") or "incident_updated"),
-        "severity": _to_str(data.get("severity") or "medium"),
-        "category": _to_str(data.get("category") or "unknown_incident"),
-        "error": _to_str(
-            data.get("error")
-            or data.get("error_message")
-            or data.get("errormessage")
-            or ""
-        ),
-        "error_message": _to_str(
-            data.get("error")
-            or data.get("error_message")
-            or data.get("errormessage")
-            or ""
-        ),
-        "incident_code": _to_str(data.get("incident_code") or ""),
-        "final_failure": _to_bool(data.get("final_failure"), False),
-        "original_capability": _to_str(
-            data.get("original_capability")
-            or data.get("failed_capability")
-            or ""
-        ),
-        "failed_capability": _to_str(
-            data.get("failed_capability")
-            or data.get("original_capability")
-            or ""
-        ),
-        "failed_url": _to_str(
-            data.get("failed_url")
-            or data.get("target_url")
-            or ""
-        ),
-        "target_url": _to_str(
-            data.get("target_url")
-            or data.get("failed_url")
-            or ""
-        ),
-        "failed_method": _to_str(
-            data.get("failed_method")
-            or data.get("method")
-            or ""
-        ).upper(),
-        "method": _to_str(
-            data.get("method")
-            or data.get("failed_method")
-            or ""
-        ).upper(),
-        "retry_count": _to_int(data.get("retry_count"), 0),
-        "retry_max": _to_int(data.get("retry_max"), 0),
-        "http_status": _to_int(data.get("http_status"), 0),
-        "incident_record_id": incident_record_id,
-        "log_record_id": _to_str(data.get("log_record_id") or ""),
-        "run_record_id": effective_run_record_id,
-        "incident_key": _to_str(data.get("incident_key") or ""),
-        "deduplicate_action": "reuse_existing",
-        "parent_command_id": _to_str(meta.get("parent_command_id") or ""),
-    }
-
+    # SAFE PATCH: stop propre après update pour éviter boucle indirecte
     return {
         "ok": True,
         "capability": "incident_update",
@@ -334,18 +267,12 @@ def run(
         "message": "incident_updated",
         "run_record_id": effective_run_record_id,
         "updated": True,
-        "next_commands": [
-            {
-                "capability": "internal_escalate",
-                "priority": 1,
-                "input": next_input,
-            }
-        ],
-        "terminal": False,
+        "next_commands": [],
+        "terminal": True,
         "spawn_summary": {
             "ok": True,
-            "spawned": 1,
-            "skipped": 0,
+            "spawned": 0,
+            "skipped": 1,
             "errors": [],
         },
     }
