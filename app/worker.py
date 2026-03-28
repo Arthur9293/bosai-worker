@@ -5001,7 +5001,7 @@ def _create_command_from_next_command(
     elif capability == "decisionrouter":
         capability = "decision_router"
     elif capability == "incidentcreate":
-    capability = "incident_create"
+        capability = "incident_create"
 
     if not capability:
         return {"ok": False, "error": "missing_capability"}
