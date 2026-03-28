@@ -5994,6 +5994,13 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "incident_create"
 }
 
+def _to_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(value)
+    except Exception:
+        return default
 def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
 
