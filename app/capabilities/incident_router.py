@@ -203,9 +203,12 @@ def _normalize_incident(payload: Dict[str, Any]) -> Dict[str, Any]:
             payload.get("incident_message")
             or payload.get("error_message")
             or payload.get("errormessage")
+            or payload.get("error")
             or error_obj.get("message")
+            or error_obj.get("error")
             or payload.get("message")
             or diagnostics.get("message")
+            or diagnostics.get("error")
             or ""
         ),
         "failed_capability": _to_str(
