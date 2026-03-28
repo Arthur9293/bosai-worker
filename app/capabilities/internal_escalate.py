@@ -221,7 +221,7 @@ def capability_internal_escalate(
         "run_record_id": run_record_id,
         "next_commands": [
             {
-                "capability": "complete_flow_demo",
+                "capability": "complete_flow_incident",
                 "priority": 1,
                 "input": {
                     "flow_id": flow_id,
