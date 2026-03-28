@@ -6220,45 +6220,45 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
     next_commands: List[Dict[str, Any]] = []
 
     if decision in {"escalate", "critical_escalate"}:
-    next_commands.append(
-        {
-            "capability": "incident_deduplicate",
-            "priority": req.priority,
-            "input": {
-                "flow_id": flow_id,
-                "root_event_id": root_event_id,
-                "event_id": root_event_id,
-                "step_index": step_index + 1,
-                "_depth": _to_int(payload.get("_depth"), 0) + 1,
-                "workspace_id": workspace_id,
-                "goal": "incident_deduplicate",
-                "decision": decision,
-                "reason": classified_reason,
-                "severity": severity,
-                "category": category,
-                "error": error_text,
-                "error_message": error_text,
-                "incident_code": incident_code,
-                "final_failure": final_failure,
-                "original_capability": original_capability,
-                "failed_capability": original_capability,
-                "failed_url": failed_url,
-                "target_url": failed_url,
-                "failed_method": failed_method,
-                "method": failed_method,
-                "retry_count": retry_count,
-                "retry_max": retry_max,
-                "http_status": http_status,
-                "incident_record_id": incident_record_id,
-                "log_record_id": incident_record_id,
-                "run_record_id": run_record_id,
-                "incident_key": incident_key,
-                "parent_command_id": getattr(req, "command_id", "") or "",
-            },
-            "terminal": False,
-        }
-    )
-next_commands = next_commands[:1]
+        next_commands.append(
+            {
+                "capability": "incident_deduplicate",
+                "priority": req.priority,
+                "input": {
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "event_id": root_event_id,
+                    "step_index": step_index + 1,
+                    "_depth": _to_int(payload.get("_depth"), 0) + 1,
+                    "workspace_id": workspace_id,
+                    "goal": "incident_deduplicate",
+                    "decision": decision,
+                    "reason": classified_reason,
+                    "severity": severity,
+                    "category": category,
+                    "error": error_text,
+                    "error_message": error_text,
+                    "incident_code": incident_code,
+                    "final_failure": final_failure,
+                    "original_capability": original_capability,
+                    "failed_capability": original_capability,
+                     "failed_url": failed_url,
+                     "target_url": failed_url,
+                     "failed_method": failed_method,
+                     "method": failed_method,
+                     "retry_count": retry_count,
+                     "retry_max": retry_max,
+                     "http_status": http_status,
+                     "incident_record_id": incident_record_id,
+                     "log_record_id": incident_record_id,
+                     "run_record_id": run_record_id,
+                     "incident_key": incident_key,
+                     "parent_command_id": getattr(req, "command_id", "") or "",
+                },
+                "terminal": False,
+            }
+        )
+    next_commands = next_commands[:1]
 
     next_commands = next_commands[:1]
 
