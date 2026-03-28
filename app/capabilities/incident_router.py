@@ -191,10 +191,13 @@ def _normalize_incident(payload: Dict[str, Any]) -> Dict[str, Any]:
         else False
     )
 
+    incident_code_normalized = _to_str(incident_code).strip()
+    incident_code_normalized = incident_code_normalized.replace(" ", "_").lower()
+
     normalized = {
         "ts": _now_ts(),
         "http_status": _to_int(http_status, 0) if http_status not in (None, "") else 0,
-        "incident_code": _to_str(incident_code).strip().lower(),
+        "incident_code": incident_code_normalized,
         "final_failure": _to_bool(final_failure, False),
         "error_message": _to_str(
             payload.get("incident_message")
@@ -314,17 +317,36 @@ def _classify_incident(incident: Dict[str, Any], meta: Dict[str, Any]) -> Dict[s
     }
 
 
+def _build_incident_key(meta: Dict[str, Any], incident: Dict[str, Any], classification: Dict[str, Any]) -> str:
+    return "|".join(
+        [
+            _to_str(meta.get("flow_id") or "no_flow"),
+            _to_str(meta.get("root_event_id") or "no_root"),
+            _to_str(incident.get("failed_capability") or "no_cap"),
+            _to_str(incident.get("method") or "no_method").upper(),
+            _to_str(incident.get("target_url") or "no_url"),
+            _to_str(incident.get("http_status") or "no_status"),
+            _to_str(incident.get("incident_code") or "no_incident_code"),
+            _to_str(classification.get("reason") or "no_reason"),
+            "final" if _to_bool(incident.get("final_failure"), False) else "not_final",
+        ]
+    )
+
+
 def _build_escalate_command(
     meta: Dict[str, Any],
     incident: Dict[str, Any],
     classification: Dict[str, Any],
 ) -> Dict[str, Any]:
+    incident_key = _build_incident_key(meta, incident, classification)
+
     return {
-        "capability": "incident_create",
+        "capability": "incident_deduplicate",
         "priority": 1,
         "input": {
             "flow_id": meta.get("flow_id", ""),
             "root_event_id": meta.get("root_event_id", ""),
+            "event_id": meta.get("root_event_id", ""),
             "parent_capability": "incident_router",
             "parent_command_id": meta.get("parent_command_id", ""),
             "step_index": _to_int(meta.get("step_index"), 0) + 1,
@@ -333,7 +355,7 @@ def _build_escalate_command(
             "tenant_id": meta.get("tenant_id", ""),
             "app_name": meta.get("app_name", ""),
             "source": "incident_router",
-            "goal": "incident_create",
+            "goal": "incident_deduplicate",
             "decision": classification.get("decision", ""),
             "reason": classification.get("reason", ""),
             "severity": classification.get("severity", ""),
@@ -354,6 +376,7 @@ def _build_escalate_command(
             "incident_record_id": "",
             "log_record_id": incident.get("log_record_id", ""),
             "run_record_id": "",
+            "incident_key": incident_key,
         },
     }
 
