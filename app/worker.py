@@ -5974,7 +5974,7 @@ def capability_incident_create_wrapped(req: RunRequest, run_record_id: str) -> D
     return capability_incident_create(
         req,
         run_record_id,
-        airtable_create=airtable_create,
+        airtable_create=_airtable_create,
         incidents_table_name=INCIDENTS_TABLE_NAME,
     )
     
