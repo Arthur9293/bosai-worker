@@ -31,6 +31,7 @@ from app.capabilities.internal_escalate import capability_internal_escalate
 from app.capabilities.incident_router import run as capability_incident_router_run
 from app.capabilities.decision_engine import run as capability_decision_engine
 from app.capabilities.retry_router import run as capability_retry_router_run
+from app.capabilities.incident_create import run as capability_incident_create
 
 
 # ============================================================
@@ -54,6 +55,8 @@ LOGS_ERRORS_VIEW_NAME = os.getenv("LOGS_ERRORS_VIEW_NAME", "Active").strip()
 COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 EVENTS_VIEW_NAME = os.getenv("EVENTS_VIEW_NAME", "Queue").strip()
 EVENTS_DASHBOARD_VIEW_NAME = os.getenv("EVENTS_DASHBOARD_VIEW_NAME", EVENTS_VIEW_NAME or "Grid view").strip()
+
+INCIDENTS_TABLE_NAME = os.getenv("INCIDENTS_TABLE_NAME", "Incidents")
 
 SYSTEM_RUNS_VIEW_NAME = os.getenv("SYSTEM_RUNS_VIEW_NAME", "Grid view").strip()
 COMMANDS_DASHBOARD_VIEW_NAME = os.getenv("COMMANDS_DASHBOARD_VIEW_NAME", COMMANDS_VIEW_NAME or "Queue").strip()
@@ -5966,6 +5969,7 @@ EVENT_CAPABILITY_ALLOWLIST = {
     "complete_flow_demo",
     "complete_flow",
     "decision_engine",
+    "incident_create",
 }
 
 EXECUTABLE_CAPABILITY_ALLOWLIST = {
@@ -5984,7 +5988,8 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "flow_state_get",
     "flow_state_put",
     "flow_state_append_step",
-    "decision_engine"
+    "decision_engine",
+    "incident_create"
 }
 
 def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
