@@ -14,6 +14,15 @@ def _safe_json(value: Any) -> str:
         return "{}"
 
 
+def _to_str(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    try:
+        return str(value)
+    except Exception:
+        return default
+
+
 def _try_update_one(
     airtable_update,
     table_name: str,
@@ -36,21 +45,11 @@ def _best_effort_update_logs_error(
     logs_errors_table_name: str,
     log_record_id: str,
     escalation_result: Dict[str, Any],
-    reason: str,
-    severity: str,
-    goal: str,
-    http_status: Any,
-    failed_goal: str,
-    failed_url: str,
-    sla_status: str,
-    run_record_id: str,
 ) -> Dict[str, Any]:
     result_json = _safe_json(escalation_result)
 
     attempts: List[Dict[str, Any]] = [
-        {
-            "Result_JSON": result_json,
-        }
+        {"Result_JSON": result_json}
     ]
 
     results: List[Dict[str, Any]] = []
@@ -78,49 +77,87 @@ def _best_effort_update_logs_error(
     }
 
 
+def _best_effort_update_incident(
+    airtable_update,
+    incidents_table_name: str,
+    incident_record_id: str,
+    run_record_id: str,
+) -> None:
+    """
+    SAFE PATCH:
+    - ne casse jamais
+    - met Status_select = Escalated
+    - best effort uniquement
+    """
+    if not incident_record_id:
+        return
+
+    candidates = [
+        {
+            "Status_select": "Escalated",
+            "Last_Action": "internal_escalate",
+            "Last_Seen_At": utc_now_iso(),
+            "Run_Record_ID": run_record_id,
+        },
+        {
+            "Status_select": "Escalated",
+        },
+        {
+            "Last_Seen_At": utc_now_iso(),
+        },
+    ]
+
+    for fields in candidates:
+        try:
+            airtable_update(incidents_table_name, incident_record_id, fields)
+            print("[INCIDENT_ESCALATE] success")
+            return
+        except Exception as e:
+            print("[INCIDENT_ESCALATE] failed attempt =", repr(e))
+            continue
+
+
 def capability_internal_escalate(
     req,
     run_record_id,
     *,
     airtable_update,
     logs_errors_table_name,
+    incidents_table_name=None,  # SAFE ADD
 ):
     payload = req.input or {}
 
-    flow_id = str(payload.get("flow_id") or "").strip()
+    flow_id = _to_str(payload.get("flow_id")).strip()
 
-    root_event_id = str(
+    root_event_id = _to_str(
         payload.get("root_event_id")
         or payload.get("event_id")
         or payload.get("id")
-        or ""
     ).strip()
 
-    log_record_id = str(
+    log_record_id = _to_str(
         payload.get("log_record_id")
         or payload.get("run_record_id")
         or payload.get("incident_record_id")
         or run_record_id
-        or ""
     ).strip()
 
-    reason = str(payload.get("reason") or "internal_escalation").strip()
-    goal = str(payload.get("goal") or "escalation_send").strip()
-    severity = str(payload.get("severity") or "critical").strip()
-    http_status = payload.get("http_status")
-    failed_goal = str(payload.get("failed_goal") or "").strip()
-    failed_url = str(payload.get("failed_url") or "").strip()
-    sla_status = str(payload.get("sla_status") or "").strip()
+    incident_record_id = _to_str(payload.get("incident_record_id")).strip()
 
-    workspace_id = str(
+    reason = _to_str(payload.get("reason"), "internal_escalation")
+    goal = _to_str(payload.get("goal"), "escalation_send")
+    severity = _to_str(payload.get("severity"), "critical")
+    http_status = payload.get("http_status")
+    failed_goal = _to_str(payload.get("failed_goal"))
+    failed_url = _to_str(payload.get("failed_url"))
+    sla_status = _to_str(payload.get("sla_status"))
+
+    workspace_id = _to_str(
         payload.get("workspace_id")
         or payload.get("Workspace_ID")
         or payload.get("workspaceId")
-        or ""
-    ).strip()
-
-    if not workspace_id:
-        workspace_id = "production"
+        or "production"
+    )
 
     if not flow_id and log_record_id:
         flow_id = f"flow_internal_escalate_{log_record_id}"
@@ -159,33 +196,14 @@ def capability_internal_escalate(
     }
 
     try:
-        print("[INTERNAL_ESCALATE] table =", logs_errors_table_name)
         print("[INTERNAL_ESCALATE] log_record_id =", log_record_id)
-        print("[INTERNAL_ESCALATE] run_record_id =", run_record_id)
-        print("[INTERNAL_ESCALATE] flow_id =", flow_id)
-        print("[INTERNAL_ESCALATE] root_event_id =", root_event_id)
-        print("[INTERNAL_ESCALATE] workspace_id =", workspace_id)
 
         update_res = _best_effort_update_logs_error(
             airtable_update=airtable_update,
             logs_errors_table_name=logs_errors_table_name,
             log_record_id=log_record_id,
             escalation_result=escalation_result,
-            reason=reason,
-            severity=severity,
-            goal=goal,
-            http_status=http_status,
-            failed_goal=failed_goal,
-            failed_url=failed_url,
-            sla_status=sla_status,
-            run_record_id=run_record_id,
         )
-
-        print("[INTERNAL_ESCALATE] update_res =", _safe_json(update_res))
-
-        if isinstance(update_res, dict):
-            for idx, attempt in enumerate(update_res.get("attempts", []), start=1):
-                print(f"[INTERNAL_ESCALATE] attempt_{idx} =", _safe_json(attempt))
 
         if not update_res.get("ok"):
             return {
@@ -193,9 +211,6 @@ def capability_internal_escalate(
                 "error": "airtable_update_failed_no_matching_fields",
                 "flow_id": flow_id,
                 "root_event_id": root_event_id,
-                "log_record_id": log_record_id,
-                "run_record_id": run_record_id,
-                "update_res": update_res,
                 "terminal": True,
             }
 
@@ -205,10 +220,20 @@ def capability_internal_escalate(
             "error": "airtable_update_failed:" + repr(e),
             "flow_id": flow_id,
             "root_event_id": root_event_id,
-            "log_record_id": log_record_id,
-            "run_record_id": run_record_id,
             "terminal": True,
         }
+
+    # ✅ SAFE PATCH INCIDENT UPDATE
+    try:
+        if incidents_table_name:
+            _best_effort_update_incident(
+                airtable_update=airtable_update,
+                incidents_table_name=incidents_table_name,
+                incident_record_id=incident_record_id,
+                run_record_id=run_record_id,
+            )
+    except Exception:
+        pass
 
     return {
         "ok": True,
@@ -242,10 +267,12 @@ def run(
     *,
     airtable_update,
     logs_errors_table_name,
+    incidents_table_name=None,  # IMPORTANT
 ):
     return capability_internal_escalate(
         req,
         run_record_id,
         airtable_update=airtable_update,
         logs_errors_table_name=logs_errors_table_name,
+        incidents_table_name=incidents_table_name,
     )
