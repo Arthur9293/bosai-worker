@@ -4571,7 +4571,6 @@ def _event_mark_error(event_record_id: str, message: str) -> Dict[str, Any]:
 def _event_status(fields: Dict[str, Any]) -> str:
     return str(fields.get("Status_select", fields.get("Status", "")) or "").strip()
 
-
 def _build_command_fields_candidates(
     *,
     capability: str,
@@ -4603,7 +4602,6 @@ def _build_command_fields_candidates(
         or "GET"
     ).strip().upper()
 
-    # normalise aussi l'input JSON pour que http_exec retrouve toujours ses clés
     if url_value:
         command_input.setdefault("url", url_value)
         command_input.setdefault("http_target", url_value)
@@ -4617,18 +4615,42 @@ def _build_command_fields_candidates(
 
     input_json = json.dumps(command_input, ensure_ascii=False)
 
-    base_fields: Dict[str, Any] = {
+    minimal_fields: Dict[str, Any] = {
         "Capability": capability,
         "Status_select": "Queued",
         "Priority": priority,
         "Input_JSON": input_json,
         "Idempotency_Key": idem,
+    }
+
+    base_fields: Dict[str, Any] = {
+        **minimal_fields,
         "http_target": url_value,
         "URL": url_value,
         "HTTP_Method": method_value,
     }
 
     candidates: List[Dict[str, Any]] = []
+
+    candidates.append(minimal_fields)
+
+    if workspace_id:
+        candidates.append(
+            {
+                **minimal_fields,
+                "Workspace_ID": str(workspace_id).strip(),
+            }
+        )
+
+    candidates.append(base_fields)
+
+    if workspace_id:
+        candidates.append(
+            {
+                **base_fields,
+                "Workspace_ID": str(workspace_id).strip(),
+            }
+        )
 
     if workspace_id and event_record_id:
         candidates.append(
@@ -4639,17 +4661,8 @@ def _build_command_fields_candidates(
             }
         )
 
-    if workspace_id:
-        candidates.append(
-            {
-                **base_fields,
-                "Workspace_ID": str(workspace_id).strip(),
-            }
-        )
-
-    candidates.append(base_fields)
-
     return candidates
+    
 def _event_mark_processed(
     event_record_id: str,
     *,
