@@ -148,6 +148,22 @@ def run(
             "terminal": True,
         }
 
+    effective_run_record_id = _to_str(
+        run_record_id
+        or data.get("run_record_id")
+        or data.get("runrecordid")
+        or ""
+    )
+
+    error_message = _to_str(
+        data.get("error")
+        or data.get("error_message")
+        or data.get("errormessage")
+        or ""
+    )
+
+    incident_key = _to_str(data.get("incident_key") or "")
+
     incident_fields = {
         "Name": _to_str(data.get("incident_code") or data.get("incidentcode") or "Incident"),
         "Status_select": "Open",
@@ -179,19 +195,19 @@ def run(
             or data.get("method")
             or "",
         ).upper(),
-        "Error_Message": _to_str(
-            data.get("error")
-            or data.get("error_message")
-            or data.get("errormessage")
-            or "",
-        ),
+        "Error_Message": error_message,
         "Flow_ID": _to_str(meta.get("flow_id", "")),
         "Root_Event_ID": _to_str(meta.get("root_event_id", "")),
         "Workspace_ID": _to_str(meta.get("workspace_id", "")),
-        "Run_Record_ID": _to_str(run_record_id or data.get("run_record_id") or data.get("runrecordid") or ""),
+        "Run_Record_ID": effective_run_record_id,
         "Payload_JSON": _safe_json(data),
         "Created_By_Capability": "incident_create",
         "Opened_At": _now_ts(),
+
+        # SAFE PATCH additions
+        "Incident_Key": incident_key,
+        "Last_Seen_At": _now_ts(),
+        "Occurrences_Count": 1,
     }
 
     clean_fields = {
@@ -216,7 +232,7 @@ def run(
             "error": f"incident_create_failed:{repr(e)}",
             "flow_id": meta.get("flow_id", ""),
             "root_event_id": meta.get("root_event_id", ""),
-            "run_record_id": run_record_id,
+            "run_record_id": effective_run_record_id,
             "terminal": True,
         }
 
@@ -231,12 +247,10 @@ def run(
         "reason": _to_str(data.get("reason") or "incident_created"),
         "severity": _to_str(data.get("severity") or "medium"),
         "category": _to_str(data.get("category") or "unknown_incident"),
-        "error": _to_str(
-            data.get("error")
-            or data.get("error_message")
-            or data.get("errormessage")
-            or "",
-        ),
+
+        "error": error_message,
+        "error_message": error_message,
+
         "incident_code": _to_str(
             data.get("incident_code")
             or data.get("incidentcode")
@@ -288,7 +302,8 @@ def run(
         ),
         "incident_record_id": incident_record_id,
         "log_record_id": _to_str(data.get("log_record_id") or data.get("logrecordid") or ""),
-        "run_record_id": _to_str(run_record_id or data.get("run_record_id") or data.get("runrecordid") or ""),
+        "run_record_id": effective_run_record_id,
+        "incident_key": incident_key,
         "parent_command_id": _to_str(meta.get("parent_command_id") or ""),
     }
 
@@ -300,7 +315,7 @@ def run(
         "root_event_id": meta.get("root_event_id", ""),
         "incident_record_id": incident_record_id,
         "message": "incident_created",
-        "run_record_id": _to_str(run_record_id or data.get("run_record_id") or data.get("runrecordid") or ""),
+        "run_record_id": effective_run_record_id,
         "next_commands": [
             {
                 "capability": "internal_escalate",
