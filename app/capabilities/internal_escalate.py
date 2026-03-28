@@ -223,7 +223,7 @@ def capability_internal_escalate(
             "terminal": True,
         }
 
-    # ✅ SAFE PATCH INCIDENT UPDATE
+    # SAFE PATCH INCIDENT UPDATE
     try:
         if incidents_table_name:
             _best_effort_update_incident(
@@ -251,9 +251,11 @@ def capability_internal_escalate(
                 "input": {
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
+                    "incident_record_id": incident_record_id,
                     "step_index": int(payload.get("step_index") or 0) + 1,
                     "goal": "escalation_sent",
                     "workspace_id": workspace_id,
+                    "parent_command_id": _to_str(payload.get("parent_command_id")).strip(),
                 },
             }
         ],
