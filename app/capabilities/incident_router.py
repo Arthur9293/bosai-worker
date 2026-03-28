@@ -1,5 +1,3 @@
-# app/capabilities/incident_router.py
-
 from __future__ import annotations
 
 import time
@@ -110,6 +108,14 @@ def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
             else payload.get("retryCount"),
             0,
         ),
+        "retry_max": _to_int(
+            payload.get("retry_max")
+            if payload.get("retry_max") is not None
+            else payload.get("retrymax")
+            if payload.get("retrymax") is not None
+            else payload.get("retryMax"),
+            0,
+        ),
         "depth": _to_int(
             payload.get("depth")
             if payload.get("depth") is not None
@@ -205,11 +211,14 @@ def _normalize_incident(payload: Dict[str, Any]) -> Dict[str, Any]:
             or payload.get("capability")
             or error_obj.get("capability")
             or payload.get("source_capability")
+            or payload.get("original_capability")
             or ""
         ),
         "target_url": _to_str(
             payload.get("target_url")
             or payload.get("targeturl")
+            or payload.get("failed_url")
+            or payload.get("failedurl")
             or request_obj.get("url")
             or http_meta.get("url")
             or payload.get("url")
@@ -217,6 +226,8 @@ def _normalize_incident(payload: Dict[str, Any]) -> Dict[str, Any]:
         ),
         "method": _to_str(
             payload.get("method")
+            or payload.get("failed_method")
+            or payload.get("failedmethod")
             or request_obj.get("method")
             or http_meta.get("method")
             or "GET"
@@ -235,10 +246,12 @@ def _normalize_incident(payload: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
-def _classify_incident(incident: Dict[str, Any]) -> Dict[str, Any]:
+def _classify_incident(incident: Dict[str, Any], meta: Dict[str, Any]) -> Dict[str, Any]:
     http_status = _to_int(incident.get("http_status"), 0)
     incident_code = _to_str(incident.get("incident_code")).strip().lower()
     final_failure = _to_bool(incident.get("final_failure"), False)
+    retry_count = _to_int(meta.get("retry_count"), 0)
+    retry_max = _to_int(meta.get("retry_max"), 0)
 
     decision = "log_only"
     reason = "unclassified_incident"
@@ -246,22 +259,40 @@ def _classify_incident(incident: Dict[str, Any]) -> Dict[str, Any]:
     category = "unknown_incident"
 
     if 500 <= http_status <= 599:
-        decision = "escalate"
-        reason = "http_5xx_detected"
-        severity = "high"
-        category = "http_failure"
+        if final_failure or retry_count >= retry_max:
+            decision = "escalate"
+            reason = "http_5xx_exhausted"
+            severity = "high"
+            category = "http_failure"
+        else:
+            decision = "retry"
+            reason = "http_5xx_retryable"
+            severity = "medium"
+            category = "http_failure"
 
-    elif incident_code == "timeout" and final_failure:
-        decision = "escalate"
-        reason = "timeout_exhausted"
-        severity = "high"
-        category = "timeout"
+    elif incident_code == "timeout":
+        if final_failure or retry_count >= retry_max:
+            decision = "escalate"
+            reason = "timeout_exhausted"
+            severity = "high"
+            category = "timeout"
+        else:
+            decision = "retry"
+            reason = "timeout_retryable"
+            severity = "medium"
+            category = "timeout"
 
     elif http_status == 429:
-        decision = "escalate"
-        reason = "rate_limit_exhausted"
-        severity = "medium"
-        category = "http_failure"
+        if final_failure or retry_count >= retry_max:
+            decision = "escalate"
+            reason = "rate_limit_exhausted"
+            severity = "medium"
+            category = "rate_limit"
+        else:
+            decision = "retry"
+            reason = "rate_limit_retryable"
+            severity = "low"
+            category = "rate_limit"
 
     elif incident_code in {"auth_error", "permission_denied", "forbidden"}:
         decision = "escalate"
@@ -269,11 +300,57 @@ def _classify_incident(incident: Dict[str, Any]) -> Dict[str, Any]:
         severity = "high"
         category = "auth_failure"
 
+    elif 400 <= http_status <= 499:
+        decision = "log_only"
+        reason = "client_error_non_retryable"
+        severity = "low"
+        category = "client_error"
+
     return {
         "decision": decision,
         "reason": reason,
         "severity": severity,
         "category": category,
+    }
+
+
+def _build_escalate_command(
+    meta: Dict[str, Any],
+    incident: Dict[str, Any],
+    classification: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "capability": "internal_escalate",
+        "priority": 1,
+        "input": {
+            "flow_id": meta.get("flow_id", ""),
+            "root_event_id": meta.get("root_event_id", ""),
+            "parent_capability": "incident_router",
+            "parent_command_id": meta.get("parent_command_id", ""),
+            "step_index": _to_int(meta.get("step_index"), 0) + 1,
+            "_depth": _to_int(meta.get("depth"), 0) + 1,
+            "workspace_id": meta.get("workspace_id", ""),
+            "tenant_id": meta.get("tenant_id", ""),
+            "app_name": meta.get("app_name", ""),
+            "source": "incident_router",
+            "goal": "incident_escalation",
+            "decision": classification.get("decision", ""),
+            "reason": classification.get("reason", ""),
+            "severity": classification.get("severity", ""),
+            "category": classification.get("category", ""),
+            "error": incident.get("error_message", ""),
+            "incident_code": incident.get("incident_code", ""),
+            "final_failure": incident.get("final_failure", False),
+            "original_capability": incident.get("failed_capability", ""),
+            "failed_url": incident.get("target_url", ""),
+            "failed_method": incident.get("method", ""),
+            "retry_count": _to_int(meta.get("retry_count"), 0),
+            "retry_max": _to_int(meta.get("retry_max"), 0),
+            "http_status": incident.get("http_status", 0),
+            "incident_record_id": "",
+            "log_record_id": incident.get("log_record_id", ""),
+            "run_record_id": "",
+        },
     }
 
 
@@ -284,56 +361,17 @@ def _build_next_commands(
 ) -> List[Dict[str, Any]]:
     decision = _to_str(classification.get("decision"))
     depth = _to_int(meta.get("depth"), 0)
-    step_index = _to_int(meta.get("step_index"), 0)
-
-    if decision not in {"escalate", "critical_escalate"}:
-        return []
 
     if depth >= DEFAULT_MAX_DEPTH:
         return []
 
-    next_input = {
-        "flow_id": meta.get("flow_id", ""),
-        "root_event_id": meta.get("root_event_id", ""),
-        "parent_capability": "incident_router",
-        "parent_command_id": meta.get("parent_command_id", ""),
-        "step_index": step_index + 1,
-        "_depth": depth + 1,
-        "workspace_id": meta.get("workspace_id", ""),
-        "tenant_id": meta.get("tenant_id", ""),
-        "app_name": meta.get("app_name", ""),
-        "source": "incident_router",
-        "goal": "incident_escalation",
-        "reason": classification.get("reason", "unclassified_incident"),
-        "severity": classification.get("severity", "medium"),
-        "http_status": incident.get("http_status", 0),
-        "failed_goal": "incident_router",
-        "failed_url": incident.get("target_url", ""),
-        "sla_status": "",
-        "log_record_id": incident.get("log_record_id", ""),
-        "incident": {
-            "decision": classification.get("decision"),
-            "reason": classification.get("reason"),
-            "severity": classification.get("severity"),
-            "category": classification.get("category"),
-            "http_status": incident.get("http_status", 0),
-            "incident_code": incident.get("incident_code", ""),
-            "final_failure": incident.get("final_failure", False),
-            "failed_capability": incident.get("failed_capability", ""),
-            "target_url": incident.get("target_url", ""),
-            "method": incident.get("method", ""),
-            "error_message": incident.get("error_message", ""),
-            "raised_at": incident.get("ts", ""),
-        },
-    }
+    if decision == "escalate":
+        return [_build_escalate_command(meta, incident, classification)]
 
-    return [
-        {
-            "capability": "internal_escalate",
-            "priority": 1,
-            "input": next_input,
-        }
-    ]
+    if decision == "retry":
+        return []
+
+    return []
 
 
 def run(
@@ -349,50 +387,46 @@ def run(
     data = _extract_input(payload or {})
     meta = _extract_meta(data)
     incident = _normalize_incident(data)
-    classification = _classify_incident(incident)
-
-    print("[incident_router] incident =", incident)
-    print("[incident_router] classification =", classification)
+    classification = _classify_incident(incident, meta)
 
     next_commands = _build_next_commands(meta, incident, classification)
-
-    decision = _to_str(classification.get("decision"))
-    spawned = len(next_commands)
 
     result = {
         "ok": True,
         "capability": "incident_router",
         "status": "done",
-        "ts": _now_ts(),
+        "run_record_id": _to_str(data.get("run_record_id") or ""),
+        "workspace_id": meta.get("workspace_id", ""),
         "flow_id": meta.get("flow_id", ""),
         "root_event_id": meta.get("root_event_id", ""),
         "step_index": meta.get("step_index", 0),
-        "depth": meta.get("depth", 0),
-        "decision": decision,
+        "goal": _to_str(data.get("goal") or ""),
+        "decision": classification.get("decision", "log_only"),
         "reason": classification.get("reason", "unclassified_incident"),
         "severity": classification.get("severity", "medium"),
         "category": classification.get("category", "unknown_incident"),
-        "final_failure": incident.get("final_failure", False),
-        "http_status": incident.get("http_status", 0),
+        "error": incident.get("error_message", ""),
         "incident_code": incident.get("incident_code", ""),
-        "failed_capability": incident.get("failed_capability", ""),
-        "target_url": incident.get("target_url", ""),
-        "method": incident.get("method", ""),
-        "spawned_count": spawned,
+        "final_failure": incident.get("final_failure", False),
+        "original_capability": incident.get("failed_capability", ""),
+        "failed_url": incident.get("target_url", ""),
+        "failed_method": incident.get("method", ""),
+        "retry_count": meta.get("retry_count", 0),
+        "retry_max": meta.get("retry_max", 0),
+        "http_status": incident.get("http_status", 0),
+        "incident_record_id": "",
+        "log_record_id": incident.get("log_record_id", ""),
+        "incident_create_ok": False,
+        "spawned_count": len(next_commands),
         "next_commands": next_commands[:1],
-        "incident_summary": {
-            "error_message": incident.get("error_message", ""),
-            "reason": classification.get("reason", "unclassified_incident"),
-            "severity": classification.get("severity", "medium"),
-            "category": classification.get("category", "unknown_incident"),
-        },
         "guards": {
             "max_spawn": 1,
             "never_respawn_incident_router": True,
-            "never_retry_http_exec": True,
-            "deterministic_output": True,
-            "tolerant_to_missing_fields": True,
+            "never_retry_http_exec_directly": True,
+            "depth_limit": DEFAULT_MAX_DEPTH,
         },
+        "ts": _now_ts(),
     }
 
+    print("[incident_router] result =", result)
     return result
