@@ -15,6 +15,23 @@ def _to_str(v: Any) -> str:
         return ""
 
 
+def _to_bool(v: Any, default: bool = False) -> bool:
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return default
+    try:
+        text = str(v).strip().lower()
+    except Exception:
+        return default
+
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
 def run(
     req: Optional[Any] = None,
     run_record_id: str = "",
@@ -35,15 +52,27 @@ def run(
         or payload.get("incidentrecordid")
     ).strip()
 
+    severity = _to_str(payload.get("severity")).strip().lower()
+    final_failure = _to_bool(
+        payload.get("final_failure")
+        if payload.get("final_failure") is not None
+        else payload.get("finalfailure"),
+        False,
+    )
+
+    auto_resolve = False
     next_commands = []
 
-    if incident_record_id:
+    if incident_record_id and severity in {"low", "medium"} and not final_failure:
+        auto_resolve = True
         next_commands.append(
             {
                 "capability": "resolve_incident",
                 "priority": 1,
                 "input": {
                     "incident_record_id": incident_record_id,
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
                 },
             }
         )
@@ -57,6 +86,9 @@ def run(
         "message": "incident_flow_completed",
         "closed_at": _now_ts(),
         "run_record_id": run_record_id,
+        "auto_resolve": auto_resolve,
+        "severity": severity,
+        "final_failure": final_failure,
         "next_commands": next_commands,
         "terminal": len(next_commands) == 0,
         "spawn_summary": {
