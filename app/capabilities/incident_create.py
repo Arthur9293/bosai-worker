@@ -161,7 +161,9 @@ def run(
             or ""
         ),
         "Failed_URL": _to_str(data.get("failed_url") or data.get("target_url") or ""),
-        "Failed_Method": _to_str(data.get("failed_method") or data.get("method") or "").upper(),
+        "Failed_Method": _to_str(
+            data.get("failed_method") or data.get("method") or ""
+        ).upper(),
         "Error_Message": _to_str(data.get("error") or data.get("error_message") or ""),
         "Flow_ID": _to_str(meta.get("flow_id", "")),
         "Root_Event_ID": _to_str(meta.get("root_event_id", "")),
@@ -179,7 +181,14 @@ def run(
 
     try:
         create_res = airtable_create(incidents_table_name, clean_fields)
-        incident_record_id = _to_str(create_res.get("id") or create_res.get("record_id") or "")
+
+        if isinstance(create_res, dict):
+            incident_record_id = _to_str(
+                create_res.get("id") or create_res.get("record_id") or ""
+            )
+        else:
+            incident_record_id = _to_str(create_res)
+
         print("[incident_create] created incident_record_id =", incident_record_id)
     except Exception as e:
         return {
@@ -211,7 +220,9 @@ def run(
             or ""
         ),
         "failed_url": _to_str(data.get("failed_url") or data.get("target_url") or ""),
-        "failed_method": _to_str(data.get("failed_method") or data.get("method") or "").upper(),
+        "failed_method": _to_str(
+            data.get("failed_method") or data.get("method") or ""
+        ).upper(),
         "retry_count": _to_int(data.get("retry_count"), 0),
         "retry_max": _to_int(data.get("retry_max"), 0),
         "http_status": _to_int(data.get("http_status"), 0),
