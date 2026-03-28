@@ -6356,6 +6356,15 @@ def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> D
         "next_commands": next_commands,
         "terminal": len(next_commands) == 0,
     }
+
+def capability_incident_deduplicate_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    return capability_incident_deduplicate(
+        req,
+        run_record_id,
+        airtable_list_filtered=airtable_list_filtered,
+        airtable_update=airtable_update,
+        incidents_table_name=INCIDENTS_TABLE_NAME,
+    )
     
 def capability_complete_flow(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
@@ -6457,7 +6466,7 @@ CAPABILITIES = {
     "incident_router": capability_incident_router_wrapped,
     "incident_create": capability_incident_create_wrapped,
     "complete_flow_incident": capability_complete_flow_incident,
-    "incident_deduplicate": capability_incident_deduplicate,
+    "incident_deduplicate": capability_incident_deduplicate_wrapped,
 }
   
 # ============================================================
