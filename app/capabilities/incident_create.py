@@ -149,26 +149,46 @@ def run(
         }
 
     incident_fields = {
-        "Name": _to_str(data.get("incident_code") or "Incident"),
+        "Name": _to_str(data.get("incident_code") or data.get("incidentcode") or "Incident"),
         "Status_select": "Open",
         "Severity": _to_str(data.get("severity") or "medium"),
         "Category": _to_str(data.get("category") or "unknown_incident"),
         "Reason": _to_str(data.get("reason") or "incident_create"),
-        "HTTP_Status": _to_int(data.get("http_status"), 0),
+        "HTTP_Status": _to_int(
+            data.get("http_status")
+            or data.get("httpstatus"),
+            0,
+        ),
         "Original_Capability": _to_str(
             data.get("original_capability")
+            or data.get("originalcapability")
             or data.get("failed_capability")
+            or data.get("failedcapability")
             or ""
         ),
-        "Failed_URL": _to_str(data.get("failed_url") or data.get("target_url") or ""),
+        "Failed_URL": _to_str(
+            data.get("failed_url")
+            or data.get("failedurl")
+            or data.get("target_url")
+            or data.get("targeturl")
+            or "",
+        ),
         "Failed_Method": _to_str(
-            data.get("failed_method") or data.get("method") or ""
+            data.get("failed_method")
+            or data.get("failedmethod")
+            or data.get("method")
+            or "",
         ).upper(),
-        "Error_Message": _to_str(data.get("error") or data.get("error_message") or ""),
+        "Error_Message": _to_str(
+            data.get("error")
+            or data.get("error_message")
+            or data.get("errormessage")
+            or "",
+        ),
         "Flow_ID": _to_str(meta.get("flow_id", "")),
         "Root_Event_ID": _to_str(meta.get("root_event_id", "")),
         "Workspace_ID": _to_str(meta.get("workspace_id", "")),
-        "Run_Record_ID": _to_str(run_record_id or data.get("run_record_id") or ""),
+        "Run_Record_ID": _to_str(run_record_id or data.get("run_record_id") or data.get("runrecordid") or ""),
         "Payload_JSON": _safe_json(data),
         "Created_By_Capability": "incident_create",
         "Opened_At": _now_ts(),
@@ -185,9 +205,9 @@ def run(
         if isinstance(create_res, dict):
             incident_record_id = _to_str(
                 create_res.get("id") or create_res.get("record_id") or ""
-            )
+            ).strip()
         else:
-            incident_record_id = _to_str(create_res)
+            incident_record_id = _to_str(create_res).strip()
 
         print("[incident_create] created incident_record_id =", incident_record_id)
     except Exception as e:
@@ -211,24 +231,64 @@ def run(
         "reason": _to_str(data.get("reason") or "incident_created"),
         "severity": _to_str(data.get("severity") or "medium"),
         "category": _to_str(data.get("category") or "unknown_incident"),
-        "error": _to_str(data.get("error") or data.get("error_message") or ""),
-        "incident_code": _to_str(data.get("incident_code") or ""),
-        "final_failure": _to_bool(data.get("final_failure"), False),
+        "error": _to_str(
+            data.get("error")
+            or data.get("error_message")
+            or data.get("errormessage")
+            or "",
+        ),
+        "incident_code": _to_str(
+            data.get("incident_code")
+            or data.get("incidentcode")
+            or "",
+        ),
+        "final_failure": _to_bool(
+            data.get("final_failure")
+            if data.get("final_failure") is not None
+            else data.get("finalfailure"),
+            False,
+        ),
         "original_capability": _to_str(
             data.get("original_capability")
+            or data.get("originalcapability")
             or data.get("failed_capability")
+            or data.get("failedcapability")
             or ""
         ),
-        "failed_url": _to_str(data.get("failed_url") or data.get("target_url") or ""),
+        "failed_url": _to_str(
+            data.get("failed_url")
+            or data.get("failedurl")
+            or data.get("target_url")
+            or data.get("targeturl")
+            or "",
+        ),
         "failed_method": _to_str(
-            data.get("failed_method") or data.get("method") or ""
+            data.get("failed_method")
+            or data.get("failedmethod")
+            or data.get("method")
+            or "",
         ).upper(),
-        "retry_count": _to_int(data.get("retry_count"), 0),
-        "retry_max": _to_int(data.get("retry_max"), 0),
-        "http_status": _to_int(data.get("http_status"), 0),
+        "retry_count": _to_int(
+            data.get("retry_count")
+            if data.get("retry_count") is not None
+            else data.get("retrycount"),
+            0,
+        ),
+        "retry_max": _to_int(
+            data.get("retry_max")
+            if data.get("retry_max") is not None
+            else data.get("retrymax"),
+            0,
+        ),
+        "http_status": _to_int(
+            data.get("http_status")
+            if data.get("http_status") is not None
+            else data.get("httpstatus"),
+            0,
+        ),
         "incident_record_id": incident_record_id,
-        "log_record_id": _to_str(data.get("log_record_id") or ""),
-        "run_record_id": _to_str(run_record_id or data.get("run_record_id") or ""),
+        "log_record_id": _to_str(data.get("log_record_id") or data.get("logrecordid") or ""),
+        "run_record_id": _to_str(run_record_id or data.get("run_record_id") or data.get("runrecordid") or ""),
         "parent_command_id": _to_str(meta.get("parent_command_id") or ""),
     }
 
@@ -240,7 +300,7 @@ def run(
         "root_event_id": meta.get("root_event_id", ""),
         "incident_record_id": incident_record_id,
         "message": "incident_created",
-        "run_record_id": _to_str(run_record_id or data.get("run_record_id") or ""),
+        "run_record_id": _to_str(run_record_id or data.get("run_record_id") or data.get("runrecordid") or ""),
         "next_commands": [
             {
                 "capability": "internal_escalate",
