@@ -6412,6 +6412,7 @@ CAPABILITIES = {
     "retry_router": capability_retry_router,
     "decision_router": capability_decision_router,
     "incident_router": capability_incident_router_wrapped,
+    "incident_create": capability_incident_create,
 }
   
 # ============================================================
