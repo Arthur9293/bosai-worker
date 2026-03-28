@@ -116,7 +116,49 @@ def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
             or payload.get("workspaceId")
             or "production"
         ),
+        "tenant_id": _to_str(
+            payload.get("tenant_id")
+            or payload.get("tenantid")
+            or payload.get("tenantId")
+            or ""
+        ),
+        "app_name": _to_str(
+            payload.get("app_name")
+            or payload.get("appname")
+            or payload.get("appName")
+            or ""
+        ),
     }
+
+
+def _build_incident_name(data: Dict[str, Any]) -> str:
+    category = _to_str(data.get("category") or "").strip()
+    code = _to_str(data.get("incident_code") or data.get("incidentcode") or "").strip()
+    failed_url = _to_str(
+        data.get("failed_url")
+        or data.get("failedurl")
+        or data.get("target_url")
+        or data.get("targeturl")
+        or ""
+    ).strip()
+    http_status = _to_int(
+        data.get("http_status")
+        if data.get("http_status") is not None
+        else data.get("httpstatus"),
+        0,
+    )
+
+    if category and failed_url:
+        short_url = failed_url[:80]
+        return f"{category.upper()} | {short_url}"
+
+    if code and http_status:
+        return f"{code} | {http_status}"
+
+    if code:
+        return code
+
+    return "Incident"
 
 
 def run(
@@ -163,9 +205,24 @@ def run(
     )
 
     incident_key = _to_str(data.get("incident_key") or "")
+    deduplicate_action = _to_str(data.get("deduplicate_action") or "")
+    final_failure = _to_bool(
+        data.get("final_failure")
+        if data.get("final_failure") is not None
+        else data.get("finalfailure"),
+        False,
+    )
+
+    failed_capability = _to_str(
+        data.get("failed_capability")
+        or data.get("failedcapability")
+        or data.get("original_capability")
+        or data.get("originalcapability")
+        or ""
+    )
 
     incident_fields = {
-        "Name": _to_str(data.get("incident_code") or data.get("incidentcode") or "Incident"),
+        "Name": _build_incident_name(data),
         "Status_select": "Open",
         "Severity": _to_str(data.get("severity") or "medium"),
         "Category": _to_str(data.get("category") or "unknown_incident"),
@@ -178,10 +235,10 @@ def run(
         "Original_Capability": _to_str(
             data.get("original_capability")
             or data.get("originalcapability")
-            or data.get("failed_capability")
-            or data.get("failedcapability")
+            or failed_capability
             or ""
         ),
+        "Failed_Capability": failed_capability,
         "Failed_URL": _to_str(
             data.get("failed_url")
             or data.get("failedurl")
@@ -199,6 +256,8 @@ def run(
         "Flow_ID": _to_str(meta.get("flow_id", "")),
         "Root_Event_ID": _to_str(meta.get("root_event_id", "")),
         "Workspace_ID": _to_str(meta.get("workspace_id", "")),
+        "Tenant_ID": _to_str(meta.get("tenant_id", "")),
+        "App_Name": _to_str(meta.get("app_name", "")),
         "Run_Record_ID": effective_run_record_id,
         "Payload_JSON": _safe_json(data),
         "Created_By_Capability": "incident_create",
@@ -208,6 +267,9 @@ def run(
         "Incident_Key": incident_key,
         "Last_Seen_At": _now_ts(),
         "Occurrences_Count": 1,
+        "Deduplicate_Action": deduplicate_action,
+        "Final_Failure": final_failure,
+        "SLA_Status": "Open",
     }
 
     clean_fields = {
@@ -242,6 +304,8 @@ def run(
         "step_index": _to_int(meta.get("step_index"), 0) + 1,
         "_depth": depth + 1,
         "workspace_id": meta.get("workspace_id", ""),
+        "tenant_id": meta.get("tenant_id", ""),
+        "app_name": meta.get("app_name", ""),
         "goal": "incident_escalation",
         "decision": _to_str(data.get("decision") or ""),
         "reason": _to_str(data.get("reason") or "incident_created"),
@@ -256,19 +320,14 @@ def run(
             or data.get("incidentcode")
             or "",
         ),
-        "final_failure": _to_bool(
-            data.get("final_failure")
-            if data.get("final_failure") is not None
-            else data.get("finalfailure"),
-            False,
-        ),
+        "final_failure": final_failure,
         "original_capability": _to_str(
             data.get("original_capability")
             or data.get("originalcapability")
-            or data.get("failed_capability")
-            or data.get("failedcapability")
+            or failed_capability
             or ""
         ),
+        "failed_capability": failed_capability,
         "failed_url": _to_str(
             data.get("failed_url")
             or data.get("failedurl")
@@ -276,10 +335,23 @@ def run(
             or data.get("targeturl")
             or "",
         ),
+        "target_url": _to_str(
+            data.get("target_url")
+            or data.get("targeturl")
+            or data.get("failed_url")
+            or data.get("failedurl")
+            or "",
+        ),
         "failed_method": _to_str(
             data.get("failed_method")
             or data.get("failedmethod")
             or data.get("method")
+            or "",
+        ).upper(),
+        "method": _to_str(
+            data.get("method")
+            or data.get("failed_method")
+            or data.get("failedmethod")
             or "",
         ).upper(),
         "retry_count": _to_int(
@@ -304,6 +376,7 @@ def run(
         "log_record_id": _to_str(data.get("log_record_id") or data.get("logrecordid") or ""),
         "run_record_id": effective_run_record_id,
         "incident_key": incident_key,
+        "deduplicate_action": deduplicate_action,
         "parent_command_id": _to_str(meta.get("parent_command_id") or ""),
     }
 
