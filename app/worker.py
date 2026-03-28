@@ -34,6 +34,7 @@ from app.capabilities.retry_router import run as capability_retry_router_run
 from app.capabilities.incident_create import run as capability_incident_create
 from app.capabilities.complete_flow_incident import run as capability_complete_flow_incident
 from app.capabilities.incident_deduplicate import run as capability_incident_deduplicate
+from app.capabilities.incident_update import run as capability_incident_update
 
 
 # ============================================================
@@ -6043,6 +6044,15 @@ def capability_incident_deduplicate_wrapped(req: RunRequest, run_record_id: str)
         airtable_update=airtable_update,
         incidents_table_name=INCIDENTS_TABLE_NAME,
     )
+
+def capability_incident_update_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    return capability_incident_update(
+        req,
+        run_record_id,
+        airtable_update=airtable_update,
+        incidents_table_name=INCIDENTS_TABLE_NAME,
+    )
+    
     
 def capability_complete_flow(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
@@ -6145,6 +6155,7 @@ CAPABILITIES = {
     "incident_create": capability_incident_create_wrapped,
     "complete_flow_incident": capability_complete_flow_incident,
     "incident_deduplicate": capability_incident_deduplicate_wrapped,
+    "incident_update": capability_incident_update_wrapped,
 }
   
 # ============================================================
