@@ -5956,6 +5956,14 @@ def capability_decision_router_wrapped(req: RunRequest, run_record_id: str) -> D
     }
 
     return result
+
+def capability_incident_create_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    return capability_incident_create(
+        req,
+        run_record_id,
+        airtable_create=airtable_create,
+        incidents_table_name=INCIDENTS_TABLE_NAME,
+    )
     
 EVENT_CAPABILITY_ALLOWLIST = {
     "http_exec",
@@ -6425,7 +6433,7 @@ CAPABILITIES = {
     "retry_router": capability_retry_router,
     "decision_router": capability_decision_router,
     "incident_router": capability_incident_router_wrapped,
-    "incident_create": capability_incident_create,
+    "incident_create": capability_incident_create_wrapped,
 }
   
 # ============================================================
