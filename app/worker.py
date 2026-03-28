@@ -6014,7 +6014,7 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "flow_state_put",
     "flow_state_append_step",
     "decision_engine",
-    "incident_create"
+    "incident_create",
     "complete_flow_incident",
 }
 
