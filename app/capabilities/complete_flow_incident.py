@@ -30,6 +30,23 @@ def run(
 
     flow_id = _to_str(payload.get("flow_id"))
     root_event_id = _to_str(payload.get("root_event_id"))
+    incident_record_id = _to_str(
+        payload.get("incident_record_id")
+        or payload.get("incidentrecordid")
+    ).strip()
+
+    next_commands = []
+
+    if incident_record_id:
+        next_commands.append(
+            {
+                "capability": "resolve_incident",
+                "priority": 1,
+                "input": {
+                    "incident_record_id": incident_record_id,
+                },
+            }
+        )
 
     return {
         "ok": True,
@@ -40,10 +57,11 @@ def run(
         "message": "incident_flow_completed",
         "closed_at": _now_ts(),
         "run_record_id": run_record_id,
-        "terminal": True,
+        "next_commands": next_commands,
+        "terminal": len(next_commands) == 0,
         "spawn_summary": {
             "ok": True,
-            "spawned": 0,
+            "spawned": len(next_commands),
             "skipped": 0,
             "errors": [],
         },
