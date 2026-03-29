@@ -7523,7 +7523,7 @@ def get_command_by_id(command_id: str) -> Dict[str, Any]:
 
         flow_meta = _extract_flow_metadata_from_command_fields(f)
 
-        return {
+        command = {
             "id": r.get("id"),
             "capability": f.get("Capability"),
             "status": _read_command_status(f),
@@ -7535,12 +7535,12 @@ def get_command_by_id(command_id: str) -> Dict[str, Any]:
             "is_locked": f.get("Is_Locked"),
             "locked_by": f.get("Locked_By"),
             "idempotency_key": f.get("Idempotency_Key"),
-            "flow_id": flow_meta["flow_id"],
-            "root_event_id": flow_meta["root_event_id"],
-            "parent_command_id": flow_meta["parent_command_id"],
-            "step_index": flow_meta["step_index"],
-            "input_json": flow_meta["input_json"],
-            "result_json": flow_meta["result_json"],
+            "flow_id": flow_meta.get("flow_id"),
+            "root_event_id": flow_meta.get("root_event_id"),
+            "parent_command_id": flow_meta.get("parent_command_id"),
+            "step_index": flow_meta.get("step_index"),
+            "input_json": flow_meta.get("input_json"),
+            "result_json": flow_meta.get("result_json"),
             "worker": f.get("Locked_By") or f.get("Worker"),
             "workspace_id": f.get("Workspace_ID") or f.get("workspace_id"),
             "started_at": f.get("Started_At"),
@@ -7548,11 +7548,25 @@ def get_command_by_id(command_id: str) -> Dict[str, Any]:
             "created_at": f.get("Created_At") or f.get("created_at"),
         }
 
+        return {
+            "ok": True,
+            "command": command,
+            "ts": utc_now_iso(),
+        }
+
+    except HTTPException:
+        raise
     except requests.HTTPError as exc:
         detail = exc.response.text if getattr(exc, "response", None) is not None else str(exc)
-        raise HTTPException(status_code=502, detail=f"Airtable command request failed: {detail}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Airtable command request failed: {detail}",
+        )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail={"detail": "Internal error", "error": repr(exc)})
+        raise HTTPException(
+            status_code=500,
+            detail={"detail": "Internal error", "error": repr(exc)},
+        )
         
 @app.post("/internal/escalate")
 async def internal_escalate(request: Request) -> Dict[str, Any]:
