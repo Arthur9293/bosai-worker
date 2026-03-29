@@ -76,35 +76,83 @@ def _best_effort_update_logs_error(
         "attempts": results,
     }
 
+
 def _best_effort_update_incident(
     airtable_update,
     incidents_table_name: str,
     incident_record_id: str,
     run_record_id: str,
+    *,
+    flow_id: str = "",
+    root_event_id: str = "",
+    parent_command_id: str = "",
+    workspace_id: str = "",
 ) -> Dict[str, Any]:
-
     if not incident_record_id:
         return {"ok": False, "reason": "missing_incident_record_id"}
 
-    attempts = [
-        {"Status_select": "Escalated"},
-        {"Last_Action": "internal_escalate"},
-        {"Last_Seen_At": utc_now_iso()},
-        {"Run_Record_ID": run_record_id},
+    now_ts = utc_now_iso()
+
+    attempts: List[Dict[str, Any]] = [
+        {
+            "Status_select": "Escalated",
+            "Last_Action": "internal_escalate",
+            "Last_Seen_At": now_ts,
+            "Updated_At": now_ts,
+            "Run_Record_ID": run_record_id,
+            "Linked_Run": [run_record_id] if run_record_id else [],
+            "Command_ID": parent_command_id,
+            "Linked_Command": [parent_command_id] if parent_command_id else [],
+            "Flow_ID": flow_id,
+            "Root_Event_ID": root_event_id,
+            "Workspace_ID": workspace_id,
+        },
+        {
+            "Status_select": "Escalated",
+            "Last_Action": "internal_escalate",
+            "Last_Seen_At": now_ts,
+            "Updated_At": now_ts,
+            "Run_Record_ID": run_record_id,
+            "Command_ID": parent_command_id,
+            "Flow_ID": flow_id,
+            "Root_Event_ID": root_event_id,
+            "Workspace_ID": workspace_id,
+        },
+        {
+            "Status_select": "Escalated",
+            "Last_Action": "internal_escalate",
+            "Last_Seen_At": now_ts,
+            "Updated_At": now_ts,
+            "Run_Record_ID": run_record_id,
+        },
+        {
+            "Status_select": "Escalated",
+            "Last_Action": "internal_escalate",
+            "Last_Seen_At": now_ts,
+        },
+        {
+            "Status_select": "Escalated",
+        },
     ]
 
-    results = []
+    results: List[Dict[str, Any]] = []
 
     for fields in attempts:
+        clean_fields = {
+            k: v for k, v in fields.items()
+            if v not in ("", None)
+        }
+
         try:
-            airtable_update(incidents_table_name, incident_record_id, fields)
-            print("[INCIDENT_ESCALATE] success with", fields)
-            return {"ok": True, "fields": fields}
+            airtable_update(incidents_table_name, incident_record_id, clean_fields)
+            print("[INCIDENT_ESCALATE] success with", clean_fields)
+            return {"ok": True, "fields": clean_fields, "attempts": results}
         except Exception as e:
-            results.append({"fields": fields, "error": repr(e)})
+            results.append({"fields": clean_fields, "error": repr(e)})
             continue
 
     return {"ok": False, "attempts": results}
+
 
 def capability_internal_escalate(
     req,
@@ -197,6 +245,7 @@ def capability_internal_escalate(
         "flow_id": flow_id,
         "root_event_id": root_event_id,
         "workspace_id": workspace_id,
+        "parent_command_id": parent_command_id,
         "ts": utc_now_iso(),
     }
 
@@ -229,6 +278,10 @@ def capability_internal_escalate(
                 incidents_table_name=incidents_table_name,
                 incident_record_id=incident_record_id,
                 run_record_id=run_record_id,
+                flow_id=flow_id,
+                root_event_id=root_event_id,
+                parent_command_id=parent_command_id,
+                workspace_id=workspace_id,
             )
         else:
             incident_update_res = {
