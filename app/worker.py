@@ -7491,7 +7491,69 @@ def get_command_detail(record_id: str) -> Dict[str, Any]:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"command_detail_failed: {repr(e)}")
-    
+
+@app.get("/commands/{command_id}")
+def get_command_by_id(command_id: str) -> Dict[str, Any]:
+    try:
+        if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+            raise HTTPException(status_code=500, detail="missing_airtable_env")
+
+        response = requests.get(
+            _airtable_url(COMMANDS_TABLE_NAME),
+            headers={
+                "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+                "Accept": "application/json",
+            },
+            params={
+                "filterByFormula": f"RECORD_ID()='{command_id}'",
+                "maxRecords": 1,
+            },
+            timeout=20,
+        )
+
+        response.raise_for_status()
+        payload = response.json()
+        records = payload.get("records", [])
+
+        if not records:
+            raise HTTPException(status_code=404, detail="command_not_found")
+
+        r = records[0]
+        f = r.get("fields", {}) or {}
+
+        flow_meta = _extract_flow_metadata_from_command_fields(f)
+
+        return {
+            "id": r.get("id"),
+            "capability": f.get("Capability"),
+            "status": _read_command_status(f),
+            "priority": f.get("Priority"),
+            "retry_count": f.get("Retry_Count"),
+            "retry_max": f.get("Retry_Max"),
+            "scheduled_at": f.get("Scheduled_At"),
+            "next_retry_at": f.get("Next_Retry_At"),
+            "is_locked": f.get("Is_Locked"),
+            "locked_by": f.get("Locked_By"),
+            "idempotency_key": f.get("Idempotency_Key"),
+            "flow_id": flow_meta["flow_id"],
+            "root_event_id": flow_meta["root_event_id"],
+            "parent_command_id": flow_meta["parent_command_id"],
+            "step_index": flow_meta["step_index"],
+            "input_json": flow_meta["input_json"],
+            "result_json": flow_meta["result_json"],
+            "worker": f.get("Locked_By") or f.get("Worker"),
+            "workspace_id": f.get("Workspace_ID") or f.get("workspace_id"),
+            "started_at": f.get("Started_At"),
+            "finished_at": f.get("Finished_At"),
+            "created_at": f.get("Created_At") or f.get("created_at"),
+        }
+
+    except requests.HTTPError as exc:
+        detail = exc.response.text if getattr(exc, "response", None) is not None else str(exc)
+        raise HTTPException(status_code=502, detail=f"Airtable command request failed: {detail}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={"detail": "Internal error", "error": repr(exc)})
+        
 @app.post("/internal/escalate")
 async def internal_escalate(request: Request) -> Dict[str, Any]:
     try:
