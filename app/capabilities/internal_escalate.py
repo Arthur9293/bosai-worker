@@ -76,69 +76,35 @@ def _best_effort_update_logs_error(
         "attempts": results,
     }
 
-
 def _best_effort_update_incident(
     airtable_update,
     incidents_table_name: str,
     incident_record_id: str,
     run_record_id: str,
 ) -> Dict[str, Any]:
-    """
-    SAFE PATCH:
-    - ne casse jamais
-    - tente plusieurs variantes de champs
-    - best effort uniquement
-    """
+
     if not incident_record_id:
         return {"ok": False, "reason": "missing_incident_record_id"}
 
-    attempts: List[Dict[str, Any]] = [
-        {
-            "Status_select": "Escalated",
-            "Last_Action": "internal_escalate",
-            "Last_Seen_At": utc_now_iso(),
-            "Run_Record_ID": run_record_id,
-        },
-        {
-            "Status_select": "Escalated",
-        },
-        {
-            "Status": "Escalated",
-        },
-        {
-            "status": "Escalated",
-        },
-        {
-            "Last_Action": "internal_escalate",
-        },
-        {
-            "Last_Seen_At": utc_now_iso(),
-        },
-        {
-            "Run_Record_ID": run_record_id,
-        },
-        {},  # no-op fallback
+    attempts = [
+        {"Status_select": "Escalated"},
+        {"Last_Action": "internal_escalate"},
+        {"Last_Seen_At": utc_now_iso()},
+        {"Run_Record_ID": run_record_id},
     ]
 
-    results: List[Dict[str, Any]] = []
+    results = []
 
     for fields in attempts:
         try:
             airtable_update(incidents_table_name, incident_record_id, fields)
-            print("[INCIDENT_ESCALATE] success with", _safe_json(fields))
-            return {
-                "ok": True,
-                "fields": fields,
-                "attempts": results,
-            }
+            print("[INCIDENT_ESCALATE] success with", fields)
+            return {"ok": True, "fields": fields}
         except Exception as e:
-            err = repr(e)
-            print("[INCIDENT_ESCALATE] failed attempt =", err)
-            results.append({"ok": False, "fields": fields, "error": err})
+            results.append({"fields": fields, "error": repr(e)})
             continue
 
-    return {"ok": False, "reason": "no_matching_fields", "attempts": results}
-
+    return {"ok": False, "attempts": results}
 
 def capability_internal_escalate(
     req,
