@@ -61,10 +61,12 @@ def run(
     )
 
     auto_resolve = False
+    decision = "keep_escalated"
     next_commands = []
 
     if incident_record_id and severity in {"low", "medium"} and not final_failure:
         auto_resolve = True
+        decision = "auto_resolve"
         next_commands.append(
             {
                 "capability": "resolve_incident",
@@ -82,10 +84,12 @@ def run(
         "capability": "complete_flow_incident",
         "flow_id": flow_id,
         "root_event_id": root_event_id,
+        "incident_record_id": incident_record_id,
         "completed": True,
         "message": "incident_flow_completed",
         "closed_at": _now_ts(),
         "run_record_id": run_record_id,
+        "decision": decision,
         "auto_resolve": auto_resolve,
         "severity": severity,
         "final_failure": final_failure,
