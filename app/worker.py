@@ -62,7 +62,8 @@ COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 EVENTS_VIEW_NAME = os.getenv("EVENTS_VIEW_NAME", "Queue").strip()
 EVENTS_DASHBOARD_VIEW_NAME = os.getenv("EVENTS_DASHBOARD_VIEW_NAME", EVENTS_VIEW_NAME or "Grid view").strip()
 
-INCIDENTS_TABLE_NAME = os.getenv("INCIDENTS_TABLE_NAME", "Incidents")
+INCIDENTS_TABLE_NAME = os.getenv("INCIDENTS_TABLE_NAME", "Incidents").strip()
+INCIDENTS_VIEW_NAME = os.getenv("INCIDENTS_VIEW_NAME", "Active").strip()
 
 SYSTEM_RUNS_VIEW_NAME = os.getenv("SYSTEM_RUNS_VIEW_NAME", "Grid view").strip()
 COMMANDS_DASHBOARD_VIEW_NAME = os.getenv("COMMANDS_DASHBOARD_VIEW_NAME", COMMANDS_VIEW_NAME or "Queue").strip()
@@ -7242,17 +7243,23 @@ def get_incidents():
                 "ts": datetime.now(timezone.utc).isoformat(),
             }
 
-        print("[AIRTABLE GET] table =", LOGS_ERRORS_TABLE_NAME)
-        print("[AIRTABLE GET] view =", LOGS_ERRORS_VIEW_NAME or "Active")
-        print("[AIRTABLE GET] url =", _airtable_url(LOGS_ERRORS_TABLE_NAME))
+        effective_table = INCIDENTS_TABLE_NAME
+        effective_view = INCIDENTS_VIEW_NAME or "Active"
+
+        print("[AIRTABLE GET] table =", effective_table)
+        print("[AIRTABLE GET] view =", effective_view)
+        print("[AIRTABLE GET] url =", _airtable_url(effective_table))
 
         response = requests.get(
-            _airtable_url(LOGS_ERRORS_TABLE_NAME),
+            _airtable_url(effective_table),
             headers={
                 "Authorization": f"Bearer {AIRTABLE_API_KEY}",
                 "Accept": "application/json",
             },
-            params={"maxRecords": 50},
+            params={
+                "maxRecords": 100,
+                "view": effective_view,
+            },
             timeout=20,
         )
         response.raise_for_status()
@@ -7411,7 +7418,7 @@ def get_incidents():
                     "updated_at": updated_at,
                     "opened_at": opened_at,
                     "resolved_at": resolved_at,
-                    "source": "Logs_Erreurs",
+                    "source": "Incidents",
                     "worker": f.get("Worker"),
                 }
             )
@@ -7419,7 +7426,7 @@ def get_incidents():
             normalized_status = status.lower()
             normalized_severity = severity.lower()
 
-            if normalized_status in ("open", "opened", "new", "en cours"):
+            if normalized_status in ("open", "opened", "new", "active", "en cours"):
                 stats["open"] += 1
             elif normalized_status in ("resolved", "closed", "done", "résolu"):
                 stats["resolved"] += 1
@@ -7436,8 +7443,8 @@ def get_incidents():
             "ok": True,
             "source": {
                 "ok": True,
-                "table": LOGS_ERRORS_TABLE_NAME,
-                "view": LOGS_ERRORS_VIEW_NAME or "Active",
+                "table": effective_table,
+                "view": effective_view,
             },
             "count": len(incidents),
             "stats": stats,
