@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List
@@ -21,6 +23,22 @@ def _to_str(value: Any, default: str = "") -> str:
         return str(value)
     except Exception:
         return default
+
+
+def _to_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
 
 
 def _try_update_one(
@@ -140,16 +158,20 @@ def _best_effort_update_incident(
     for fields in attempts:
         clean_fields = {
             k: v for k, v in fields.items()
-            if v not in ("", None)
+            if v not in ("", None, [])
         }
 
-        try:
-            airtable_update(incidents_table_name, incident_record_id, clean_fields)
+        res = _try_update_one(
+            airtable_update=airtable_update,
+            table_name=incidents_table_name,
+            record_id=incident_record_id,
+            fields=clean_fields,
+        )
+        results.append(res)
+
+        if res.get("ok"):
             print("[INCIDENT_ESCALATE] success with", clean_fields)
             return {"ok": True, "fields": clean_fields, "attempts": results}
-        except Exception as e:
-            results.append({"fields": clean_fields, "error": repr(e)})
-            continue
 
     return {"ok": False, "attempts": results}
 
@@ -200,7 +222,7 @@ def capability_internal_escalate(
         or payload.get("target_url")
     )
     sla_status = _to_str(payload.get("sla_status"))
-    final_failure = payload.get("final_failure")
+    final_failure = _to_bool(payload.get("final_failure"), False)
     parent_command_id = _to_str(payload.get("parent_command_id")).strip()
 
     workspace_id = _to_str(
@@ -304,6 +326,7 @@ def capability_internal_escalate(
         "run_record_id": run_record_id,
         "logs_update_ok": bool(logs_update_res.get("ok")),
         "incident_update_ok": bool(incident_update_res.get("ok")),
+        "incident_update_res": incident_update_res,
         "next_commands": [
             {
                 "capability": "complete_flow_incident",
