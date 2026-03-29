@@ -46,10 +46,6 @@ def _to_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
-def _safe_dict(value: Any) -> Dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
 def _safe_json(value: Any) -> str:
     try:
         return json.dumps(value, ensure_ascii=False)
@@ -283,7 +279,10 @@ def run(
         "SLA_Status": "Open",
     }
 
-    clean_fields = {k: v for k, v in incident_fields.items() if v not in ("", None)}
+    clean_fields = {
+        k: v for k, v in incident_fields.items()
+        if v not in ("", None)
+    }
 
     try:
         create_res = airtable_create(incidents_table_name, clean_fields)
