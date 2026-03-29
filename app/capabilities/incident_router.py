@@ -143,6 +143,11 @@ def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
             or ""
         ),
         "source": _to_str(payload.get("source") or "incident_router"),
+        "severity": _to_str(
+            payload.get("severity")
+            or payload.get("Severity")
+            or ""
+        ),
     }
 
 
@@ -199,6 +204,12 @@ def _normalize_incident(payload: Dict[str, Any]) -> Dict[str, Any]:
         "http_status": _to_int(http_status, 0) if http_status not in (None, "") else 0,
         "incident_code": incident_code_normalized,
         "final_failure": _to_bool(final_failure, False),
+        "severity": _to_str(
+            payload.get("severity")
+            or incident_meta.get("severity")
+            or diagnostics.get("severity")
+            or ""
+        ).strip().lower(),
         "error_message": _to_str(
             payload.get("incident_message")
             or payload.get("error_message")
@@ -353,6 +364,10 @@ def _build_escalate_command(
 ) -> Dict[str, Any]:
     incident_key = _build_incident_key(meta, incident, classification)
 
+    severity_for_escalation = _to_str(classification.get("severity")).strip().lower()
+    if severity_for_escalation not in {"high", "critical"}:
+        severity_for_escalation = "high"
+
     return {
         "capability": "incident_deduplicate",
         "priority": 1,
@@ -369,9 +384,9 @@ def _build_escalate_command(
             "app_name": meta.get("app_name", ""),
             "source": "incident_router",
             "goal": "incident_deduplicate",
-            "decision": classification.get("decision", ""),
+            "decision": "escalate",
             "reason": classification.get("reason", ""),
-            "severity": classification.get("severity", ""),
+            "severity": severity_for_escalation,
             "category": classification.get("category", ""),
             "error": incident.get("error_message", ""),
             "error_message": incident.get("error_message", ""),
@@ -429,14 +444,23 @@ def _build_next_commands(
     decision = _to_str(classification.get("decision"))
     depth = _to_int(meta.get("depth"), 0)
     incident_record_id = _to_str(incident.get("incident_record_id")).strip()
-    severity = _to_str(classification.get("severity")).strip().lower()
+
+    explicit_severity = _to_str(
+        meta.get("severity")
+        or incident.get("severity")
+        or classification.get("severity")
+    ).strip().lower()
+
     final_failure = _to_bool(incident.get("final_failure"), False)
 
     if depth >= DEFAULT_MAX_DEPTH:
         return []
 
-    if incident_record_id and severity in {"low", "medium"} and not final_failure:
+    if incident_record_id and explicit_severity in {"low", "medium"} and not final_failure:
         return [_build_auto_resolve_command(meta, incident, classification)]
+
+    if final_failure or explicit_severity in {"high", "critical"}:
+        return [_build_escalate_command(meta, incident, classification)]
 
     if decision == "escalate":
         return [_build_escalate_command(meta, incident, classification)]
@@ -464,6 +488,8 @@ def run(
 
     next_commands = _build_next_commands(meta, incident, classification)
 
+    first_capability = _to_str(next_commands[0].get("capability")) if next_commands else ""
+
     result = {
         "ok": True,
         "capability": "incident_router",
@@ -474,9 +500,20 @@ def run(
         "root_event_id": meta.get("root_event_id", ""),
         "step_index": meta.get("step_index", 0),
         "goal": _to_str(data.get("goal") or ""),
-        "decision": "auto_resolve" if next_commands and _to_str(next_commands[0].get("capability")) == "resolve_incident" else classification.get("decision", "log_only"),
+        "decision": (
+            "auto_resolve"
+            if first_capability == "resolve_incident"
+            else "escalate"
+            if first_capability == "incident_deduplicate"
+            else classification.get("decision", "log_only")
+        ),
         "reason": classification.get("reason", "unclassified_incident"),
-        "severity": classification.get("severity", "medium"),
+        "severity": _to_str(
+            meta.get("severity")
+            or incident.get("severity")
+            or classification.get("severity")
+            or "medium"
+        ).strip().lower(),
         "category": classification.get("category", "unknown_incident"),
         "error": incident.get("error_message", ""),
         "incident_code": incident.get("incident_code", ""),
