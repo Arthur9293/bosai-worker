@@ -86,13 +86,13 @@ def _best_effort_update_incident(
     """
     SAFE PATCH:
     - ne casse jamais
-    - met Status_select = Escalated
+    - tente plusieurs variantes de champs
     - best effort uniquement
     """
     if not incident_record_id:
         return {"ok": False, "reason": "missing_incident_record_id"}
 
-    candidates = [
+    attempts: List[Dict[str, Any]] = [
         {
             "Status_select": "Escalated",
             "Last_Action": "internal_escalate",
@@ -103,22 +103,41 @@ def _best_effort_update_incident(
             "Status_select": "Escalated",
         },
         {
+            "Status": "Escalated",
+        },
+        {
+            "status": "Escalated",
+        },
+        {
+            "Last_Action": "internal_escalate",
+        },
+        {
             "Last_Seen_At": utc_now_iso(),
         },
+        {
+            "Run_Record_ID": run_record_id,
+        },
+        {},  # no-op fallback
     ]
 
-    last_error = ""
-    for fields in candidates:
+    results: List[Dict[str, Any]] = []
+
+    for fields in attempts:
         try:
             airtable_update(incidents_table_name, incident_record_id, fields)
-            print("[INCIDENT_ESCALATE] success")
-            return {"ok": True, "fields": fields}
+            print("[INCIDENT_ESCALATE] success with", _safe_json(fields))
+            return {
+                "ok": True,
+                "fields": fields,
+                "attempts": results,
+            }
         except Exception as e:
-            last_error = repr(e)
-            print("[INCIDENT_ESCALATE] failed attempt =", last_error)
+            err = repr(e)
+            print("[INCIDENT_ESCALATE] failed attempt =", err)
+            results.append({"ok": False, "fields": fields, "error": err})
             continue
 
-    return {"ok": False, "error": last_error}
+    return {"ok": False, "reason": "no_matching_fields", "attempts": results}
 
 
 def capability_internal_escalate(
@@ -227,7 +246,10 @@ def capability_internal_escalate(
         )
 
         if not logs_update_res.get("ok"):
-            print("[INTERNAL_ESCALATE] logs_errors update skipped =", _safe_json(logs_update_res))
+            print(
+                "[INTERNAL_ESCALATE] logs_errors update skipped =",
+                _safe_json(logs_update_res),
+            )
 
     except Exception as e:
         logs_update_res = {"ok": False, "error": repr(e)}
@@ -243,7 +265,10 @@ def capability_internal_escalate(
                 run_record_id=run_record_id,
             )
         else:
-            incident_update_res = {"ok": False, "reason": "missing_incidents_table_name"}
+            incident_update_res = {
+                "ok": False,
+                "reason": "missing_incidents_table_name",
+            }
     except Exception as e:
         incident_update_res = {"ok": False, "error": repr(e)}
         print("[INTERNAL_ESCALATE] incident update exception =", repr(e))
