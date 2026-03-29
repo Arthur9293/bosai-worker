@@ -7230,17 +7230,27 @@ def get_incidents():
                 "ok": True,
                 "source": {"ok": False, "reason": "missing_airtable_env"},
                 "count": 0,
-                "stats": {"open": 0, "critical": 0, "warning": 0, "resolved": 0, "other": 0},
+                "stats": {
+                    "open": 0,
+                    "critical": 0,
+                    "warning": 0,
+                    "resolved": 0,
+                    "other": 0,
+                },
                 "incidents": [],
                 "ts": datetime.now(timezone.utc).isoformat(),
             }
-            print("[AIRTABLE GET] table =", LOGS_ERREURS_TABLE_NAME)
-            print("[AIRTABLE GET] view =", LOGS_ERREURS_VIEW_NAME or "Active")
-            print("[AIRTABLE GET] url =", _airtable_url(LOGS_ERREURS_TABLE_NAME))
+
+        print("[AIRTABLE GET] table =", LOGS_ERRORS_TABLE_NAME)
+        print("[AIRTABLE GET] view =", LOGS_ERRORS_VIEW_NAME or "Active")
+        print("[AIRTABLE GET] url =", _airtable_url(LOGS_ERRORS_TABLE_NAME))
 
         response = requests.get(
             _airtable_url(LOGS_ERRORS_TABLE_NAME),
-            headers={"Authorization": f"Bearer {AIRTABLE_API_KEY}", "Accept": "application/json"},
+            headers={
+                "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+                "Accept": "application/json",
+            },
             params={"maxRecords": 50},
             timeout=20,
         )
@@ -7249,21 +7259,99 @@ def get_incidents():
         payload = response.json()
         records = payload.get("records", [])
         incidents = []
-        stats = {"open": 0, "critical": 0, "warning": 0, "resolved": 0, "other": 0}
+        stats = {
+            "open": 0,
+            "critical": 0,
+            "warning": 0,
+            "resolved": 0,
+            "other": 0,
+        }
 
         for r in records:
             f = r.get("fields", {}) or {}
-            status = str(f.get("Statut incident") or "").strip()
-            severity = str(f.get("Urgence IA") or "").strip()
+
+            status = str(
+                f.get("Statut incident")
+                or f.get("Status_select")
+                or f.get("Status")
+                or ""
+            ).strip()
+
+            severity = str(
+                f.get("Urgence IA")
+                or f.get("Severity")
+                or ""
+            ).strip()
+
+            sla_status = (
+                f.get("SLA_Status")
+                or f.get("SLA status")
+                or f.get("SLA")
+            )
+
+            title = (
+                f.get("Error_Message")
+                or f.get("Name")
+                or f.get("Title")
+                or f.get("Incident_Title")
+                or f.get("Résumé")
+                or "Untitled incident"
+            )
+
+            workspace_id = (
+                f.get("Workspace_ID")
+                or f.get("workspace_id")
+                or f.get("Workspace")
+                or f.get("workspace")
+            )
+
+            linked_run = (
+                f.get("Linked_Run")
+                or f.get("Run_Record_ID")
+                or f.get("run_id")
+                or f.get("Linked run")
+            )
+
+            linked_command = (
+                f.get("Linked_Command")
+                or f.get("Command_ID")
+                or f.get("command_id")
+                or f.get("Linked command")
+            )
+
+            created_at = (
+                f.get("Created time")
+                or f.get("Created_Time")
+                or f.get("created_at")
+                or f.get("Created_At")
+            )
+
+            updated_at = (
+                f.get("Last modified time")
+                or f.get("Updated_At")
+                or f.get("updated_at")
+                or f.get("Last_Seen_At")
+            )
+
+            sla_remaining_minutes = (
+                f.get("SLA_Remaining_Minutes")
+                or f.get("SLA remaining minutes")
+                or f.get("Temps restant SLA")
+            )
 
             incidents.append(
                 {
                     "id": r.get("id"),
-                    "title": f.get("Error_Message") or "Untitled incident",
+                    "title": title,
                     "status": status,
                     "severity": severity,
-                    "sla_status": f.get("SLA_Status"),
-                    "created_at": f.get("Created time"),
+                    "sla_status": sla_status,
+                    "sla_remaining_minutes": sla_remaining_minutes,
+                    "workspace_id": workspace_id,
+                    "linked_run": linked_run,
+                    "linked_command": linked_command,
+                    "created_at": created_at,
+                    "updated_at": updated_at,
                     "source": "Logs_Erreurs",
                     "worker": f.get("Worker"),
                 }
@@ -7278,14 +7366,18 @@ def get_incidents():
                 stats["resolved"] += 1
             elif normalized_severity in ("critical", "critique", "high"):
                 stats["critical"] += 1
-            elif normalized_severity in ("warning", "warn", "medium", "surveillance"):
+            elif normalized_severity in ("warning", "warn", "medium", "surveillance", "moyen"):
                 stats["warning"] += 1
             else:
                 stats["other"] += 1
 
         return {
             "ok": True,
-            "source": {"ok": True, "table": LOGS_ERRORS_TABLE_NAME, "view": LOGS_ERRORS_VIEW_NAME or "Active"},
+            "source": {
+                "ok": True,
+                "table": LOGS_ERRORS_TABLE_NAME,
+                "view": LOGS_ERRORS_VIEW_NAME or "Active",
+            },
             "count": len(incidents),
             "stats": stats,
             "incidents": incidents,
@@ -7297,8 +7389,7 @@ def get_incidents():
         raise HTTPException(status_code=502, detail=f"Airtable incidents request failed: {detail}")
     except Exception as exc:
         raise HTTPException(status_code=500, detail={"detail": "Internal error", "error": repr(exc)})
-
-
+        
 @app.get("/commands/{record_id}")
 def get_command_detail(record_id: str) -> Dict[str, Any]:
     try:
