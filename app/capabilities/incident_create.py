@@ -191,14 +191,14 @@ def run(
         or data.get("run_record_id")
         or data.get("runrecordid")
         or ""
-    )
+    ).strip()
 
     parent_command_id = _to_str(
         meta.get("parent_command_id")
         or data.get("parent_command_id")
         or data.get("parentcommandid")
         or ""
-    )
+    ).strip()
 
     error_message = _to_str(
         data.get("error")
@@ -315,9 +315,17 @@ def run(
             "terminal": True,
         }
 
+    effective_flow_id = _to_str(meta.get("flow_id", "")).strip()
+    if not effective_flow_id and incident_record_id:
+        effective_flow_id = f"flow_{incident_record_id}"
+
+    effective_root_event_id = _to_str(meta.get("root_event_id", "")).strip()
+    if not effective_root_event_id:
+        effective_root_event_id = effective_flow_id
+
     next_input = {
-        "flow_id": meta.get("flow_id", ""),
-        "root_event_id": meta.get("root_event_id", ""),
+        "flow_id": effective_flow_id,
+        "root_event_id": effective_root_event_id,
         "step_index": _to_int(meta.get("step_index"), 0) + 1,
         "_depth": depth + 1,
         "workspace_id": meta.get("workspace_id", ""),
@@ -404,8 +412,8 @@ def run(
         "ok": True,
         "capability": "incident_create",
         "status": "done",
-        "flow_id": meta.get("flow_id", ""),
-        "root_event_id": meta.get("root_event_id", ""),
+        "flow_id": effective_flow_id,
+        "root_event_id": effective_root_event_id,
         "incident_record_id": incident_record_id,
         "message": "incident_created",
         "run_record_id": effective_run_record_id,
