@@ -3671,6 +3671,7 @@ def capability_internal_escalate_wrapped(req: RunRequest, run_record_id: str) ->
         run_record_id,
         airtable_update=airtable_update,
         logs_errors_table_name=LOGS_ERRORS_TABLE_NAME,
+        incidents_table_name=INCIDENTS_TABLE_NAME,
     )
     
 def capability_chain_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
