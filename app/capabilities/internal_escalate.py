@@ -123,9 +123,14 @@ def capability_internal_escalate(
     *,
     airtable_update,
     logs_errors_table_name,
-    incidents_table_name=None,  # SAFE ADD
+    incidents_table_name=None,
 ):
-    payload = req.input or {}
+    if req is not None and hasattr(req, "input"):
+        payload = getattr(req, "input", {}) or {}
+    elif isinstance(req, dict):
+        payload = req
+    else:
+        payload = {}
 
     flow_id = _to_str(payload.get("flow_id")).strip()
 
@@ -142,15 +147,24 @@ def capability_internal_escalate(
         or run_record_id
     ).strip()
 
-    incident_record_id = _to_str(payload.get("incident_record_id")).strip()
+    incident_record_id = _to_str(
+        payload.get("incident_record_id")
+        or payload.get("incidentrecordid")
+        or payload.get("Incident_Record_ID")
+    ).strip()
 
     reason = _to_str(payload.get("reason"), "internal_escalation")
     goal = _to_str(payload.get("goal"), "escalation_send")
     severity = _to_str(payload.get("severity"), "critical")
     http_status = payload.get("http_status")
     failed_goal = _to_str(payload.get("failed_goal"))
-    failed_url = _to_str(payload.get("failed_url"))
+    failed_url = _to_str(
+        payload.get("failed_url")
+        or payload.get("target_url")
+    )
     sla_status = _to_str(payload.get("sla_status"))
+    final_failure = payload.get("final_failure")
+    parent_command_id = _to_str(payload.get("parent_command_id")).strip()
 
     workspace_id = _to_str(
         payload.get("workspace_id")
@@ -187,6 +201,8 @@ def capability_internal_escalate(
         "failed_goal": failed_goal,
         "failed_url": failed_url,
         "sla_status": sla_status,
+        "final_failure": final_failure,
+        "incident_record_id": incident_record_id,
         "log_record_id": log_record_id,
         "run_record_id": run_record_id,
         "flow_id": flow_id,
@@ -223,7 +239,6 @@ def capability_internal_escalate(
             "terminal": True,
         }
 
-    # SAFE PATCH INCIDENT UPDATE
     try:
         if incidents_table_name:
             _best_effort_update_incident(
@@ -255,11 +270,11 @@ def capability_internal_escalate(
                     "step_index": int(payload.get("step_index") or 0) + 1,
                     "goal": "escalation_sent",
                     "workspace_id": workspace_id,
-                    "parent_command_id": _to_str(payload.get("parent_command_id")).strip(),
-
-                    # AJOUTS SMART RESOLVE
+                    "parent_command_id": parent_command_id,
                     "severity": severity,
-                    "final_failure": payload.get("final_failure"),
+                    "final_failure": final_failure,
+                    "failed_url": failed_url,
+                    "http_status": http_status,
                 },
             }
         ],
@@ -273,7 +288,7 @@ def run(
     *,
     airtable_update,
     logs_errors_table_name,
-    incidents_table_name=None,  # IMPORTANT
+    incidents_table_name=None,
 ):
     return capability_internal_escalate(
         req,
