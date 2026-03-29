@@ -37,6 +37,7 @@ from app.capabilities.incident_deduplicate import run as capability_incident_ded
 from app.capabilities.incident_update import run as capability_incident_update
 from app.capabilities.resolve_incident import run as capability_resolve_incident
 from app.capabilities.close_incident import run as capability_close_incident
+from app.capabilities.smart_resolve import run as capability_smart_resolve
 
 
 # ============================================================
@@ -6019,6 +6020,7 @@ EVENT_CAPABILITY_ALLOWLIST = {
     "complete_flow_incident",
     "incident_deduplicate",
     "resolve_incident",
+    "smart_resolve",
     "close_incident",
 }
 
@@ -6043,6 +6045,7 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "complete_flow_incident",
     "incident_deduplicate",
     "resolve_incident",
+    "smart_resolve",
     "close_incident",
 }
 
@@ -6076,7 +6079,13 @@ def capability_incident_update_wrapped(req: RunRequest, run_record_id: str) -> D
         airtable_update=airtable_update,
         incidents_table_name=INCIDENTS_TABLE_NAME,
     )
-    
+
+def capability_smart_resolve_wrapped(req, run_record_id: str, **kwargs):
+    return capability_smart_resolve(
+        req=req,
+        run_record_id=run_record_id,
+        **kwargs,
+    )
     
 def capability_complete_flow(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
@@ -6181,7 +6190,8 @@ CAPABILITIES = {
     "incident_deduplicate": capability_incident_deduplicate_wrapped,
     "incident_update": capability_incident_update_wrapped,
     "resolve_incident": capability_resolve_incident_wrapped,
-"close_incident": capability_close_incident_wrapped,
+    "close_incident": capability_close_incident_wrapped,
+    "smart_resolve": capability_smart_resolve_wrapped,
 }
   
 # ============================================================
