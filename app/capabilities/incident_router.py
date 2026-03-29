@@ -245,6 +245,12 @@ def _normalize_incident(payload: Dict[str, Any]) -> Dict[str, Any]:
             or payload.get("incidentrecordid")
             or ""
         ),
+        "incident_record_id": _to_str(
+            payload.get("incident_record_id")
+            or payload.get("incidentrecordid")
+            or payload.get("Incident_Record_ID")
+            or ""
+        ),
         "raw_payload": deepcopy(payload),
     }
 
@@ -320,7 +326,11 @@ def _classify_incident(incident: Dict[str, Any], meta: Dict[str, Any]) -> Dict[s
     }
 
 
-def _build_incident_key(meta: Dict[str, Any], incident: Dict[str, Any], classification: Dict[str, Any]) -> str:
+def _build_incident_key(
+    meta: Dict[str, Any],
+    incident: Dict[str, Any],
+    classification: Dict[str, Any],
+) -> str:
     return "|".join(
         [
             _to_str(meta.get("flow_id") or "no_flow"),
@@ -376,10 +386,37 @@ def _build_escalate_command(
             "retry_count": _to_int(meta.get("retry_count"), 0),
             "retry_max": _to_int(meta.get("retry_max"), 0),
             "http_status": incident.get("http_status", 0),
-            "incident_record_id": "",
+            "incident_record_id": incident.get("incident_record_id", ""),
             "log_record_id": incident.get("log_record_id", ""),
             "run_record_id": "",
             "incident_key": incident_key,
+        },
+    }
+
+
+def _build_auto_resolve_command(
+    meta: Dict[str, Any],
+    incident: Dict[str, Any],
+    classification: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "capability": "resolve_incident",
+        "priority": 1,
+        "input": {
+            "incident_record_id": incident.get("incident_record_id", ""),
+            "flow_id": meta.get("flow_id", ""),
+            "root_event_id": meta.get("root_event_id", ""),
+            "parent_capability": "incident_router",
+            "parent_command_id": meta.get("parent_command_id", ""),
+            "step_index": _to_int(meta.get("step_index"), 0) + 1,
+            "_depth": _to_int(meta.get("depth"), 0) + 1,
+            "workspace_id": meta.get("workspace_id", ""),
+            "tenant_id": meta.get("tenant_id", ""),
+            "app_name": meta.get("app_name", ""),
+            "decision": "auto_resolve",
+            "reason": classification.get("reason", ""),
+            "severity": classification.get("severity", ""),
+            "category": classification.get("category", ""),
         },
     }
 
@@ -391,9 +428,15 @@ def _build_next_commands(
 ) -> List[Dict[str, Any]]:
     decision = _to_str(classification.get("decision"))
     depth = _to_int(meta.get("depth"), 0)
+    incident_record_id = _to_str(incident.get("incident_record_id")).strip()
+    severity = _to_str(classification.get("severity")).strip().lower()
+    final_failure = _to_bool(incident.get("final_failure"), False)
 
     if depth >= DEFAULT_MAX_DEPTH:
         return []
+
+    if incident_record_id and severity in {"low", "medium"} and not final_failure:
+        return [_build_auto_resolve_command(meta, incident, classification)]
 
     if decision == "escalate":
         return [_build_escalate_command(meta, incident, classification)]
@@ -431,7 +474,7 @@ def run(
         "root_event_id": meta.get("root_event_id", ""),
         "step_index": meta.get("step_index", 0),
         "goal": _to_str(data.get("goal") or ""),
-        "decision": classification.get("decision", "log_only"),
+        "decision": "auto_resolve" if next_commands and _to_str(next_commands[0].get("capability")) == "resolve_incident" else classification.get("decision", "log_only"),
         "reason": classification.get("reason", "unclassified_incident"),
         "severity": classification.get("severity", "medium"),
         "category": classification.get("category", "unknown_incident"),
@@ -444,7 +487,7 @@ def run(
         "retry_count": meta.get("retry_count", 0),
         "retry_max": meta.get("retry_max", 0),
         "http_status": incident.get("http_status", 0),
-        "incident_record_id": "",
+        "incident_record_id": incident.get("incident_record_id", ""),
         "log_record_id": incident.get("log_record_id", ""),
         "incident_create_ok": False,
         "spawned_count": len(next_commands),
