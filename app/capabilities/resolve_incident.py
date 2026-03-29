@@ -21,8 +21,8 @@ def run(
     req: Optional[Any] = None,
     run_record_id: str = "",
     *,
-    airtable_update,
-    incidents_table_name: str,
+    airtable_update=None,
+    incidents_table_name: str = "",
     **kwargs: Any,
 ) -> Dict[str, Any]:
     if req is not None and hasattr(req, "input"):
@@ -35,6 +35,7 @@ def run(
     incident_record_id = _to_str(
         payload.get("incident_record_id")
         or payload.get("incidentrecordid")
+        or payload.get("Incident_Record_ID")
         or ""
     ).strip()
 
@@ -43,26 +44,29 @@ def run(
             "ok": False,
             "capability": "resolve_incident",
             "error": "missing_incident_record_id",
+            "payload_debug": payload,
             "terminal": True,
         }
 
     try:
-        airtable_update(
-            incidents_table_name,
-            incident_record_id,
-            {
-                "Status_select": "Resolved",
-                "Last_Action": "resolve_incident",
-                "Resolved_At": _now_ts(),
-                "Run_Record_ID": _to_str(run_record_id),
-            },
-        )
+        if airtable_update and incidents_table_name:
+            airtable_update(
+                incidents_table_name,
+                incident_record_id,
+                {
+                    "Status_select": "Resolved",
+                    "Last_Action": "resolve_incident",
+                    "Resolved_At": _now_ts(),
+                    "Run_Record_ID": _to_str(run_record_id),
+                },
+            )
     except Exception as e:
         return {
             "ok": False,
             "capability": "resolve_incident",
             "error": f"resolve_incident_failed:{repr(e)}",
             "incident_record_id": incident_record_id,
+            "payload_debug": payload,
             "terminal": True,
         }
 
@@ -72,6 +76,7 @@ def run(
         "status": "done",
         "incident_record_id": incident_record_id,
         "message": "incident_resolved",
+        "run_record_id": _to_str(run_record_id),
         "next_commands": [],
         "terminal": True,
     }
