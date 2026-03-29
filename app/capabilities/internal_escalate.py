@@ -256,6 +256,10 @@ def capability_internal_escalate(
                     "goal": "escalation_sent",
                     "workspace_id": workspace_id,
                     "parent_command_id": _to_str(payload.get("parent_command_id")).strip(),
+
+                    # AJOUTS SMART RESOLVE
+                    "severity": severity,
+                    "final_failure": payload.get("final_failure"),
                 },
             }
         ],
