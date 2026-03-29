@@ -6679,7 +6679,161 @@ def get_flows(limit: int = 50) -> Dict[str, Any]:
         "flows": flows,
         "ts": utc_now_iso(),
     }
-    
+
+@app.get("/flows/{flow_id}")
+def get_flow_by_id(flow_id: str) -> Dict[str, Any]:
+    try:
+        if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+            raise HTTPException(status_code=500, detail="missing_airtable_env")
+
+        limit = 200
+        records, meta = _safe_records_from_view(
+            COMMANDS_TABLE_NAME,
+            COMMANDS_DASHBOARD_VIEW_NAME,
+            limit,
+        )
+
+        commands: List[Dict[str, Any]] = []
+
+        for r in records:
+            f = r.get("fields", {}) or {}
+            status = _read_command_status(f)
+            flow_meta = _extract_flow_metadata_from_command_fields(f) or {}
+
+            current_flow_id = (
+                flow_meta.get("flow_id")
+                or f.get("Flow_ID")
+                or f.get("flow_id")
+                or ""
+            )
+
+            root_event_id = (
+                flow_meta.get("root_event_id")
+                or f.get("Root_Event_ID")
+                or f.get("root_event_id")
+                or ""
+            )
+
+            parent_command_id = (
+                flow_meta.get("parent_command_id")
+                or f.get("Parent_Command_ID")
+                or f.get("parent_command_id")
+                or ""
+            )
+
+            step_index = flow_meta.get("step_index")
+            try:
+                step_index = int(step_index) if step_index not in (None, "") else None
+            except Exception:
+                step_index = None
+
+            commands.append(
+                {
+                    "id": r.get("id"),
+                    "capability": f.get("Capability"),
+                    "status": status,
+                    "priority": f.get("Priority"),
+                    "retry_count": f.get("Retry_Count"),
+                    "retry_max": f.get("Retry_Max"),
+                    "scheduled_at": f.get("Scheduled_At"),
+                    "next_retry_at": f.get("Next_Retry_At"),
+                    "is_locked": f.get("Is_Locked"),
+                    "locked_by": f.get("Locked_By"),
+                    "idempotency_key": f.get("Idempotency_Key"),
+                    "flow_id": current_flow_id,
+                    "root_event_id": root_event_id,
+                    "parent_command_id": parent_command_id,
+                    "step_index": step_index,
+                    "input_json": flow_meta.get("input_json"),
+                    "result_json": flow_meta.get("result_json"),
+                    "worker": f.get("Locked_By") or f.get("Worker"),
+                    "workspace_id": f.get("Workspace_ID") or f.get("workspace_id"),
+                    "started_at": f.get("Started_At"),
+                    "finished_at": f.get("Finished_At"),
+                    "created_at": f.get("Created_At") or f.get("created_at"),
+                }
+            )
+
+        filtered = [
+            c for c in commands
+            if str(c.get("flow_id") or "").strip() == flow_id
+        ]
+
+        filtered.sort(
+            key=lambda c: (
+                c.get("step_index") is None,
+                c.get("step_index") if c.get("step_index") is not None else 999999,
+                str(c.get("created_at") or ""),
+            )
+        )
+
+        if not filtered:
+            raise HTTPException(status_code=404, detail="flow_not_found")
+
+        stats = {
+            "queued": 0,
+            "running": 0,
+            "retry": 0,
+            "done": 0,
+            "dead": 0,
+            "blocked": 0,
+            "unsupported": 0,
+            "error": 0,
+            "other": 0,
+        }
+
+        for c in filtered:
+            s = str(c.get("status") or "").lower()
+            if s in ("queued", "queue"):
+                stats["queued"] += 1
+            elif s == "running":
+                stats["running"] += 1
+            elif s == "retry":
+                stats["retry"] += 1
+            elif s == "done":
+                stats["done"] += 1
+            elif s == "dead":
+                stats["dead"] += 1
+            elif s == "blocked":
+                stats["blocked"] += 1
+            elif s == "unsupported":
+                stats["unsupported"] += 1
+            elif s == "error":
+                stats["error"] += 1
+            else:
+                stats["other"] += 1
+
+        workspace_id = next(
+            (c.get("workspace_id") for c in filtered if c.get("workspace_id")),
+            "",
+        )
+        root_event_id = next(
+            (c.get("root_event_id") for c in filtered if c.get("root_event_id")),
+            "",
+        )
+
+        return {
+            "ok": bool(meta.get("ok")),
+            "source": meta,
+            "flow": {
+                "id": flow_id,
+                "count": len(filtered),
+                "root_event_id": root_event_id,
+                "workspace_id": workspace_id,
+                "stats": stats,
+                "commands": filtered,
+            },
+            "ts": utc_now_iso(),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"detail": "Internal error", "error": repr(exc)},
+        )
+        
 @app.get("/sla")
 def get_sla(limit: int = 50) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=50, minimum=1, maximum=200)
