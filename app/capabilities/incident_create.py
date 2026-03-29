@@ -275,8 +275,6 @@ def run(
         "Created_By_Capability": "incident_create",
         "Opened_At": now_ts,
         "Updated_At": now_ts,
-
-        # SAFE PATCH additions
         "Incident_Key": incident_key,
         "Last_Seen_At": now_ts,
         "Occurrences_Count": 1,
@@ -285,10 +283,7 @@ def run(
         "SLA_Status": "Open",
     }
 
-    clean_fields = {
-        k: v for k, v in incident_fields.items()
-        if v not in ("", None)
-    }
+    clean_fields = {k: v for k, v in incident_fields.items() if v not in ("", None)}
 
     try:
         create_res = airtable_create(incidents_table_name, clean_fields)
@@ -384,7 +379,9 @@ def run(
             0,
         ),
         "incident_record_id": incident_record_id,
-        "log_record_id": _to_str(data.get("log_record_id") or data.get("logrecordid") or ""),
+        "log_record_id": _to_str(
+            data.get("log_record_id") or data.get("logrecordid") or ""
+        ),
         "run_record_id": effective_run_record_id,
         "linked_run": effective_run_record_id,
         "command_id": parent_command_id,
