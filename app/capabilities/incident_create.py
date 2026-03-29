@@ -197,6 +197,13 @@ def run(
         or ""
     )
 
+    parent_command_id = _to_str(
+        meta.get("parent_command_id")
+        or data.get("parent_command_id")
+        or data.get("parentcommandid")
+        or ""
+    )
+
     error_message = _to_str(
         data.get("error")
         or data.get("error_message")
@@ -220,6 +227,8 @@ def run(
         or data.get("originalcapability")
         or ""
     )
+
+    now_ts = _now_ts()
 
     incident_fields = {
         "Name": _build_incident_name(data),
@@ -259,13 +268,17 @@ def run(
         "Tenant_ID": _to_str(meta.get("tenant_id", "")),
         "App_Name": _to_str(meta.get("app_name", "")),
         "Run_Record_ID": effective_run_record_id,
+        "Linked_Run": effective_run_record_id,
+        "Command_ID": parent_command_id,
+        "Linked_Command": parent_command_id,
         "Payload_JSON": _safe_json(data),
         "Created_By_Capability": "incident_create",
-        "Opened_At": _now_ts(),
+        "Opened_At": now_ts,
+        "Updated_At": now_ts,
 
         # SAFE PATCH additions
         "Incident_Key": incident_key,
-        "Last_Seen_At": _now_ts(),
+        "Last_Seen_At": now_ts,
         "Occurrences_Count": 1,
         "Deduplicate_Action": deduplicate_action,
         "Final_Failure": final_failure,
@@ -311,10 +324,8 @@ def run(
         "reason": _to_str(data.get("reason") or "incident_created"),
         "severity": _to_str(data.get("severity") or "medium"),
         "category": _to_str(data.get("category") or "unknown_incident"),
-
         "error": error_message,
         "error_message": error_message,
-
         "incident_code": _to_str(
             data.get("incident_code")
             or data.get("incidentcode")
@@ -375,9 +386,12 @@ def run(
         "incident_record_id": incident_record_id,
         "log_record_id": _to_str(data.get("log_record_id") or data.get("logrecordid") or ""),
         "run_record_id": effective_run_record_id,
+        "linked_run": effective_run_record_id,
+        "command_id": parent_command_id,
+        "linked_command": parent_command_id,
         "incident_key": incident_key,
         "deduplicate_action": deduplicate_action,
-        "parent_command_id": _to_str(meta.get("parent_command_id") or ""),
+        "parent_command_id": parent_command_id,
     }
 
     return {
