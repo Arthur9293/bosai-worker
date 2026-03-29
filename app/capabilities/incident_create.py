@@ -90,6 +90,26 @@ def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
             or payload.get("parentCommandId")
             or ""
         ),
+        "command_id": _to_str(
+            payload.get("command_id")
+            or payload.get("commandid")
+            or payload.get("commandId")
+            or payload.get("parent_command_id")
+            or payload.get("parentcommand_id")
+            or payload.get("parentCommandId")
+            or ""
+        ),
+        "run_record_id": _to_str(
+            payload.get("run_record_id")
+            or payload.get("runrecordid")
+            or payload.get("runRecordId")
+            or payload.get("linked_run")
+            or payload.get("Linked_Run")
+            or payload.get("run_id")
+            or payload.get("runid")
+            or payload.get("runId")
+            or ""
+        ),
         "step_index": _to_int(
             payload.get("step_index")
             if payload.get("step_index") is not None
@@ -182,14 +202,28 @@ def run(
             "error": "max_depth_reached",
             "flow_id": meta.get("flow_id", ""),
             "root_event_id": meta.get("root_event_id", ""),
-            "run_record_id": run_record_id,
+            "run_record_id": meta.get("run_record_id", "") or run_record_id,
             "terminal": True,
         }
 
     effective_run_record_id = _to_str(
         run_record_id
+        or meta.get("run_record_id")
         or data.get("run_record_id")
         or data.get("runrecordid")
+        or data.get("linked_run")
+        or data.get("Linked_Run")
+        or ""
+    ).strip()
+
+    effective_command_id = _to_str(
+        meta.get("command_id")
+        or data.get("command_id")
+        or data.get("commandid")
+        or data.get("commandId")
+        or meta.get("parent_command_id")
+        or data.get("parent_command_id")
+        or data.get("parentcommandid")
         or ""
     ).strip()
 
@@ -197,8 +231,13 @@ def run(
         meta.get("parent_command_id")
         or data.get("parent_command_id")
         or data.get("parentcommandid")
+        or data.get("parentCommandId")
+        or effective_command_id
         or ""
     ).strip()
+
+    effective_flow_id = _to_str(meta.get("flow_id", "")).strip()
+    effective_root_event_id = _to_str(meta.get("root_event_id", "")).strip()
 
     error_message = _to_str(
         data.get("error")
@@ -229,9 +268,9 @@ def run(
     incident_fields = {
         "Name": _build_incident_name(data),
         "Status_select": "Open",
-        "Severity": _to_str(data.get("severity") or "medium"),
-        "Category": _to_str(data.get("category") or "unknown_incident"),
-        "Reason": _to_str(data.get("reason") or "incident_create"),
+        "Severity": _to_str(data.get("severity") or "medium").strip().title() or "Medium",
+        "Category": _to_str(data.get("category") or "unknown_incident").strip(),
+        "Reason": _to_str(data.get("reason") or "incident_create").strip(),
         "HTTP_Status": _to_int(
             data.get("http_status")
             or data.get("httpstatus"),
@@ -242,46 +281,46 @@ def run(
             or data.get("originalcapability")
             or failed_capability
             or ""
-        ),
-        "Failed_Capability": failed_capability,
+        ).strip(),
+        "Failed_Capability": failed_capability.strip(),
         "Failed_URL": _to_str(
             data.get("failed_url")
             or data.get("failedurl")
             or data.get("target_url")
             or data.get("targeturl")
             or "",
-        ),
+        ).strip(),
         "Failed_Method": _to_str(
             data.get("failed_method")
             or data.get("failedmethod")
             or data.get("method")
             or "",
-        ).upper(),
-        "Error_Message": error_message,
-        "Flow_ID": _to_str(meta.get("flow_id", "")),
-        "Root_Event_ID": _to_str(meta.get("root_event_id", "")),
-        "Workspace_ID": _to_str(meta.get("workspace_id", "")),
-        "Tenant_ID": _to_str(meta.get("tenant_id", "")),
-        "App_Name": _to_str(meta.get("app_name", "")),
+        ).upper().strip(),
+        "Error_Message": error_message.strip(),
+        "Flow_ID": effective_flow_id,
+        "Root_Event_ID": effective_root_event_id,
+        "Workspace_ID": _to_str(meta.get("workspace_id", "")).strip(),
+        "Tenant_ID": _to_str(meta.get("tenant_id", "")).strip(),
+        "App_Name": _to_str(meta.get("app_name", "")).strip(),
         "Run_Record_ID": effective_run_record_id,
         "Linked_Run": [effective_run_record_id] if effective_run_record_id else [],
-        "Command_ID": parent_command_id,
-        "Linked_Command": [parent_command_id] if parent_command_id else [],
+        "Command_ID": effective_command_id,
+        "Linked_Command": [effective_command_id] if effective_command_id else [],
         "Payload_JSON": _safe_json(data),
         "Created_By_Capability": "incident_create",
         "Opened_At": now_ts,
         "Updated_At": now_ts,
-        "Incident_Key": incident_key,
+        "Incident_Key": incident_key.strip(),
         "Last_Seen_At": now_ts,
         "Occurrences_Count": 1,
-        "Deduplicate_Action": deduplicate_action,
+        "Deduplicate_Action": deduplicate_action.strip(),
         "Final_Failure": final_failure,
         "SLA_Status": "Open",
     }
 
     clean_fields = {
         k: v for k, v in incident_fields.items()
-        if v not in ("", None)
+        if v not in ("", None, [])
     }
 
     try:
@@ -305,21 +344,24 @@ def run(
             incident_record_id = _to_str(create_res).strip()
 
         print("[incident_create] created incident_record_id =", incident_record_id)
+        print("[incident_create] linked flow_id =", effective_flow_id)
+        print("[incident_create] linked root_event_id =", effective_root_event_id)
+        print("[incident_create] linked command_id =", effective_command_id)
+        print("[incident_create] linked run_record_id =", effective_run_record_id)
+
     except Exception as e:
         return {
             "ok": False,
             "error": f"incident_create_failed:{repr(e)}",
-            "flow_id": meta.get("flow_id", ""),
-            "root_event_id": meta.get("root_event_id", ""),
+            "flow_id": effective_flow_id,
+            "root_event_id": effective_root_event_id,
             "run_record_id": effective_run_record_id,
             "terminal": True,
         }
 
-    effective_flow_id = _to_str(meta.get("flow_id", "")).strip()
     if not effective_flow_id and incident_record_id:
         effective_flow_id = f"flow_{incident_record_id}"
 
-    effective_root_event_id = _to_str(meta.get("root_event_id", "")).strip()
     if not effective_root_event_id:
         effective_root_event_id = effective_flow_id
 
@@ -401,11 +443,11 @@ def run(
         ),
         "run_record_id": effective_run_record_id,
         "linked_run": effective_run_record_id,
-        "command_id": parent_command_id,
-        "linked_command": parent_command_id,
+        "command_id": effective_command_id,
+        "linked_command": effective_command_id,
         "incident_key": incident_key,
         "deduplicate_action": deduplicate_action,
-        "parent_command_id": parent_command_id,
+        "parent_command_id": effective_command_id,
     }
 
     return {
@@ -417,6 +459,7 @@ def run(
         "incident_record_id": incident_record_id,
         "message": "incident_created",
         "run_record_id": effective_run_record_id,
+        "command_id": effective_command_id,
         "next_commands": [
             {
                 "capability": "internal_escalate",
