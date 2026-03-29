@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import requests
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -7377,12 +7377,9 @@ async def run(request: Request, response: Response) -> RunResponse:
 # ============================================================
 # Incidents / graphs / details
 # ============================================================
+
 @app.get("/incidents")
-def get_incidents(
-    flow_id: Optional[str] = None,
-    root_event_id: Optional[str] = None,
-    command_id: Optional[str] = None,
-) -> Dict[str, Any]:
+def get_incidents(flow_id: str = Query(default="")):
     try:
         if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
             return {
@@ -7402,50 +7399,12 @@ def get_incidents(
 
         effective_table = INCIDENTS_TABLE_NAME
         effective_view = INCIDENTS_VIEW_NAME or "Active"
+        requested_flow_id = str(flow_id or "").strip()
 
         print("[AIRTABLE GET] table =", effective_table)
         print("[AIRTABLE GET] view =", effective_view)
+        print("[AIRTABLE GET] flow_id =", requested_flow_id or "(none)")
         print("[AIRTABLE GET] url =", _airtable_url(effective_table))
-
-        params: Dict[str, Any] = {
-            "maxRecords": 100,
-            "view": effective_view,
-        }
-
-        filters: List[str] = []
-
-        if flow_id:
-            safe_flow_id = str(flow_id).replace("'", "\\'")
-            filters.append(
-                f"OR({{Flow_ID}}='{safe_flow_id}', {{flow_id}}='{safe_flow_id}')"
-            )
-
-        if root_event_id:
-            safe_root_event_id = str(root_event_id).replace("'", "\\'")
-            filters.append(
-                f"OR({{Root_Event_ID}}='{safe_root_event_id}', {{root_event_id}}='{safe_root_event_id}')"
-            )
-
-        if command_id:
-            safe_command_id = str(command_id).replace("'", "\\'")
-            filters.append(
-                (
-                    "OR("
-                    f"{{Command_ID}}='{safe_command_id}', "
-                    f"{{command_id}}='{safe_command_id}', "
-                    f"{{Linked_Command}}='{safe_command_id}', "
-                    f"{{Linked command}}='{safe_command_id}'"
-                    ")"
-                )
-            )
-
-        if filters:
-            if len(filters) == 1:
-                params["filterByFormula"] = filters[0]
-            else:
-                params["filterByFormula"] = f"AND({','.join(filters)})"
-
-        print("[AIRTABLE GET] params =", params)
 
         response = requests.get(
             _airtable_url(effective_table),
@@ -7453,7 +7412,10 @@ def get_incidents(
                 "Authorization": f"Bearer {AIRTABLE_API_KEY}",
                 "Accept": "application/json",
             },
-            params=params,
+            params={
+                "maxRecords": 100,
+                "view": effective_view,
+            },
             timeout=20,
         )
         response.raise_for_status()
@@ -7557,12 +7519,12 @@ def get_incidents(
                 or f.get("flow_id")
             )
 
-            current_root_event_id = (
+            root_event_id = (
                 f.get("Root_Event_ID")
                 or f.get("root_event_id")
             )
 
-            current_command_id = (
+            command_id = (
                 f.get("Command_ID")
                 or f.get("command_id")
             )
@@ -7590,6 +7552,11 @@ def get_incidents(
                 or f.get("Temps restant SLA")
             )
 
+            current_flow_id_str = str(current_flow_id or "").strip()
+
+            if requested_flow_id and current_flow_id_str != requested_flow_id:
+                continue
+
             incidents.append(
                 {
                     "id": r.get("id"),
@@ -7602,10 +7569,10 @@ def get_incidents(
                     "workspace_id": workspace_id,
                     "linked_run": linked_run,
                     "linked_command": linked_command,
-                    "command_id": current_command_id,
+                    "command_id": command_id,
                     "run_record_id": run_record_id,
-                    "flow_id": current_flow_id,
-                    "root_event_id": current_root_event_id,
+                    "flow_id": current_flow_id_str,
+                    "root_event_id": root_event_id,
                     "category": category,
                     "reason": reason,
                     "created_at": created_at,
@@ -7639,9 +7606,7 @@ def get_incidents(
                 "ok": True,
                 "table": effective_table,
                 "view": effective_view,
-                "filter_flow_id": flow_id,
-                "filter_root_event_id": root_event_id,
-                "filter_command_id": command_id,
+                "flow_id": requested_flow_id or None,
             },
             "count": len(incidents),
             "stats": stats,
@@ -7654,7 +7619,7 @@ def get_incidents(
         raise HTTPException(status_code=502, detail=f"Airtable incidents request failed: {detail}")
     except Exception as exc:
         raise HTTPException(status_code=500, detail={"detail": "Internal error", "error": repr(exc)})
-
+        
 @app.get("/commands/{record_id}")
 def get_command_detail(record_id: str) -> Dict[str, Any]:
     try:
