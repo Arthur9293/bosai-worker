@@ -288,9 +288,19 @@ def run(
     try:
         create_res = airtable_create(incidents_table_name, clean_fields)
 
+        incident_record_id = ""
+
         if isinstance(create_res, dict):
             incident_record_id = _to_str(
-                create_res.get("id") or create_res.get("record_id") or ""
+                create_res.get("id")
+                or create_res.get("record_id")
+                or (
+                    create_res.get("records")[0].get("id")
+                    if isinstance(create_res.get("records"), list)
+                    and create_res.get("records")
+                    and isinstance(create_res.get("records")[0], dict)
+                    else ""
+                )
             ).strip()
         else:
             incident_record_id = _to_str(create_res).strip()
