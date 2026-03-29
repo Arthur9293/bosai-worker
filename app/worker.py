@@ -7271,29 +7271,33 @@ def get_incidents():
             f = r.get("fields", {}) or {}
 
             status = str(
-                f.get("Statut incident")
-                or f.get("Status_select")
+                f.get("Status_select")
+                or f.get("Statut incident")
+                or f.get("status_select")
+                or f.get("status")
                 or f.get("Status")
                 or ""
             ).strip()
 
             severity = str(
-                f.get("Urgence IA")
-                or f.get("Severity")
+                f.get("Severity")
+                or f.get("Urgence IA")
+                or f.get("severity")
                 or ""
             ).strip()
 
             sla_status = (
                 f.get("SLA_Status")
                 or f.get("SLA status")
+                or f.get("sla_status")
                 or f.get("SLA")
             )
 
             title = (
-                f.get("Error_Message")
-                or f.get("Name")
+                f.get("Name")
                 or f.get("Title")
                 or f.get("Incident_Title")
+                or f.get("Error_Message")
                 or f.get("Résumé")
                 or "Untitled incident"
             )
@@ -7308,6 +7312,7 @@ def get_incidents():
             linked_run = (
                 f.get("Linked_Run")
                 or f.get("Run_Record_ID")
+                or f.get("run_record_id")
                 or f.get("run_id")
                 or f.get("Linked run")
             )
@@ -7333,6 +7338,50 @@ def get_incidents():
                 or f.get("Last_Seen_At")
             )
 
+            opened_at = (
+                f.get("Opened_At")
+                or f.get("opened_at")
+                or created_at
+            )
+
+            resolved_at = (
+                f.get("Resolved_At")
+                or f.get("resolved_at")
+                or None
+            )
+
+            flow_id = (
+                f.get("Flow_ID")
+                or f.get("flow_id")
+            )
+
+            root_event_id = (
+                f.get("Root_Event_ID")
+                or f.get("root_event_id")
+            )
+
+            command_id = (
+                f.get("Command_ID")
+                or f.get("command_id")
+            )
+
+            run_record_id = (
+                f.get("Run_Record_ID")
+                or f.get("run_record_id")
+                or f.get("Linked_Run")
+                or f.get("run_id")
+            )
+
+            category = (
+                f.get("Category")
+                or f.get("category")
+            )
+
+            reason = (
+                f.get("Reason")
+                or f.get("reason")
+            )
+
             sla_remaining_minutes = (
                 f.get("SLA_Remaining_Minutes")
                 or f.get("SLA remaining minutes")
@@ -7343,6 +7392,7 @@ def get_incidents():
                 {
                     "id": r.get("id"),
                     "title": title,
+                    "name": title,
                     "status": status,
                     "severity": severity,
                     "sla_status": sla_status,
@@ -7350,8 +7400,16 @@ def get_incidents():
                     "workspace_id": workspace_id,
                     "linked_run": linked_run,
                     "linked_command": linked_command,
+                    "command_id": command_id,
+                    "run_record_id": run_record_id,
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "category": category,
+                    "reason": reason,
                     "created_at": created_at,
                     "updated_at": updated_at,
+                    "opened_at": opened_at,
+                    "resolved_at": resolved_at,
                     "source": "Logs_Erreurs",
                     "worker": f.get("Worker"),
                 }
@@ -7364,6 +7422,8 @@ def get_incidents():
                 stats["open"] += 1
             elif normalized_status in ("resolved", "closed", "done", "résolu"):
                 stats["resolved"] += 1
+            elif normalized_status in ("escalated", "escalade", "escaladé"):
+                stats["warning"] += 1
             elif normalized_severity in ("critical", "critique", "high"):
                 stats["critical"] += 1
             elif normalized_severity in ("warning", "warn", "medium", "surveillance", "moyen"):
