@@ -236,6 +236,18 @@ def run(
         or ""
     ).strip()
 
+    linked_run_ids = (
+        [effective_run_record_id]
+        if effective_run_record_id.startswith("rec")
+        else []
+    )
+
+    linked_command_ids = (
+        [effective_command_id]
+        if effective_command_id.startswith("rec")
+        else []
+    )
+
     effective_flow_id = _to_str(meta.get("flow_id", "")).strip()
     effective_root_event_id = _to_str(meta.get("root_event_id", "")).strip()
 
@@ -303,9 +315,9 @@ def run(
         "Tenant_ID": _to_str(meta.get("tenant_id", "")).strip(),
         "App_Name": _to_str(meta.get("app_name", "")).strip(),
         "Run_Record_ID": effective_run_record_id,
-        "Linked_Run": [effective_run_record_id] if effective_run_record_id else [],
+        "Linked_Run": linked_run_ids,
         "Command_ID": effective_command_id,
-        "Linked_Command": [effective_command_id] if effective_command_id else [],
+        "Linked_Command": linked_command_ids,
         "Payload_JSON": _safe_json(data),
         "Created_By_Capability": "incident_create",
         "Opened_At": now_ts,
