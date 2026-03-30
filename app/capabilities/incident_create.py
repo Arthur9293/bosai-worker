@@ -74,7 +74,7 @@ def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
             or payload.get("flowid")
             or payload.get("flowId")
             or ""
-        ),
+        ).strip(),
         "root_event_id": _to_str(
             payload.get("root_event_id")
             or payload.get("rooteventid")
@@ -83,13 +83,13 @@ def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
             or payload.get("eventid")
             or payload.get("eventId")
             or ""
-        ),
+        ).strip(),
         "parent_command_id": _to_str(
             payload.get("parent_command_id")
             or payload.get("parentcommand_id")
             or payload.get("parentCommandId")
             or ""
-        ),
+        ).strip(),
         "command_id": _to_str(
             payload.get("command_id")
             or payload.get("commandid")
@@ -98,7 +98,7 @@ def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
             or payload.get("parentcommand_id")
             or payload.get("parentCommandId")
             or ""
-        ),
+        ).strip(),
         "run_record_id": _to_str(
             payload.get("run_record_id")
             or payload.get("runrecordid")
@@ -109,7 +109,7 @@ def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
             or payload.get("runid")
             or payload.get("runId")
             or ""
-        ),
+        ).strip(),
         "step_index": _to_int(
             payload.get("step_index")
             if payload.get("step_index") is not None
@@ -131,19 +131,19 @@ def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
             or payload.get("workspaceid")
             or payload.get("workspaceId")
             or "production"
-        ),
+        ).strip(),
         "tenant_id": _to_str(
             payload.get("tenant_id")
             or payload.get("tenantid")
             or payload.get("tenantId")
             or ""
-        ),
+        ).strip(),
         "app_name": _to_str(
             payload.get("app_name")
             or payload.get("appname")
             or payload.get("appName")
             or ""
-        ),
+        ).strip(),
     }
 
 
@@ -175,6 +175,110 @@ def _build_incident_name(data: Dict[str, Any]) -> str:
         return code
 
     return "Incident"
+
+
+def _normalize_decision_block(data: Dict[str, Any]) -> Dict[str, Any]:
+    decision_status = _to_str(
+        data.get("decision_status")
+        or data.get("decisionstatus")
+        or ""
+    ).strip()
+
+    decision_reason = _to_str(
+        data.get("decision_reason")
+        or data.get("decisionreason")
+        or ""
+    ).strip()
+
+    next_action = _to_str(
+        data.get("next_action")
+        or data.get("nextaction")
+        or ""
+    ).strip()
+
+    auto_executable = _to_bool(
+        data.get("auto_executable")
+        if data.get("auto_executable") is not None
+        else data.get("autoexecutable"),
+        False,
+    )
+
+    priority_score = _to_int(
+        data.get("priority_score")
+        if data.get("priority_score") is not None
+        else data.get("priorityscore"),
+        0,
+    )
+
+    severity = _to_str(data.get("severity") or "").strip().lower()
+    category = _to_str(data.get("category") or "").strip().lower()
+    reason = _to_str(data.get("reason") or "").strip().lower()
+    sla_status = _to_str(data.get("sla_status") or "").strip().lower()
+    final_failure = _to_bool(
+        data.get("final_failure")
+        if data.get("final_failure") is not None
+        else data.get("finalfailure"),
+        False,
+    )
+    http_status = _to_int(
+        data.get("http_status")
+        if data.get("http_status") is not None
+        else data.get("httpstatus"),
+        0,
+    )
+
+    if not decision_status:
+        if next_action == "internal_escalate":
+            decision_status = "Escalate"
+        elif next_action == "resolve_incident":
+            decision_status = "Resolved"
+        elif final_failure and (
+            category == "http_failure"
+            or reason == "http_5xx_exhausted"
+            or http_status >= 500
+            or severity in {"high", "critical"}
+            or sla_status == "breached"
+        ):
+            decision_status = "Escalate"
+        elif severity in {"low"}:
+            decision_status = "No_Action"
+        else:
+            decision_status = "Monitor"
+
+    normalized_decision_status = decision_status.strip().lower()
+
+    if not next_action:
+        if normalized_decision_status in {"escalate", "escalated"}:
+            next_action = "internal_escalate"
+        elif normalized_decision_status in {"resolved", "resolve"}:
+            next_action = "resolve_incident"
+        else:
+            next_action = "complete_flow_incident"
+
+    if not auto_executable:
+        if next_action in {"internal_escalate", "resolve_incident"}:
+            auto_executable = True
+
+    if priority_score <= 0:
+        if next_action == "internal_escalate":
+            if severity == "critical" or sla_status == "breached":
+                priority_score = 95
+            elif severity == "high":
+                priority_score = 80
+            else:
+                priority_score = 70
+        elif next_action == "resolve_incident":
+            priority_score = 20
+        else:
+            priority_score = 10
+
+    return {
+        "decision_status": decision_status,
+        "decision_reason": decision_reason,
+        "next_action": next_action,
+        "auto_executable": auto_executable,
+        "priority_score": priority_score,
+    }
 
 
 def run(
@@ -256,10 +360,10 @@ def run(
         or data.get("error_message")
         or data.get("errormessage")
         or ""
-    )
+    ).strip()
 
-    incident_key = _to_str(data.get("incident_key") or "")
-    deduplicate_action = _to_str(data.get("deduplicate_action") or "")
+    incident_key = _to_str(data.get("incident_key") or "").strip()
+    deduplicate_action = _to_str(data.get("deduplicate_action") or "").strip()
     final_failure = _to_bool(
         data.get("final_failure")
         if data.get("final_failure") is not None
@@ -273,7 +377,7 @@ def run(
         or data.get("original_capability")
         or data.get("originalcapability")
         or ""
-    )
+    ).strip()
 
     now_ts = _now_ts()
 
@@ -294,7 +398,7 @@ def run(
             or failed_capability
             or ""
         ).strip(),
-        "Failed_Capability": failed_capability.strip(),
+        "Failed_Capability": failed_capability,
         "Failed_URL": _to_str(
             data.get("failed_url")
             or data.get("failedurl")
@@ -308,7 +412,7 @@ def run(
             or data.get("method")
             or "",
         ).upper().strip(),
-        "Error_Message": error_message.strip(),
+        "Error_Message": error_message,
         "Flow_ID": effective_flow_id,
         "Root_Event_ID": effective_root_event_id,
         "Workspace_ID": _to_str(meta.get("workspace_id", "")).strip(),
@@ -322,10 +426,10 @@ def run(
         "Created_By_Capability": "incident_create",
         "Opened_At": now_ts,
         "Updated_At": now_ts,
-        "Incident_Key": incident_key.strip(),
+        "Incident_Key": incident_key,
         "Last_Seen_At": now_ts,
         "Occurrences_Count": 1,
-        "Deduplicate_Action": deduplicate_action.strip(),
+        "Deduplicate_Action": deduplicate_action,
         "Final_Failure": final_failure,
         "SLA_Status": "Open",
     }
@@ -377,21 +481,12 @@ def run(
     if not effective_root_event_id:
         effective_root_event_id = effective_flow_id
 
-    decision_status = _to_str(data.get("decision_status") or "").strip()
-    decision_reason = _to_str(data.get("decision_reason") or "").strip()
-    next_action = _to_str(data.get("next_action") or "").strip()
-    auto_executable = _to_bool(
-        data.get("auto_executable")
-        if data.get("auto_executable") is not None
-        else data.get("autoexecutable"),
-        False,
-    )
-    priority_score = _to_int(
-        data.get("priority_score")
-        if data.get("priority_score") is not None
-        else data.get("priorityscore"),
-        0,
-    )
+    decision_block = _normalize_decision_block(data)
+    decision_status = decision_block["decision_status"]
+    decision_reason = decision_block["decision_reason"]
+    next_action = decision_block["next_action"]
+    auto_executable = decision_block["auto_executable"]
+    priority_score = decision_block["priority_score"]
 
     next_input = {
         "flow_id": effective_flow_id,
@@ -486,7 +581,7 @@ def run(
 
     next_commands = []
 
-    if auto_executable and next_action == "internal_escalate":
+    if next_action == "internal_escalate":
         next_commands.append(
             {
                 "capability": "internal_escalate",
@@ -494,7 +589,7 @@ def run(
                 "input": next_input,
             }
         )
-    elif auto_executable and next_action == "resolve_incident":
+    elif next_action == "resolve_incident":
         next_commands.append(
             {
                 "capability": "resolve_incident",
