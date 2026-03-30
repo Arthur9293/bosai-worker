@@ -29,7 +29,7 @@ from app.capabilities.http_exec import capability_http_exec
 from app.policies import get_policies
 from app.capabilities.internal_escalate import capability_internal_escalate
 from app.capabilities.incident_router_v2 import run as capability_incident_router_v2
-from app.capabilities.decision_engine import run as capability_decision_engine
+
 from app.capabilities.retry_router import run as capability_retry_router_run
 from app.capabilities.incident_create import run as capability_incident_create
 from app.capabilities.complete_flow_incident import run as capability_complete_flow_incident
@@ -5784,200 +5784,6 @@ def capability_retry_router_wrapped(req: RunRequest, run_record_id: str) -> Dict
         "next_commands": next_commands,
     }
 
-def capability_decision_router_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    payload = _normalize_flow_keys(req.input or {})
-    workspace_id = _resolve_workspace_id(req=req)
-
-    flow_id, root_event_id = _resolve_flow_ids(payload)
-    step_index = _resolve_flow_step_index(payload, 0)
-
-    goal = str(payload.get("goal") or "").strip().lower()
-    retry_reason = str(
-        payload.get("retry_reason")
-        or payload.get("reason")
-        or "unknown"
-    ).strip().lower()
-
-    original_capability = str(
-        payload.get("original_capability")
-        or "http_exec"
-    ).strip()
-
-    error_text = str(
-        payload.get("error")
-        or payload.get("last_error")
-        or ""
-    ).strip()
-
-    failed_url = str(
-        payload.get("failed_url")
-        or payload.get("url")
-        or payload.get("http_target")
-        or ""
-    ).strip()
-
-    failed_method = str(
-        payload.get("failed_method")
-        or payload.get("method")
-        or "GET"
-    ).strip().upper()
-
-    http_status = payload.get("http_status") or payload.get("status_code")
-    try:
-        http_status = int(http_status) if http_status is not None else None
-    except Exception:
-        http_status = None
-
-    retry_count = int(payload.get("retry_count") or 0)
-    retry_max = int(payload.get("retry_max") or 0)
-
-    next_commands: List[Dict[str, Any]] = []
-    decision = "stop"
-    status = "decision_made"
-    terminal = False
-    reason = ""
-
-    # ------------------------------------------------------------
-    # CASE 1: retry exhausted -> incident path
-    # ------------------------------------------------------------
-    if goal == "retry_exhausted":
-        decision = "retry_exhausted_to_incident"
-        reason = "retry_limit_reached"
-
-        next_commands.append(
-            {
-                "capability": "incident_router",
-                "priority": req.priority,
-                "input": {
-                    "flow_id": flow_id,
-                    "root_event_id": root_event_id,
-                    "step_index": step_index + 1,
-                    "goal": "incident_after_retry_exhausted",
-                    "reason": "retry_exhausted",
-                    "retry_reason": retry_reason,
-                    "original_capability": original_capability,
-                    "error": error_text,
-                    "failed_url": failed_url,
-                    "failed_method": failed_method,
-                    "http_status": http_status,
-                    "retry_count": retry_count,
-                    "retry_max": retry_max,
-                    "workspace_id": workspace_id,
-                    "run_record_id": run_record_id,
-                },
-                "terminal": False,
-            }
-        )
-
-    # ------------------------------------------------------------
-    # CASE 2: continue flow after successful execution
-    # ------------------------------------------------------------
-    elif goal in ("continue_flow", "complete_flow", "post_http_success"):
-        decision = "continue_flow"
-        reason = "normal_continuation"
-
-        next_commands.append(
-            {
-                "capability": "complete_flow_demo",
-                "priority": req.priority,
-                "input": {
-                    "flow_id": flow_id,
-                    "root_event_id": root_event_id,
-                    "step_index": step_index + 1,
-                    "goal": "complete_flow",
-                    "workspace_id": workspace_id,
-                },
-                "terminal": False,
-            }
-        )
-
-    # ------------------------------------------------------------
-    # CASE 3: explicit escalation_send completion
-    # ------------------------------------------------------------
-    elif goal == "escalation_sent":
-        decision = "complete_after_escalation"
-        reason = "escalation_completed"
-
-        next_commands.append(
-            {
-                "capability": "complete_flow_demo",
-                "priority": req.priority,
-                "input": {
-                    "flow_id": flow_id,
-                    "root_event_id": root_event_id,
-                    "step_index": step_index + 1,
-                    "goal": "complete_flow",
-                    "workspace_id": workspace_id,
-                },
-                "terminal": False,
-            }
-        )
-
-    # ------------------------------------------------------------
-    # CASE 4: HTTP/server-type failure outside retry exhausted
-    # ------------------------------------------------------------
-    elif http_status is not None and http_status >= 500:
-        decision = "route_incident"
-        reason = "server_error"
-
-        next_commands.append(
-            {
-                "capability": "incident_router",
-                "priority": req.priority,
-                "input": {
-                    "flow_id": flow_id,
-                    "root_event_id": root_event_id,
-                    "step_index": step_index + 1,
-                    "goal": "create_incident",
-                    "reason": "server_error",
-                    "retry_reason": retry_reason,
-                    "original_capability": original_capability,
-                    "error": error_text,
-                    "failed_url": failed_url,
-                    "failed_method": failed_method,
-                    "http_status": http_status,
-                    "retry_count": retry_count,
-                    "retry_max": retry_max,
-                    "workspace_id": workspace_id,
-                    "run_record_id": run_record_id,
-                },
-                "terminal": False,
-            }
-        )
-
-    # ------------------------------------------------------------
-    # CASE 5: fallback safe stop
-    # ------------------------------------------------------------
-    else:
-        decision = "safe_stop"
-        reason = "no_matching_rule"
-        terminal = True
-
-    result = {
-        "ok": True,
-        "capability": "decision_router",
-        "status": status,
-        "run_record_id": run_record_id,
-        "workspace_id": workspace_id,
-        "flow_id": flow_id,
-        "root_event_id": root_event_id,
-        "step_index": step_index,
-        "goal": goal,
-        "retry_count": retry_count,
-        "retry_max": retry_max,
-        "retry_reason": retry_reason,
-        "original_capability": original_capability,
-        "http_status": http_status,
-        "error": error_text,
-        "failed_url": failed_url,
-        "failed_method": failed_method,
-        "decision": decision,
-        "reason": reason,
-        "terminal": terminal,
-        "next_commands": next_commands,
-    }
-
-    return result
 
 def capability_incident_create_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     return capability_incident_create(
@@ -6012,13 +5818,11 @@ EVENT_CAPABILITY_ALLOWLIST = {
     "chain_demo",
     "planner_demo",
     "decision_demo",
-    "decision_router",
     "incident_router_v2",
     "retry_router",
     "sla_router",
     "complete_flow_demo",
     "complete_flow",
-    "decision_engine",
     "incident_create",
     "complete_flow_incident",
     "incident_deduplicate",
@@ -6035,7 +5839,6 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "chain_demo",
     "planner_demo",
     "decision_demo",
-    "decision_router",
     "incident_router_v2",
     "retry_router",
     "sla_router",
@@ -6044,7 +5847,6 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "flow_state_get",
     "flow_state_put",
     "flow_state_append_step",
-    "decision_engine",
     "incident_create",
     "complete_flow_incident",
     "incident_deduplicate",
@@ -6181,9 +5983,7 @@ CAPABILITIES = {
     "complete_flow": capability_complete_flow,
     "complete_flow_demo": capability_complete_flow_demo,
     "sla_router": capability_sla_router,
-    "decision_engine": capability_decision_engine,
     "retry_router": capability_retry_router,
-    "decision_router": capability_decision_router,
     "incident_router_v2": capability_incident_router_v2,
     "incident_create": capability_incident_create_wrapped,
     "complete_flow_incident": capability_complete_flow_incident,
