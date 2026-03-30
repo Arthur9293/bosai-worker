@@ -73,28 +73,215 @@ def _extract_input(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "flow_id": _to_str(payload.get("flow_id")),
-        "root_event_id": _to_str(payload.get("root_event_id") or payload.get("event_id")),
-        "parent_command_id": _to_str(payload.get("parent_command_id")),
-        "step_index": _to_int(payload.get("step_index"), 0),
-        "depth": _to_int(payload.get("_depth") or payload.get("depth"), 0),
-        "workspace_id": _to_str(payload.get("workspace_id") or "production"),
-        "run_record_id": _to_str(payload.get("run_record_id")),
+        "flow_id": _to_str(
+            payload.get("flow_id")
+            or payload.get("flowid")
+            or payload.get("flowId")
+            or ""
+        ).strip(),
+        "root_event_id": _to_str(
+            payload.get("root_event_id")
+            or payload.get("rooteventid")
+            or payload.get("rootEventId")
+            or payload.get("event_id")
+            or payload.get("eventid")
+            or payload.get("eventId")
+            or ""
+        ).strip(),
+        "parent_command_id": _to_str(
+            payload.get("parent_command_id")
+            or payload.get("parentcommand_id")
+            or payload.get("parentCommandId")
+            or ""
+        ).strip(),
+        "command_id": _to_str(
+            payload.get("command_id")
+            or payload.get("commandid")
+            or payload.get("commandId")
+            or ""
+        ).strip(),
+        "step_index": _to_int(
+            payload.get("step_index")
+            if payload.get("step_index") is not None
+            else payload.get("stepindex")
+            if payload.get("stepindex") is not None
+            else payload.get("stepIndex"),
+            0,
+        ),
+        "depth": _to_int(
+            payload.get("_depth")
+            if payload.get("_depth") is not None
+            else payload.get("depth"),
+            0,
+        ),
+        "workspace_id": _to_str(
+            payload.get("workspace_id")
+            or payload.get("workspaceid")
+            or payload.get("workspaceId")
+            or "production"
+        ).strip(),
+        "run_record_id": _to_str(
+            payload.get("run_record_id")
+            or payload.get("runrecordid")
+            or payload.get("runRecordId")
+            or payload.get("linked_run")
+            or payload.get("Linked_Run")
+            or ""
+        ).strip(),
+    }
+
+
+def _normalize_decision_block(data: Dict[str, Any]) -> Dict[str, Any]:
+    decision_status = _to_str(
+        data.get("decision_status")
+        or data.get("decisionstatus")
+        or ""
+    ).strip()
+
+    decision_reason = _to_str(
+        data.get("decision_reason")
+        or data.get("decisionreason")
+        or ""
+    ).strip()
+
+    next_action = _to_str(
+        data.get("next_action")
+        or data.get("nextaction")
+        or ""
+    ).strip()
+
+    auto_executable = _to_bool(
+        data.get("auto_executable")
+        if data.get("auto_executable") is not None
+        else data.get("autoexecutable"),
+        False,
+    )
+
+    priority_score = _to_int(
+        data.get("priority_score")
+        if data.get("priority_score") is not None
+        else data.get("priorityscore"),
+        0,
+    )
+
+    severity = _to_str(data.get("severity") or "").strip().lower()
+    category = _to_str(data.get("category") or "").strip().lower()
+    reason = _to_str(data.get("reason") or "").strip().lower()
+    sla_status = _to_str(data.get("sla_status") or "").strip().lower()
+    final_failure = _to_bool(
+        data.get("final_failure")
+        if data.get("final_failure") is not None
+        else data.get("finalfailure"),
+        False,
+    )
+    http_status = _to_int(
+        data.get("http_status")
+        if data.get("http_status") is not None
+        else data.get("httpstatus"),
+        0,
+    )
+
+    if not decision_status:
+        if next_action == "internal_escalate":
+            decision_status = "Escalate"
+        elif next_action == "resolve_incident":
+            decision_status = "Resolved"
+        elif final_failure and (
+            category == "http_failure"
+            or reason == "http_5xx_exhausted"
+            or http_status >= 500
+            or severity in {"high", "critical"}
+            or sla_status == "breached"
+        ):
+            decision_status = "Escalate"
+        elif severity in {"low"}:
+            decision_status = "No_Action"
+        else:
+            decision_status = "Monitor"
+
+    normalized_decision_status = decision_status.strip().lower()
+
+    if not next_action:
+        if normalized_decision_status in {"escalate", "escalated"}:
+            next_action = "internal_escalate"
+        elif normalized_decision_status in {"resolved", "resolve"}:
+            next_action = "resolve_incident"
+        else:
+            next_action = "complete_flow_incident"
+
+    if not auto_executable and next_action in {"internal_escalate", "resolve_incident"}:
+        auto_executable = True
+
+    if priority_score <= 0:
+        if next_action == "internal_escalate":
+            if severity == "critical" or sla_status == "breached":
+                priority_score = 95
+            elif severity == "high":
+                priority_score = 80
+            else:
+                priority_score = 70
+        elif next_action == "resolve_incident":
+            priority_score = 20
+        else:
+            priority_score = 10
+
+    return {
+        "decision_status": decision_status,
+        "decision_reason": decision_reason,
+        "next_action": next_action,
+        "auto_executable": auto_executable,
+        "priority_score": priority_score,
     }
 
 
 def _build_incident_key(data: Dict[str, Any], meta: Dict[str, Any]) -> str:
+    flow_id = _to_str(meta.get("flow_id") or "no_flow").strip()
+    root_event_id = _to_str(meta.get("root_event_id") or "no_root").strip()
+    capability = _to_str(
+        data.get("original_capability")
+        or data.get("failed_capability")
+        or "no_capability"
+    ).strip()
+    method = _to_str(
+        data.get("failed_method")
+        or data.get("method")
+        or "GET"
+    ).upper().strip()
+    target_url = _to_str(
+        data.get("failed_url")
+        or data.get("target_url")
+        or data.get("targeturl")
+        or ""
+    ).strip()
+    http_status = _to_str(data.get("http_status") or data.get("httpstatus") or "0").strip()
+    incident_code = _to_str(
+        data.get("incident_code")
+        or data.get("incidentcode")
+        or "no_incident_code"
+    ).strip().lower()
+    reason = _to_str(
+        data.get("reason")
+        or data.get("decision_reason")
+        or "no_reason"
+    ).strip().lower()
+    final_flag = "final" if _to_bool(
+        data.get("final_failure")
+        if data.get("final_failure") is not None
+        else data.get("finalfailure"),
+        False,
+    ) else "not_final"
+
     return "|".join(
         [
-            _to_str(meta.get("flow_id")),
-            _to_str(meta.get("root_event_id")),
-            _to_str(data.get("original_capability") or data.get("failed_capability")),
-            _to_str(data.get("failed_method") or data.get("method")).upper(),
-            _to_str(data.get("failed_url") or data.get("target_url")),
-            _to_str(data.get("http_status")),
-            _to_str(data.get("incident_code")).lower(),
-            _to_str(data.get("reason")),
-            "final" if _to_bool(data.get("final_failure")) else "not_final",
+            flow_id,
+            root_event_id,
+            capability,
+            method,
+            target_url,
+            http_status,
+            incident_code,
+            reason,
+            final_flag,
         ]
     )
 
@@ -118,6 +305,90 @@ def _find_existing_incident(
     return None
 
 
+def _update_existing_incident_best_effort(
+    *,
+    airtable_update,
+    incidents_table_name: str,
+    existing_id: str,
+    meta: Dict[str, Any],
+    data: Dict[str, Any],
+) -> Dict[str, Any]:
+    now_ts = _now_ts()
+
+    run_record_id = _to_str(meta.get("run_record_id") or "").strip()
+    parent_command_id = _to_str(
+        meta.get("parent_command_id")
+        or data.get("parent_command_id")
+        or data.get("parentcommandid")
+        or ""
+    ).strip()
+
+    linked_run = [run_record_id] if run_record_id.startswith("rec") else []
+    linked_command = [parent_command_id] if parent_command_id.startswith("rec") else []
+
+    attempts: List[Dict[str, Any]] = [
+        {
+            "Last_Seen_At": now_ts,
+            "Updated_At": now_ts,
+            "Occurrences_Count": 1,
+            "Run_Record_ID": run_record_id,
+            "Linked_Run": linked_run,
+            "Command_ID": parent_command_id,
+            "Linked_Command": linked_command,
+            "Flow_ID": _to_str(meta.get("flow_id") or "").strip(),
+            "Root_Event_ID": _to_str(meta.get("root_event_id") or "").strip(),
+            "Payload_JSON": _safe_json(data),
+        },
+        {
+            "Last_Seen_At": now_ts,
+            "Updated_At": now_ts,
+            "Run_Record_ID": run_record_id,
+            "Command_ID": parent_command_id,
+            "Flow_ID": _to_str(meta.get("flow_id") or "").strip(),
+            "Root_Event_ID": _to_str(meta.get("root_event_id") or "").strip(),
+        },
+        {
+            "Last_Seen_At": now_ts,
+            "Updated_At": now_ts,
+        },
+    ]
+
+    results: List[Dict[str, Any]] = []
+    seen = set()
+
+    for fields in attempts:
+        clean_fields = {
+            k: v for k, v in fields.items()
+            if v not in ("", None, [])
+        }
+        signature = tuple(sorted(clean_fields.keys()))
+        if not clean_fields or signature in seen:
+            continue
+        seen.add(signature)
+
+        try:
+            res = airtable_update(incidents_table_name, existing_id, clean_fields)
+            results.append({"ok": True, "fields": clean_fields, "response": res})
+            return {
+                "ok": True,
+                "fields": clean_fields,
+                "attempts": results,
+            }
+        except Exception as exc:
+            results.append(
+                {
+                    "ok": False,
+                    "fields": clean_fields,
+                    "error": repr(exc),
+                }
+            )
+
+    return {
+        "ok": False,
+        "attempts": results,
+    }
+
+
 def run(
     req: Optional[Any] = None,
     run_record_id: str = "",
@@ -127,7 +398,6 @@ def run(
     incidents_table_name: str,
     **kwargs: Any,
 ) -> Dict[str, Any]:
-
     payload = getattr(req, "input", {}) if hasattr(req, "input") else req or {}
     data = _extract_input(payload)
     meta = _extract_meta(data)
@@ -141,7 +411,8 @@ def run(
             "terminal": True,
         }
 
-    incident_key = _to_str(data.get("incident_key")) or _build_incident_key(data, meta)
+    decision_block = _normalize_decision_block(data)
+    incident_key = _to_str(data.get("incident_key")).strip() or _build_incident_key(data, meta)
 
     existing = _find_existing_incident(
         incidents_table_name,
@@ -149,22 +420,63 @@ def run(
         airtable_list_filtered,
     )
 
-    # =========================
-    # ✅ INCIDENT EXISTE → STOP LOOP
-    # =========================
     if existing:
-        existing_id = _to_str(existing.get("id"))
+        existing_id = _to_str(existing.get("id")).strip()
 
-        try:
-            airtable_update(
-                incidents_table_name,
-                existing_id,
+        update_res = _update_existing_incident_best_effort(
+            airtable_update=airtable_update,
+            incidents_table_name=incidents_table_name,
+            existing_id=existing_id,
+            meta=meta,
+            data=data,
+        )
+
+        next_input = {
+            **data,
+            "incident_record_id": existing_id,
+            "incident_key": incident_key,
+            "deduplicate_action": "existing_found",
+            "step_index": _to_int(meta.get("step_index"), 0) + 1,
+            "_depth": depth + 1,
+            "run_record_id": _to_str(meta.get("run_record_id") or run_record_id).strip(),
+            "parent_command_id": _to_str(
+                meta.get("parent_command_id")
+                or data.get("parent_command_id")
+                or ""
+            ).strip(),
+            "decision_status": decision_block["decision_status"],
+            "decision_reason": decision_block["decision_reason"],
+            "next_action": decision_block["next_action"],
+            "auto_executable": decision_block["auto_executable"],
+            "priority_score": decision_block["priority_score"],
+        }
+
+        next_commands: List[Dict[str, Any]] = []
+
+        if decision_block["next_action"] == "internal_escalate":
+            next_commands.append(
                 {
-                    "Last_Seen_At": _now_ts(),
-                },
+                    "capability": "internal_escalate",
+                    "priority": 1,
+                    "input": next_input,
+                }
             )
-        except Exception:
-            pass
+        elif decision_block["next_action"] == "resolve_incident":
+            next_commands.append(
+                {
+                    "capability": "resolve_incident",
+                    "priority": 1,
+                    "input": next_input,
+                }
+            )
+        else:
+            next_commands.append(
+                {
+                    "capability": "complete_flow_incident",
+                    "priority": 1,
+                    "input": next_input,
+                }
+            )
 
         return {
             "ok": True,
@@ -172,31 +484,69 @@ def run(
             "status": "done",
             "incident_exists": True,
             "incident_record_id": existing_id,
-            "action": "noop",
-            "next_commands": [],  # 🔥 STOP CRITIQUE
-            "terminal": True,    # 🔥 STOP CRITIQUE
+            "incident_key": incident_key,
+            "action": "reuse_existing",
+            "decision_status": decision_block["decision_status"],
+            "decision_reason": decision_block["decision_reason"],
+            "next_action": decision_block["next_action"],
+            "auto_executable": decision_block["auto_executable"],
+            "priority_score": decision_block["priority_score"],
+            "update_ok": bool(update_res.get("ok")),
+            "update_res": update_res,
+            "next_commands": next_commands,
+            "terminal": False,
+            "spawn_summary": {
+                "ok": True,
+                "spawned": len(next_commands),
+                "skipped": 0,
+                "errors": [],
+            },
         }
 
-    # =========================
-    # ❌ NO INCIDENT → CREATE
-    # =========================
+    create_input = {
+        **data,
+        "incident_key": incident_key,
+        "deduplicate_action": "create_new",
+        "_depth": depth + 1,
+        "step_index": _to_int(meta.get("step_index"), 0) + 1,
+        "run_record_id": _to_str(meta.get("run_record_id") or run_record_id).strip(),
+        "parent_command_id": _to_str(
+            meta.get("parent_command_id")
+            or data.get("parent_command_id")
+            or ""
+        ).strip(),
+        "decision_status": decision_block["decision_status"],
+        "decision_reason": decision_block["decision_reason"],
+        "next_action": decision_block["next_action"],
+        "auto_executable": decision_block["auto_executable"],
+        "priority_score": decision_block["priority_score"],
+    }
+
     return {
         "ok": True,
         "capability": "incident_deduplicate",
         "status": "done",
         "incident_exists": False,
+        "incident_record_id": "",
+        "incident_key": incident_key,
         "action": "create_new",
+        "decision_status": decision_block["decision_status"],
+        "decision_reason": decision_block["decision_reason"],
+        "next_action": decision_block["next_action"],
+        "auto_executable": decision_block["auto_executable"],
+        "priority_score": decision_block["priority_score"],
         "next_commands": [
             {
                 "capability": "incident_create",
                 "priority": 1,
-                "input": {
-                    **data,
-                    "incident_key": incident_key,
-                    "_depth": depth + 1,
-                    "step_index": _to_int(meta.get("step_index"), 0) + 1,
-                },
+                "input": create_input,
             }
         ],
         "terminal": False,
+        "spawn_summary": {
+            "ok": True,
+            "spawned": 1,
+            "skipped": 0,
+            "errors": [],
+        },
     }
