@@ -53,10 +53,6 @@ def _safe_json(value: Any) -> str:
         return "{}"
 
 
-def _safe_dict(value: Any) -> Dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
 def _extract_input(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
@@ -263,6 +259,7 @@ def _normalize_decision_block(data: Dict[str, Any]) -> Dict[str, Any]:
         "auto_executable": auto_executable,
         "priority_score": priority_score,
     }
+
 
 def _build_incident_key(data: Dict[str, Any], meta: Dict[str, Any]) -> str:
     flow_id = _to_str(meta.get("flow_id") or "no_flow").strip()
