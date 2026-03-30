@@ -41,6 +41,36 @@ def _to_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def _to_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(value)
+    except Exception:
+        return default
+
+
+def _extract_input(req: Any) -> Dict[str, Any]:
+    if req is not None and hasattr(req, "input"):
+        payload = getattr(req, "input", {}) or {}
+    elif isinstance(req, dict):
+        payload = req
+    else:
+        payload = {}
+
+    if not isinstance(payload, dict):
+        return {}
+
+    for key in ("input", "command_input", "incident"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            merged = dict(payload)
+            merged.update(nested)
+            return merged
+
+    return dict(payload)
+
+
 def _try_update_one(
     airtable_update,
     table_name: str,
@@ -64,10 +94,13 @@ def _best_effort_update_logs_error(
     log_record_id: str,
     escalation_result: Dict[str, Any],
 ) -> Dict[str, Any]:
+    if not log_record_id:
+        return {"ok": False, "reason": "missing_log_record_id"}
+
     result_json = _safe_json(escalation_result)
 
     attempts: List[Dict[str, Any]] = [
-        {"Result_JSON": result_json}
+        {"Result_JSON": result_json},
     ]
 
     results: List[Dict[str, Any]] = []
@@ -187,32 +220,58 @@ def capability_internal_escalate(
     logs_errors_table_name,
     incidents_table_name=None,
 ):
-    if req is not None and hasattr(req, "input"):
-        payload = getattr(req, "input", {}) or {}
-    elif isinstance(req, dict):
-        payload = req
-    else:
-        payload = {}
+    payload = _extract_input(req)
 
-    flow_id = _to_str(payload.get("flow_id")).strip()
+    flow_id = _to_str(
+        payload.get("flow_id")
+        or payload.get("flowid")
+        or payload.get("flowId")
+        or ""
+    ).strip()
 
     root_event_id = _to_str(
         payload.get("root_event_id")
+        or payload.get("rooteventid")
+        or payload.get("rootEventId")
         or payload.get("event_id")
+        or payload.get("eventid")
+        or payload.get("eventId")
         or payload.get("id")
-    ).strip()
-
-    log_record_id = _to_str(
-        payload.get("log_record_id")
-        or payload.get("run_record_id")
-        or payload.get("incident_record_id")
-        or run_record_id
+        or ""
     ).strip()
 
     incident_record_id = _to_str(
         payload.get("incident_record_id")
         or payload.get("incidentrecordid")
         or payload.get("Incident_Record_ID")
+        or ""
+    ).strip()
+
+    log_record_id = _to_str(
+        payload.get("log_record_id")
+        or payload.get("logrecordid")
+        or payload.get("Log_Record_ID")
+        or ""
+    ).strip()
+
+    effective_run_record_id = _to_str(
+        run_record_id
+        or payload.get("run_record_id")
+        or payload.get("runrecordid")
+        or payload.get("runRecordId")
+        or payload.get("linked_run")
+        or payload.get("Linked_Run")
+        or ""
+    ).strip()
+
+    parent_command_id = _to_str(
+        payload.get("parent_command_id")
+        or payload.get("parentcommandid")
+        or payload.get("parentCommandId")
+        or payload.get("command_id")
+        or payload.get("commandid")
+        or payload.get("commandId")
+        or ""
     ).strip()
 
     reason = _to_str(payload.get("reason"), "internal_escalation")
@@ -226,30 +285,22 @@ def capability_internal_escalate(
     )
     sla_status = _to_str(payload.get("sla_status"))
     final_failure = _to_bool(payload.get("final_failure"), False)
-    parent_command_id = _to_str(payload.get("parent_command_id")).strip()
 
     workspace_id = _to_str(
         payload.get("workspace_id")
         or payload.get("Workspace_ID")
         or payload.get("workspaceId")
         or "production"
-    )
+    ).strip()
 
-    if not flow_id and log_record_id:
-        flow_id = f"flow_internal_escalate_{log_record_id}"
+    if not flow_id:
+        if incident_record_id:
+            flow_id = f"flow_{incident_record_id}"
+        elif log_record_id:
+            flow_id = f"flow_internal_escalate_{log_record_id}"
 
     if not root_event_id:
         root_event_id = flow_id
-
-    if not log_record_id:
-        return {
-            "ok": False,
-            "error": "missing_log_record_id",
-            "flow_id": flow_id,
-            "root_event_id": root_event_id,
-            "run_record_id": run_record_id,
-            "terminal": True,
-        }
 
     escalation_result = {
         "ok": True,
@@ -266,7 +317,7 @@ def capability_internal_escalate(
         "final_failure": final_failure,
         "incident_record_id": incident_record_id,
         "log_record_id": log_record_id,
-        "run_record_id": run_record_id,
+        "run_record_id": effective_run_record_id,
         "flow_id": flow_id,
         "root_event_id": root_event_id,
         "workspace_id": workspace_id,
@@ -276,46 +327,73 @@ def capability_internal_escalate(
 
     logs_update_res: Dict[str, Any] = {"ok": False, "skipped": True}
     try:
-        print("[INTERNAL_ESCALATE] log_record_id =", log_record_id)
+        if log_record_id:
+            print("[INTERNAL_ESCALATE] log_record_id =", log_record_id)
 
-        logs_update_res = _best_effort_update_logs_error(
-            airtable_update=airtable_update,
-            logs_errors_table_name=logs_errors_table_name,
-            log_record_id=log_record_id,
-            escalation_result=escalation_result,
-        )
-
-        if not logs_update_res.get("ok"):
-            print(
-                "[INTERNAL_ESCALATE] logs_errors update skipped =",
-                _safe_json(logs_update_res),
+            logs_update_res = _best_effort_update_logs_error(
+                airtable_update=airtable_update,
+                logs_errors_table_name=logs_errors_table_name,
+                log_record_id=log_record_id,
+                escalation_result=escalation_result,
             )
 
+            if not logs_update_res.get("ok"):
+                print(
+                    "[INTERNAL_ESCALATE] logs_errors update skipped =",
+                    _safe_json(logs_update_res),
+                )
+        else:
+            logs_update_res = {"ok": False, "reason": "missing_log_record_id"}
     except Exception as e:
         logs_update_res = {"ok": False, "error": repr(e)}
         print("[INTERNAL_ESCALATE] logs_errors exception =", repr(e))
 
     incident_update_res: Dict[str, Any] = {"ok": False, "skipped": True}
     try:
-        if incidents_table_name:
+        if incidents_table_name and incident_record_id:
             incident_update_res = _best_effort_update_incident(
                 airtable_update=airtable_update,
                 incidents_table_name=incidents_table_name,
                 incident_record_id=incident_record_id,
-                run_record_id=run_record_id,
+                run_record_id=effective_run_record_id,
                 flow_id=flow_id,
                 root_event_id=root_event_id,
                 parent_command_id=parent_command_id,
                 workspace_id=workspace_id,
             )
-        else:
+        elif not incidents_table_name:
             incident_update_res = {
                 "ok": False,
                 "reason": "missing_incidents_table_name",
             }
+        else:
+            incident_update_res = {
+                "ok": False,
+                "reason": "missing_incident_record_id",
+            }
     except Exception as e:
         incident_update_res = {"ok": False, "error": repr(e)}
         print("[INTERNAL_ESCALATE] incident update exception =", repr(e))
+
+    next_input = {
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "incident_record_id": incident_record_id,
+        "log_record_id": log_record_id,
+        "step_index": _to_int(payload.get("step_index"), 0) + 1,
+        "goal": "escalation_sent",
+        "workspace_id": workspace_id,
+        "parent_command_id": parent_command_id,
+        "command_id": parent_command_id,
+        "severity": severity,
+        "final_failure": final_failure,
+        "failed_url": failed_url,
+        "http_status": http_status,
+        "run_record_id": effective_run_record_id,
+        "decision_status": "Escalated",
+        "decision_reason": "internal_escalation_sent",
+        "next_action": "complete_flow_incident",
+    }
 
     return {
         "ok": True,
@@ -326,7 +404,7 @@ def capability_internal_escalate(
         "incident_record_id": incident_record_id,
         "log_record_id": log_record_id,
         "message": "internal_escalation_sent",
-        "run_record_id": run_record_id,
+        "run_record_id": effective_run_record_id,
         "logs_update_ok": bool(logs_update_res.get("ok")),
         "incident_update_ok": bool(incident_update_res.get("ok")),
         "incident_update_res": incident_update_res,
@@ -334,19 +412,7 @@ def capability_internal_escalate(
             {
                 "capability": "complete_flow_incident",
                 "priority": 1,
-                "input": {
-                    "flow_id": flow_id,
-                    "root_event_id": root_event_id,
-                    "incident_record_id": incident_record_id,
-                    "step_index": int(payload.get("step_index") or 0) + 1,
-                    "goal": "escalation_sent",
-                    "workspace_id": workspace_id,
-                    "parent_command_id": parent_command_id,
-                    "severity": severity,
-                    "final_failure": final_failure,
-                    "failed_url": failed_url,
-                    "http_status": http_status,
-                },
+                "input": next_input,
             }
         ],
         "terminal": False,
