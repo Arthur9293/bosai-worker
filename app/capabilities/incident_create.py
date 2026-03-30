@@ -377,6 +377,22 @@ def run(
     if not effective_root_event_id:
         effective_root_event_id = effective_flow_id
 
+    decision_status = _to_str(data.get("decision_status") or "").strip()
+    decision_reason = _to_str(data.get("decision_reason") or "").strip()
+    next_action = _to_str(data.get("next_action") or "").strip()
+    auto_executable = _to_bool(
+        data.get("auto_executable")
+        if data.get("auto_executable") is not None
+        else data.get("autoexecutable"),
+        False,
+    )
+    priority_score = _to_int(
+        data.get("priority_score")
+        if data.get("priority_score") is not None
+        else data.get("priorityscore"),
+        0,
+    )
+
     next_input = {
         "flow_id": effective_flow_id,
         "root_event_id": effective_root_event_id,
@@ -385,11 +401,17 @@ def run(
         "workspace_id": meta.get("workspace_id", ""),
         "tenant_id": meta.get("tenant_id", ""),
         "app_name": meta.get("app_name", ""),
-        "goal": "incident_escalation",
+        "goal": _to_str(data.get("goal") or "incident_created"),
         "decision": _to_str(data.get("decision") or ""),
+        "decision_status": decision_status,
+        "decision_reason": decision_reason,
+        "next_action": next_action,
+        "auto_executable": auto_executable,
+        "priority_score": priority_score,
         "reason": _to_str(data.get("reason") or "incident_created"),
         "severity": _to_str(data.get("severity") or "medium"),
         "category": _to_str(data.get("category") or "unknown_incident"),
+        "sla_status": _to_str(data.get("sla_status") or ""),
         "error": error_message,
         "error_message": error_message,
         "incident_code": _to_str(
@@ -459,8 +481,38 @@ def run(
         "linked_command": effective_command_id,
         "incident_key": incident_key,
         "deduplicate_action": deduplicate_action,
-        "parent_command_id": effective_command_id,
+        "parent_command_id": parent_command_id or effective_command_id,
     }
+
+    next_commands = []
+
+    if auto_executable and next_action == "internal_escalate":
+        next_commands.append(
+            {
+                "capability": "internal_escalate",
+                "priority": 1,
+                "input": next_input,
+            }
+        )
+    elif auto_executable and next_action == "resolve_incident":
+        next_commands.append(
+            {
+                "capability": "resolve_incident",
+                "priority": 1,
+                "input": next_input,
+            }
+        )
+    else:
+        next_commands.append(
+            {
+                "capability": "complete_flow_incident",
+                "priority": 1,
+                "input": {
+                    **next_input,
+                    "goal": _to_str(data.get("goal") or "incident_created"),
+                },
+            }
+        )
 
     return {
         "ok": True,
@@ -472,17 +524,16 @@ def run(
         "message": "incident_created",
         "run_record_id": effective_run_record_id,
         "command_id": effective_command_id,
-        "next_commands": [
-            {
-                "capability": "internal_escalate",
-                "priority": 1,
-                "input": next_input,
-            }
-        ],
+        "decision_status": decision_status,
+        "decision_reason": decision_reason,
+        "next_action": next_action,
+        "auto_executable": auto_executable,
+        "priority_score": priority_score,
+        "next_commands": next_commands,
         "terminal": False,
         "spawn_summary": {
             "ok": True,
-            "spawned": 1,
+            "spawned": len(next_commands),
             "skipped": 0,
             "errors": [],
         },
