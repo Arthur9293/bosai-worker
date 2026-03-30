@@ -184,20 +184,51 @@ def _normalize_decision_block(data: Dict[str, Any]) -> Dict[str, Any]:
     if not decision_status:
         if next_action == "internal_escalate":
             decision_status = "Escalate"
+            if not decision_reason:
+                decision_reason = "explicit_internal_escalate"
+
         elif next_action == "resolve_incident":
             decision_status = "Resolved"
+            if not decision_reason:
+                decision_reason = "explicit_resolve_incident"
+
+        elif (
+            not final_failure
+            and severity in {"low", "medium"}
+            and sla_status != "breached"
+        ):
+            decision_status = "Resolved"
+            next_action = "resolve_incident"
+            auto_executable = True
+            if not decision_reason:
+                decision_reason = "auto_resolve_non_final_low_or_medium"
+
         elif final_failure and (
             category == "http_failure"
-            or reason == "http_5xx_exhausted"
+            or reason in {"http_5xx_exhausted", "http_status_error", "forbidden_host"}
             or http_status >= 500
             or severity in {"high", "critical"}
             or sla_status == "breached"
         ):
             decision_status = "Escalate"
-        elif severity in {"low"}:
+            next_action = "internal_escalate"
+            auto_executable = True
+            if not decision_reason:
+                decision_reason = "escalate_final_failure_or_severe"
+
+        elif severity == "low":
             decision_status = "No_Action"
+            if not next_action:
+                next_action = "complete_flow_incident"
+            if not decision_reason:
+                decision_reason = "low_severity_no_action"
+
         else:
             decision_status = "Monitor"
+            if not next_action:
+                next_action = "complete_flow_incident"
+            if not decision_reason:
+                decision_reason = "default_monitor"
 
     normalized_decision_status = decision_status.strip().lower()
 
@@ -232,7 +263,6 @@ def _normalize_decision_block(data: Dict[str, Any]) -> Dict[str, Any]:
         "auto_executable": auto_executable,
         "priority_score": priority_score,
     }
-
 
 def _build_incident_key(data: Dict[str, Any], meta: Dict[str, Any]) -> str:
     flow_id = _to_str(meta.get("flow_id") or "no_flow").strip()
