@@ -7546,6 +7546,18 @@ def get_incidents(flow_id: str = Query(default="")):
                 or f.get("reason")
             )
 
+            resolution_note = (
+                f.get("Resolution_Note")
+                or f.get("resolution_note")
+                or f.get("resolutionNote")
+            )
+
+            last_action = (
+                f.get("Last_Action")
+                or f.get("last_action")
+                or f.get("lastAction")
+            )
+
             sla_remaining_minutes = (
                 f.get("SLA_Remaining_Minutes")
                 or f.get("SLA remaining minutes")
@@ -7575,6 +7587,8 @@ def get_incidents(flow_id: str = Query(default="")):
                     "root_event_id": root_event_id,
                     "category": category,
                     "reason": reason,
+                    "resolution_note": resolution_note,
+                    "last_action": last_action,
                     "created_at": created_at,
                     "updated_at": updated_at,
                     "opened_at": opened_at,
