@@ -7550,12 +7550,27 @@ def get_incidents(flow_id: str = Query(default="")):
                 f.get("Resolution_Note")
                 or f.get("resolution_note")
                 or f.get("resolutionNote")
+                or f.get("Resolution Note")
             )
 
             last_action = (
                 f.get("Last_Action")
                 or f.get("last_action")
                 or f.get("lastAction")
+                or f.get("Last Action")
+            )
+
+            error_id = (
+                f.get("Error_ID")
+                or f.get("error_id")
+                or f.get("Incident_Code")
+                or f.get("incident_code")
+                or f.get("Error Code")
+            )
+
+            worker = (
+                f.get("Worker")
+                or f.get("worker")
             )
 
             sla_remaining_minutes = (
@@ -7587,6 +7602,7 @@ def get_incidents(flow_id: str = Query(default="")):
                     "root_event_id": root_event_id,
                     "category": category,
                     "reason": reason,
+                    "error_id": error_id,
                     "resolution_note": resolution_note,
                     "last_action": last_action,
                     "created_at": created_at,
@@ -7594,22 +7610,24 @@ def get_incidents(flow_id: str = Query(default="")):
                     "opened_at": opened_at,
                     "resolved_at": resolved_at,
                     "source": "Incidents",
-                    "worker": f.get("Worker"),
+                    "worker": worker,
                 }
             )
 
-            normalized_status = status.lower()
-            normalized_severity = severity.lower()
+            normalized_status = status.lower().strip()
+            normalized_severity = severity.lower().strip()
 
-            if normalized_status in ("open", "opened", "new", "active", "en cours"):
-                stats["open"] += 1
-            elif normalized_status in ("resolved", "closed", "done", "résolu"):
+            if resolved_at:
+                stats["resolved"] += 1
+            elif normalized_status in ("resolved", "closed", "done", "résolu", "resolve"):
                 stats["resolved"] += 1
             elif normalized_status in ("escalated", "escalade", "escaladé"):
                 stats["warning"] += 1
-            elif normalized_severity in ("critical", "critique", "high"):
+            elif normalized_status in ("open", "opened", "new", "active", "en cours"):
+                stats["open"] += 1
+            elif normalized_severity in ("critical", "critique"):
                 stats["critical"] += 1
-            elif normalized_severity in ("warning", "warn", "medium", "surveillance", "moyen"):
+            elif normalized_severity in ("high", "warning", "warn", "medium", "surveillance", "moyen"):
                 stats["warning"] += 1
             else:
                 stats["other"] += 1
