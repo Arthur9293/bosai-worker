@@ -4,9 +4,6 @@ import time
 from typing import Any, Dict, Optional
 
 
-DEFAULT_MAX_DEPTH = 8
-
-
 def _now_ts() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -18,31 +15,6 @@ def _to_str(value: Any, default: str = "") -> str:
         return str(value)
     except Exception:
         return default
-
-
-def _to_int(value: Any, default: int = 0) -> int:
-    try:
-        if value is None or value == "":
-            return default
-        return int(value)
-    except Exception:
-        return default
-
-
-def _to_bool(value: Any, default: bool = False) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return default
-    if isinstance(value, (int, float)):
-        return bool(value)
-
-    text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "y", "on"}:
-        return True
-    if text in {"0", "false", "no", "n", "off"}:
-        return False
-    return default
 
 
 def _extract_input(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -57,86 +29,6 @@ def _extract_input(payload: Dict[str, Any]) -> Dict[str, Any]:
             return merged
 
     return dict(payload)
-
-
-def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "flow_id": _to_str(
-            payload.get("flow_id")
-            or payload.get("flowid")
-            or payload.get("flowId")
-            or ""
-        ).strip(),
-        "root_event_id": _to_str(
-            payload.get("root_event_id")
-            or payload.get("rooteventid")
-            or payload.get("rootEventId")
-            or payload.get("event_id")
-            or payload.get("eventid")
-            or payload.get("eventId")
-            or ""
-        ).strip(),
-        "parent_command_id": _to_str(
-            payload.get("parent_command_id")
-            or payload.get("parentcommand_id")
-            or payload.get("parentCommandId")
-            or ""
-        ).strip(),
-        "command_id": _to_str(
-            payload.get("command_id")
-            or payload.get("commandid")
-            or payload.get("commandId")
-            or payload.get("parent_command_id")
-            or payload.get("parentcommand_id")
-            or payload.get("parentCommandId")
-            or ""
-        ).strip(),
-        "run_record_id": _to_str(
-            payload.get("run_record_id")
-            or payload.get("runrecordid")
-            or payload.get("runRecordId")
-            or payload.get("linked_run")
-            or payload.get("Linked_Run")
-            or payload.get("run_id")
-            or payload.get("runid")
-            or payload.get("runId")
-            or ""
-        ).strip(),
-        "workspace_id": _to_str(
-            payload.get("workspace_id")
-            or payload.get("workspaceid")
-            or payload.get("workspaceId")
-            or "production"
-        ).strip(),
-        "tenant_id": _to_str(
-            payload.get("tenant_id")
-            or payload.get("tenantid")
-            or payload.get("tenantId")
-            or ""
-        ).strip(),
-        "app_name": _to_str(
-            payload.get("app_name")
-            or payload.get("appname")
-            or payload.get("appName")
-            or ""
-        ).strip(),
-        "step_index": _to_int(
-            payload.get("step_index")
-            if payload.get("step_index") is not None
-            else payload.get("stepindex")
-            if payload.get("stepindex") is not None
-            else payload.get("stepIndex"),
-            0,
-        ),
-        "depth": _to_int(
-            payload.get("depth")
-            if payload.get("depth") is not None
-            else payload.get("_depth")
-            if payload.get("_depth") is not None
-            else 0,
-            0,
-        ),
-    }
 
 
 def _pick_incident_record_id(data: Dict[str, Any]) -> str:
@@ -158,8 +50,7 @@ def _pick_resolution_note(data: Dict[str, Any]) -> str:
         or data.get("Resolution_Note")
         or data.get("note")
         or data.get("resolution")
-        or data.get("message")
-        or "Incident resolved by BOSAI"
+        or "Auto-resolved by BOSAI"
     ).strip()
 
 
@@ -179,7 +70,7 @@ def _best_effort_update_incident(
             for k, v in full_fields.items()
             if k in {
                 "Status_select",
-                "Resolved_At",
+                "Closed_At",
                 "Resolution_Note",
                 "Last_Action",
                 "Last_Seen_At",
@@ -191,25 +82,29 @@ def _best_effort_update_incident(
             for k, v in full_fields.items()
             if k in {
                 "Status_select",
-                "Resolved_At",
+                "Closed_At",
                 "Updated_At",
             }
+        },
+        {
+            "Status_select": "Resolved",
         },
     ]
 
     seen = set()
 
     for fields in candidate_payloads:
-        signature = tuple(sorted(fields.keys()))
-        if not fields or signature in seen:
+        clean_fields = {k: v for k, v in fields.items() if v not in ("", None, [])}
+        signature = tuple(sorted(clean_fields.keys()))
+        if not clean_fields or signature in seen:
             continue
         seen.add(signature)
 
         try:
-            res = airtable_update(incidents_table_name, incident_record_id, fields)
+            res = airtable_update(incidents_table_name, incident_record_id, clean_fields)
             return {
                 "ok": True,
-                "fields": fields,
+                "fields": clean_fields,
                 "response": res,
                 "attempts": attempts,
             }
@@ -217,7 +112,7 @@ def _best_effort_update_incident(
             attempts.append(
                 {
                     "ok": False,
-                    "fields": fields,
+                    "fields": clean_fields,
                     "error": repr(exc),
                 }
             )
@@ -244,44 +139,16 @@ def run(
         payload = {}
 
     data = _extract_input(payload)
-    meta = _extract_meta(data)
 
-    depth = _to_int(meta.get("depth"), 0)
-    if depth >= DEFAULT_MAX_DEPTH:
-        return {
-            "ok": False,
-            "error": "max_depth_reached",
-            "flow_id": meta.get("flow_id", ""),
-            "root_event_id": meta.get("root_event_id", ""),
-            "run_record_id": meta.get("run_record_id", "") or run_record_id,
-            "terminal": True,
-            "spawn_summary": {
-                "ok": True,
-                "spawned": 0,
-                "skipped": 0,
-                "errors": [],
-            },
-        }
-
-    effective_flow_id = _to_str(meta.get("flow_id", "")).strip()
-    effective_root_event_id = _to_str(meta.get("root_event_id", "")).strip()
-    effective_run_record_id = _to_str(
-        run_record_id
-        or meta.get("run_record_id")
-        or data.get("run_record_id")
-        or data.get("runrecordid")
-        or data.get("linked_run")
-        or data.get("Linked_Run")
-        or ""
-    ).strip()
-    effective_command_id = _to_str(
-        meta.get("command_id")
-        or data.get("command_id")
+    flow_id = _to_str(data.get("flow_id")).strip()
+    root_event_id = _to_str(data.get("root_event_id")).strip()
+    command_id = _to_str(
+        data.get("command_id")
         or data.get("commandid")
         or data.get("commandId")
-        or meta.get("parent_command_id")
         or data.get("parent_command_id")
         or data.get("parentcommandid")
+        or data.get("parentCommandId")
         or ""
     ).strip()
 
@@ -289,10 +156,11 @@ def run(
     if not incident_record_id:
         return {
             "ok": False,
+            "capability": "resolve_incident",
             "error": "missing_incident_record_id",
-            "flow_id": effective_flow_id,
-            "root_event_id": effective_root_event_id,
-            "run_record_id": effective_run_record_id,
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
+            "run_record_id": run_record_id,
             "terminal": True,
             "spawn_summary": {
                 "ok": True,
@@ -304,33 +172,18 @@ def run(
 
     now_ts = _now_ts()
     resolution_note = _pick_resolution_note(data)
-    auto_resolve = _to_bool(
-        data.get("auto_resolve")
-        if data.get("auto_resolve") is not None
-        else data.get("autoresolve"),
-        True,
-    )
-
-    severity = _to_str(data.get("severity") or "medium").strip()
-    final_failure = _to_bool(
-        data.get("final_failure")
-        if data.get("final_failure") is not None
-        else data.get("finalfailure"),
-        False,
-    )
 
     incident_update_fields = {
         "Status_select": "Resolved",
-        "Resolved_At": now_ts,
+        "Closed_At": now_ts,
         "Resolution_Note": resolution_note,
         "Last_Action": "resolve_incident",
         "Last_Seen_At": now_ts,
         "Updated_At": now_ts,
-        "Run_Record_ID": effective_run_record_id,
-        "Command_ID": effective_command_id,
-        "Flow_ID": effective_flow_id,
-        "Root_Event_ID": effective_root_event_id,
-        "Workspace_ID": _to_str(meta.get("workspace_id", "")).strip(),
+        "Run_Record_ID": _to_str(run_record_id).strip(),
+        "Command_ID": command_id,
+        "Flow_ID": flow_id,
+        "Root_Event_ID": root_event_id,
     }
 
     incident_update_res = _best_effort_update_incident(
@@ -343,11 +196,12 @@ def run(
     if not incident_update_res.get("ok"):
         return {
             "ok": False,
+            "capability": "resolve_incident",
             "error": "incident_update_failed",
-            "flow_id": effective_flow_id,
-            "root_event_id": effective_root_event_id,
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
             "incident_record_id": incident_record_id,
-            "run_record_id": effective_run_record_id,
+            "run_record_id": run_record_id,
             "incident_update_res": incident_update_res,
             "terminal": True,
             "spawn_summary": {
@@ -358,51 +212,24 @@ def run(
             },
         }
 
-    next_input = {
-        "flow_id": effective_flow_id,
-        "root_event_id": effective_root_event_id,
-        "incident_record_id": incident_record_id,
-        "step_index": _to_int(meta.get("step_index"), 0) + 1,
-        "_depth": depth + 1,
-        "workspace_id": meta.get("workspace_id", ""),
-        "tenant_id": meta.get("tenant_id", ""),
-        "app_name": meta.get("app_name", ""),
-        "parent_command_id": effective_command_id,
-        "severity": severity,
-        "final_failure": final_failure,
-        "goal": "incident_resolved",
-        "decision": "resolved",
-        "auto_resolve": auto_resolve,
-        "resolution_note": resolution_note,
-        "run_record_id": effective_run_record_id,
-        "command_id": effective_command_id,
-    }
-
     return {
         "ok": True,
         "capability": "resolve_incident",
         "status": "done",
-        "flow_id": effective_flow_id,
-        "root_event_id": effective_root_event_id,
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
         "incident_record_id": incident_record_id,
-        "run_record_id": effective_run_record_id,
-        "command_id": effective_command_id,
-        "auto_resolve": auto_resolve,
+        "run_record_id": run_record_id,
+        "command_id": command_id,
         "resolved_at": now_ts,
         "resolution_note": resolution_note,
         "incident_update_ok": True,
         "incident_update_res": incident_update_res,
-        "next_commands": [
-            {
-                "capability": "complete_flow_incident",
-                "priority": 1,
-                "input": next_input,
-            }
-        ],
-        "terminal": False,
+        "next_commands": [],
+        "terminal": True,
         "spawn_summary": {
             "ok": True,
-            "spawned": 1,
+            "spawned": 0,
             "skipped": 0,
             "errors": [],
         },
