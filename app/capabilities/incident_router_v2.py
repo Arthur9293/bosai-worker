@@ -1,5 +1,3 @@
-# app/capabilities/incident_router_v2.py
-
 from __future__ import annotations
 
 import time
@@ -282,6 +280,10 @@ def _normalize_severity(data: Dict[str, Any]) -> str:
 
 
 def _normalize_event(data: Dict[str, Any]) -> Dict[str, Any]:
+    category = _normalize_category(data)
+    reason = _normalize_reason(data)
+    severity = _normalize_severity(data)
+
     error_message = _to_str(
         data.get("error_message")
         or data.get("errormessage")
@@ -290,20 +292,26 @@ def _normalize_event(data: Dict[str, Any]) -> Dict[str, Any]:
         or ""
     ).strip()
 
+    failed_url = _to_str(
+        data.get("failed_url")
+        or data.get("target_url")
+        or data.get("http_target")
+        or data.get("url")
+        or data.get("URL")
+        or ""
+    ).strip()
+
+    failed_method = _to_str(
+        data.get("failed_method")
+        or data.get("method")
+        or data.get("HTTP_Method")
+        or "GET"
+    ).strip().upper()
+
     return {
-        "category": _to_str(
-            data.get("category")
-            or data.get("type")
-            or "unknown"
-        ).strip().lower(),
-        "reason": _to_str(
-            data.get("reason")
-            or ""
-        ).strip().lower(),
-        "severity": _to_str(
-            data.get("severity")
-            or "medium"
-        ).strip().lower(),
+        "category": category,
+        "reason": reason,
+        "severity": severity,
         "http_status": _to_int(
             data.get("http_status")
             if data.get("http_status") is not None
@@ -323,26 +331,20 @@ def _normalize_event(data: Dict[str, Any]) -> Dict[str, Any]:
         ).strip().lower(),
         "original_capability": _to_str(
             data.get("original_capability")
+            or data.get("originalcapability")
             or data.get("failed_capability")
+            or data.get("failedcapability")
             or ""
         ).strip(),
         "failed_capability": _to_str(
             data.get("failed_capability")
+            or data.get("failedcapability")
             or data.get("original_capability")
+            or data.get("originalcapability")
             or ""
         ).strip(),
-        "failed_url": _to_str(
-            data.get("failed_url")
-            or data.get("target_url")
-            or data.get("http_target")
-            or data.get("url")
-            or ""
-        ).strip(),
-        "failed_method": _to_str(
-            data.get("failed_method")
-            or data.get("method")
-            or "GET"
-        ).strip().upper(),
+        "failed_url": failed_url,
+        "failed_method": failed_method,
         "retry_count": _to_int(
             data.get("retry_count")
             if data.get("retry_count") is not None
@@ -357,10 +359,12 @@ def _normalize_event(data: Dict[str, Any]) -> Dict[str, Any]:
         ),
         "incident_record_id": _to_str(
             data.get("incident_record_id")
+            or data.get("incidentrecordid")
             or ""
         ).strip(),
         "log_record_id": _to_str(
             data.get("log_record_id")
+            or data.get("logrecordid")
             or ""
         ).strip(),
         "error": error_message,
@@ -426,9 +430,7 @@ def run(
         }
 
     effective_run_record_id = _to_str(
-        run_record_id
-        or meta.get("run_record_id")
-        or ""
+        run_record_id or meta.get("run_record_id") or ""
     ).strip()
 
     flow_id = meta["flow_id"] or f"flow_router_{_now_ts()}"
@@ -454,7 +456,7 @@ def run(
         "run_record_id": effective_run_record_id,
         "parent_command_id": meta["parent_command_id"],
         "command_id": meta["command_id"],
-        "incident_record_id": normalized["incident_record_id"], 
+        "incident_record_id": normalized["incident_record_id"],
         "log_record_id": normalized["log_record_id"],
         "category": normalized["category"],
         "reason": normalized["reason"],
@@ -476,6 +478,7 @@ def run(
         "goal": "incident_router_v2_test",
         "decision": "",
     }
+
     if routing["route"] == "incident":
         next_commands.append(
             {
@@ -487,31 +490,24 @@ def run(
 
     return {
         "ok": True,
-        "capability": "internal_escalate",
+        "capability": "incident_router_v2",
         "status": "done",
-        "mode": "internal_escalate",
-        "delivered": True,
+        "ts": _now_ts(),
         "flow_id": flow_id,
         "root_event_id": root_event_id,
-        "incident_record_id": incident_record_id,
-        "log_record_id": log_record_id,
-        "message": "internal_escalation_sent",
         "run_record_id": effective_run_record_id,
-        "command_id": parent_command_id,  # ✅ FIX cohérence BOSAI
-        "logs_update_ok": bool(logs_update_res.get("ok")),
-        "incident_update_ok": bool(incident_update_res.get("ok")),
-        "incident_update_res": incident_update_res,
-        "next_commands": [
-            {
-                "capability": "complete_flow_incident",
-                "priority": 1,
-                "input": next_input,
-            }
-        ],
+        "route": routing["route"],
+        "reason": routing["reason"],
+        "normalized_category": normalized["category"],
+        "normalized_reason": normalized["reason"],
+        "normalized_severity": normalized["severity"],
+        "normalized_http_status": normalized["http_status"],
+        "final_failure": normalized["final_failure"],
+        "next_commands": next_commands,
         "terminal": False,
-        "spawn_summary": {  # ✅ FIX UNIFORMISATION
+        "spawn_summary": {
             "ok": True,
-            "spawned": 1,
+            "spawned": len(next_commands),
             "skipped": 0,
             "errors": [],
         },
