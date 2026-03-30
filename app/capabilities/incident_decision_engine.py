@@ -204,7 +204,6 @@ def _decision_for_incident(data: Dict[str, Any]) -> Dict[str, Any]:
     auto_executable = False
     priority_score = 40
 
-    # 1) SLA breach = escalate immediately
     if sla_status == "breached":
         decision_status = "Escalate"
         decision_reason = "sla_breached"
@@ -212,7 +211,6 @@ def _decision_for_incident(data: Dict[str, Any]) -> Dict[str, Any]:
         auto_executable = True
         priority_score = 95
 
-    # 2) Severe HTTP failures exhausted = escalate
     elif category == "http_failure" and reason in {
         "http_5xx_exhausted",
         "http_status_error",
@@ -231,7 +229,6 @@ def _decision_for_incident(data: Dict[str, Any]) -> Dict[str, Any]:
             auto_executable = False
             priority_score = 70
 
-    # 3) Explicit auto resolve case
     elif auto_resolve:
         decision_status = "Resolved"
         decision_reason = "auto_resolve_requested"
@@ -239,7 +236,6 @@ def _decision_for_incident(data: Dict[str, Any]) -> Dict[str, Any]:
         auto_executable = True
         priority_score = 20
 
-    # 4) Medium warning = monitor
     elif severity in {"medium", "warning"}:
         decision_status = "Monitor"
         decision_reason = "medium_severity_monitoring"
@@ -247,7 +243,6 @@ def _decision_for_incident(data: Dict[str, Any]) -> Dict[str, Any]:
         auto_executable = False
         priority_score = 45
 
-    # 5) Low = no action
     elif severity in {"low"}:
         decision_status = "No_Action"
         decision_reason = "low_severity_no_action"
@@ -322,6 +317,13 @@ def run(
         or ""
     ).strip()
 
+    current_incident_record_id = _to_str(
+        data.get("incident_record_id")
+        or data.get("incidentrecordid")
+        or data.get("Incident_Record_ID")
+        or ""
+    ).strip()
+
     decision = _decision_for_incident(data)
 
     next_commands = []
@@ -339,11 +341,7 @@ def run(
         "run_record_id": effective_run_record_id,
         "command_id": effective_command_id,
         "parent_command_id": effective_command_id,
-        "incident_record_id": _to_str(
-            data.get("incident_record_id")
-            or data.get("incidentrecordid")
-            or ""
-        ).strip(),
+        "incident_record_id": current_incident_record_id,
         "category": _to_str(data.get("category") or ""),
         "reason": _to_str(data.get("reason") or ""),
         "severity": _to_str(data.get("severity") or ""),
@@ -352,6 +350,7 @@ def run(
         "failed_url": _to_str(
             data.get("failed_url")
             or data.get("target_url")
+            or data.get("url")
             or ""
         ),
         "failed_capability": _to_str(
@@ -370,25 +369,53 @@ def run(
         "next_action": decision["next_action"],
         "auto_executable": decision["auto_executable"],
         "priority_score": decision["priority_score"],
+        "normalized_category": decision["normalized_category"],
+        "normalized_reason": decision["normalized_reason"],
+        "normalized_severity": decision["normalized_severity"],
+        "normalized_sla_status": decision["normalized_sla_status"],
     }
 
     if auto_executable and next_action == "internal_escalate":
-        next_commands.append(
-            {
-                "capability": "internal_escalate",
-                "priority": 1,
-                "input": next_input,
-            }
-        )
+        if current_incident_record_id:
+            next_commands.append(
+                {
+                    "capability": "internal_escalate",
+                    "priority": 1,
+                    "input": next_input,
+                }
+            )
+        else:
+            next_commands.append(
+                {
+                    "capability": "incident_create",
+                    "priority": 1,
+                    "input": {
+                        **next_input,
+                        "goal": "create_incident_before_escalation",
+                    },
+                }
+            )
 
     elif auto_executable and next_action == "resolve_incident":
-        next_commands.append(
-            {
-                "capability": "resolve_incident",
-                "priority": 1,
-                "input": next_input,
-            }
-        )
+        if current_incident_record_id:
+            next_commands.append(
+                {
+                    "capability": "resolve_incident",
+                    "priority": 1,
+                    "input": next_input,
+                }
+            )
+        else:
+            next_commands.append(
+                {
+                    "capability": "incident_create",
+                    "priority": 1,
+                    "input": {
+                        **next_input,
+                        "goal": "create_incident_before_resolution",
+                    },
+                }
+            )
 
     return {
         "ok": True,
@@ -399,6 +426,7 @@ def run(
         "root_event_id": effective_root_event_id,
         "run_record_id": effective_run_record_id,
         "command_id": effective_command_id,
+        "incident_record_id": current_incident_record_id,
         "decision_status": decision["decision_status"],
         "decision_reason": decision["decision_reason"],
         "next_action": decision["next_action"],
