@@ -282,10 +282,28 @@ def _normalize_severity(data: Dict[str, Any]) -> str:
 
 
 def _normalize_event(data: Dict[str, Any]) -> Dict[str, Any]:
+    error_message = _to_str(
+        data.get("error_message")
+        or data.get("errormessage")
+        or data.get("error")
+        or data.get("message")
+        or ""
+    ).strip()
+
     return {
-        "category": _normalize_category(data),
-        "reason": _normalize_reason(data),
-        "severity": _normalize_severity(data),
+        "category": _to_str(
+            data.get("category")
+            or data.get("type")
+            or "unknown"
+        ).strip().lower(),
+        "reason": _to_str(
+            data.get("reason")
+            or ""
+        ).strip().lower(),
+        "severity": _to_str(
+            data.get("severity")
+            or "medium"
+        ).strip().lower(),
         "http_status": _to_int(
             data.get("http_status")
             if data.get("http_status") is not None
@@ -298,41 +316,31 @@ def _normalize_event(data: Dict[str, Any]) -> Dict[str, Any]:
             else data.get("finalfailure"),
             False,
         ),
-        "error": _to_str(
-            data.get("error")
-            or data.get("error_message")
-            or data.get("errormessage")
-            or data.get("message")
-            or ""
-        ).strip(),
         "incident_code": _to_str(
             data.get("incident_code")
             or data.get("incidentcode")
             or ""
+        ).strip().lower(),
+        "original_capability": _to_str(
+            data.get("original_capability")
+            or data.get("failed_capability")
+            or ""
         ).strip(),
         "failed_capability": _to_str(
             data.get("failed_capability")
-            or data.get("failedcapability")
             or data.get("original_capability")
-            or data.get("originalcapability")
             or ""
         ).strip(),
         "failed_url": _to_str(
             data.get("failed_url")
-            or data.get("failedurl")
             or data.get("target_url")
-            or data.get("targeturl")
             or data.get("http_target")
             or data.get("url")
-            or data.get("URL")
             or ""
         ).strip(),
         "failed_method": _to_str(
             data.get("failed_method")
-            or data.get("failedmethod")
             or data.get("method")
-            or data.get("HTTP_Method")
-            or data.get("HTTPMethod")
             or "GET"
         ).strip().upper(),
         "retry_count": _to_int(
@@ -349,15 +357,14 @@ def _normalize_event(data: Dict[str, Any]) -> Dict[str, Any]:
         ),
         "incident_record_id": _to_str(
             data.get("incident_record_id")
-            or data.get("incidentrecordid")
-            or data.get("Incident_Record_ID")
             or ""
         ).strip(),
         "log_record_id": _to_str(
             data.get("log_record_id")
-            or data.get("logrecordid")
             or ""
         ).strip(),
+        "error": error_message,
+        "error_message": error_message,
     }
 
 
