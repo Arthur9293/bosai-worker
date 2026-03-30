@@ -28,7 +28,7 @@ from app.capabilities.health_tick import run as capability_health_tick
 from app.capabilities.http_exec import capability_http_exec
 from app.policies import get_policies
 from app.capabilities.internal_escalate import capability_internal_escalate
-from app.capabilities.incident_router import run as capability_incident_router_run
+from app.capabilities.incident_router_v2 import run as capability_incident_router_v2
 from app.capabilities.decision_engine import run as capability_decision_engine
 from app.capabilities.retry_router import run as capability_retry_router_run
 from app.capabilities.incident_create import run as capability_incident_create
@@ -6013,7 +6013,7 @@ EVENT_CAPABILITY_ALLOWLIST = {
     "planner_demo",
     "decision_demo",
     "decision_router",
-    "incident_router",
+    "incident_router_v2",
     "retry_router",
     "sla_router",
     "complete_flow_demo",
@@ -6036,7 +6036,7 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "planner_demo",
     "decision_demo",
     "decision_router",
-    "incident_router",
+    "incident_router_v2",
     "retry_router",
     "sla_router",
     "complete_flow",
@@ -6062,11 +6062,6 @@ def _to_int(value: Any, default: int = 0) -> int:
     except Exception:
         return default
         
-def capability_incident_router_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    return capability_incident_router_run(
-        req,
-        run_record_id=run_record_id,
-    )
 
 def capability_incident_deduplicate_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     return capability_incident_deduplicate(
@@ -6189,7 +6184,7 @@ CAPABILITIES = {
     "decision_engine": capability_decision_engine,
     "retry_router": capability_retry_router,
     "decision_router": capability_decision_router,
-    "incident_router": capability_incident_router_wrapped,
+    "incident_router_v2": capability_incident_router_v2,
     "incident_create": capability_incident_create_wrapped,
     "complete_flow_incident": capability_complete_flow_incident,
     "incident_deduplicate": capability_incident_deduplicate_wrapped,
