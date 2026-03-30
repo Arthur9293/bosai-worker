@@ -111,6 +111,9 @@ def _best_effort_update_incident(
 
     now_ts = utc_now_iso()
 
+    linked_run_ids = [run_record_id] if _to_str(run_record_id).startswith("rec") else []
+    linked_command_ids = [parent_command_id] if _to_str(parent_command_id).startswith("rec") else []
+
     attempts: List[Dict[str, Any]] = [
         {
             "Status_select": "Escalated",
@@ -118,9 +121,9 @@ def _best_effort_update_incident(
             "Last_Seen_At": now_ts,
             "Updated_At": now_ts,
             "Run_Record_ID": run_record_id,
-            "Linked_Run": [run_record_id] if run_record_id else [],
+            "Linked_Run": linked_run_ids,
             "Command_ID": parent_command_id,
-            "Linked_Command": [parent_command_id] if parent_command_id else [],
+            "Linked_Command": linked_command_ids,
             "Flow_ID": flow_id,
             "Root_Event_ID": root_event_id,
             "Workspace_ID": workspace_id,
