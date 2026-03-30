@@ -38,7 +38,7 @@ from app.capabilities.incident_update import run as capability_incident_update
 from app.capabilities.resolve_incident import run as capability_resolve_incident
 from app.capabilities.close_incident import run as capability_close_incident
 from app.capabilities.smart_resolve import run as capability_smart_resolve
-from app.capabilities.incident_decision_engine import run as capability_incident_decision_engine
+
 
 
 # ============================================================
@@ -5829,7 +5829,7 @@ EVENT_CAPABILITY_ALLOWLIST = {
     "resolve_incident",
     "smart_resolve",
     "close_incident",
-    "incident_decision_engine",
+    
 }
 
 EXECUTABLE_CAPABILITY_ALLOWLIST = {
@@ -5853,7 +5853,6 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "resolve_incident",
     "smart_resolve",
     "close_incident",
-    "incident_decision_engine",
 }
 
 def _to_int(value: Any, default: int = 0) -> int:
@@ -5992,7 +5991,7 @@ CAPABILITIES = {
     "resolve_incident": capability_resolve_incident_wrapped,
     "close_incident": capability_close_incident_wrapped,
     "smart_resolve": capability_smart_resolve_wrapped,
-    "incident_decision_engine": capability_incident_decision_engine,
+
 }
   
 # ============================================================
