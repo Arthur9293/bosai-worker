@@ -7377,7 +7377,6 @@ async def run(request: Request, response: Response) -> RunResponse:
 # ============================================================
 # Incidents / graphs / details
 # ============================================================
-
 @app.get("/incidents")
 def get_incidents(flow_id: str = Query(default="")):
     try:
@@ -7450,7 +7449,7 @@ def get_incidents(flow_id: str = Query(default="")):
                 or ""
             ).strip()
 
-            sla_status = (
+            raw_sla_status = (
                 f.get("SLA_Status")
                 or f.get("SLA status")
                 or f.get("sla_status")
@@ -7580,6 +7579,38 @@ def get_incidents(flow_id: str = Query(default="")):
             )
 
             current_flow_id_str = str(current_flow_id or "").strip()
+            normalized_status = status.lower().strip()
+            normalized_severity = severity.lower().strip()
+
+            # -------------------------------------------------
+            # Normalize SLA status so resolved incidents
+            # cannot keep showing "OPEN"
+            # -------------------------------------------------
+            resolved_like = bool(resolved_at) or normalized_status in (
+                "resolved",
+                "closed",
+                "done",
+                "résolu",
+                "resolve",
+            )
+
+            if isinstance(raw_sla_status, str):
+                sla_status = raw_sla_status.strip()
+            else:
+                sla_status = raw_sla_status
+
+            if resolved_like:
+                sla_status = "resolved"
+            elif not sla_status:
+                if isinstance(sla_remaining_minutes, (int, float)):
+                    if sla_remaining_minutes < 0:
+                        sla_status = "breached"
+                    elif sla_remaining_minutes <= 15:
+                        sla_status = "warning"
+                    else:
+                        sla_status = "open"
+                else:
+                    sla_status = "open"
 
             if requested_flow_id and current_flow_id_str != requested_flow_id:
                 continue
@@ -7614,12 +7645,7 @@ def get_incidents(flow_id: str = Query(default="")):
                 }
             )
 
-            normalized_status = status.lower().strip()
-            normalized_severity = severity.lower().strip()
-
-            if resolved_at:
-                stats["resolved"] += 1
-            elif normalized_status in ("resolved", "closed", "done", "résolu", "resolve"):
+            if resolved_like:
                 stats["resolved"] += 1
             elif normalized_status in ("escalated", "escalade", "escaladé"):
                 stats["warning"] += 1
@@ -7651,7 +7677,7 @@ def get_incidents(flow_id: str = Query(default="")):
         raise HTTPException(status_code=502, detail=f"Airtable incidents request failed: {detail}")
     except Exception as exc:
         raise HTTPException(status_code=500, detail={"detail": "Internal error", "error": repr(exc)})
-        
+
 @app.get("/commands/{record_id}")
 def get_command_detail(record_id: str) -> Dict[str, Any]:
     try:
