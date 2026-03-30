@@ -447,7 +447,7 @@ def run(
         "run_record_id": effective_run_record_id,
         "parent_command_id": meta["parent_command_id"],
         "command_id": meta["command_id"],
-        "incident_record_id": normalized["incident_record_id"],
+        "incident_record_id": normalized["incident_record_id"], 
         "log_record_id": normalized["log_record_id"],
         "category": normalized["category"],
         "reason": normalized["reason"],
@@ -455,9 +455,9 @@ def run(
         "http_status": normalized["http_status"],
         "final_failure": normalized["final_failure"],
         "error": normalized["error"],
-        "error_message": normalized["error"],
+        "error_message": normalized["error_message"],
         "incident_code": normalized["incident_code"],
-        "original_capability": normalized["failed_capability"],
+        "original_capability": normalized["original_capability"],
         "failed_capability": normalized["failed_capability"],
         "failed_url": normalized["failed_url"],
         "target_url": normalized["failed_url"],
@@ -469,7 +469,6 @@ def run(
         "goal": "incident_router_v2_test",
         "decision": "",
     }
-
     if routing["route"] == "incident":
         next_commands.append(
             {
@@ -481,28 +480,32 @@ def run(
 
     return {
         "ok": True,
-        "capability": "incident_router_v2",
+        "capability": "internal_escalate",
         "status": "done",
-        "ts": _now_ts(),
+        "mode": "internal_escalate",
+        "delivered": True,
         "flow_id": flow_id,
         "root_event_id": root_event_id,
+        "incident_record_id": incident_record_id,
+        "log_record_id": log_record_id,
+        "message": "internal_escalation_sent",
         "run_record_id": effective_run_record_id,
-        "route": routing["route"],
-        "reason": routing["reason"],
-        "normalized_category": normalized["category"],
-        "normalized_reason": normalized["reason"],
-        "normalized_severity": normalized["severity"],
-        "normalized_http_status": normalized["http_status"],
-        "final_failure": normalized["final_failure"],
-        "next_commands": next_commands,
+        "command_id": parent_command_id,  # ✅ FIX cohérence BOSAI
+        "logs_update_ok": bool(logs_update_res.get("ok")),
+        "incident_update_ok": bool(incident_update_res.get("ok")),
+        "incident_update_res": incident_update_res,
+        "next_commands": [
+            {
+                "capability": "complete_flow_incident",
+                "priority": 1,
+                "input": next_input,
+            }
+        ],
         "terminal": False,
-        "spawn_summary": {
+        "spawn_summary": {  # ✅ FIX UNIFORMISATION
             "ok": True,
-            "spawned": len(next_commands),
+            "spawned": 1,
             "skipped": 0,
             "errors": [],
-            "flow_id": flow_id,
-            "root_event_id": root_event_id,
-            "max_depth": DEFAULT_MAX_DEPTH,
         },
     }
