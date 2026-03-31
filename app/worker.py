@@ -7467,7 +7467,6 @@ async def create_workspace(request: Request):
             allowed_capabilities,
             ensure_ascii=False,
         ),
-        "Last_Seen_At": created_at,
     }
 
     record = airtable_create(WORKSPACES_TABLE_NAME, fields)
