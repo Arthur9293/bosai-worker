@@ -43,11 +43,6 @@ from app.capabilities.smart_resolve import run as capability_smart_resolve
 # MULTI-TENANT PATCH
 # ============================================================
 
-WORKSPACE_DEFAULT_ID = os.getenv("BOSAI_DEFAULT_WORKSPACE_ID", "default").strip() or "default"
-WORKSPACE_API_KEYS_RAW = os.getenv("BOSAI_WORKSPACE_API_KEYS", "").strip()
-WORKSPACE_API_KEY_HEADER = "x-bosai-key"
-
-
 def _normalize_workspace_id(value: Any) -> str:
     text = str(value or "").strip()
     return text or WORKSPACE_DEFAULT_ID
@@ -387,6 +382,12 @@ LOGS_ERRORS_VIEW_NAME = os.getenv("LOGS_ERRORS_VIEW_NAME", "Active").strip()
 COMMANDS_VIEW_NAME = os.getenv("COMMANDS_VIEW_NAME", "Queue").strip()
 EVENTS_VIEW_NAME = os.getenv("EVENTS_VIEW_NAME", "Queue").strip()
 EVENTS_DASHBOARD_VIEW_NAME = os.getenv("EVENTS_DASHBOARD_VIEW_NAME", EVENTS_VIEW_NAME or "Grid view").strip()
+
+
+WORKSPACE_DEFAULT_ID = os.getenv("BOSAI_DEFAULT_WORKSPACE_ID", "default").strip() or "default"
+WORKSPACE_API_KEYS_RAW = os.getenv("BOSAI_WORKSPACE_API_KEYS", "").strip()
+WORKSPACE_API_KEY_HEADER = "x-bosai-key"
+
 
 INCIDENTS_TABLE_NAME = os.getenv("INCIDENTS_TABLE_NAME", "Incidents").strip()
 INCIDENTS_VIEW_NAME = os.getenv("INCIDENTS_VIEW_NAME", "Active").strip()
