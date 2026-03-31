@@ -5460,8 +5460,8 @@ def _create_command_from_next_command(
     inherited_input_idem = str(command_input.get("idempotency_key") or "").strip()
     explicit_next_cmd_idem = str(next_cmd.get("idempotency_key") or "").strip()
 
-    if capability == "http_exec":
-        inherited_input_idem = ""
+    if capability == "http_exec" and inherited_input_idem:
+        inherited_input_idem = f"{inherited_input_idem}:http_exec"
 
     effective_idempotency_key = (
         explicit_next_cmd_idem
