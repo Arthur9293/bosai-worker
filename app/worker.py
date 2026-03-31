@@ -39,6 +39,144 @@ from app.capabilities.resolve_incident import run as capability_resolve_incident
 from app.capabilities.close_incident import run as capability_close_incident
 from app.capabilities.smart_resolve import run as capability_smart_resolve
 
+# ============================================================
+# MULTI-TENANT PATCH
+# ============================================================
+
+WORKSPACE_DEFAULT_ID = os.getenv("BOSAI_DEFAULT_WORKSPACE_ID", "default").strip() or "default"
+WORKSPACE_API_KEYS_RAW = os.getenv("BOSAI_WORKSPACE_API_KEYS", "").strip()
+WORKSPACE_API_KEY_HEADER = "x-bosai-key"
+
+
+def _normalize_workspace_id(value: Any) -> str:
+    text = str(value or "").strip()
+    return text or WORKSPACE_DEFAULT_ID
+
+
+def _extract_workspace_id(payload: Optional[Dict[str, Any]] = None, request: Optional[Request] = None) -> str:
+    payload = payload or {}
+
+    candidates = [
+        payload.get("workspace_id"),
+        payload.get("workspaceId"),
+        payload.get("Workspace_ID"),
+    ]
+
+    if request is not None:
+        candidates.extend(
+            [
+                request.headers.get("x-workspace-id"),
+                request.headers.get("x-bosai-workspace"),
+                request.query_params.get("workspace_id"),
+            ]
+        )
+
+    for candidate in candidates:
+        normalized = _normalize_workspace_id(candidate)
+        if normalized:
+            return normalized
+
+    return WORKSPACE_DEFAULT_ID
+
+
+def _inject_workspace(payload: Optional[Dict[str, Any]], workspace_id: str) -> Dict[str, Any]:
+    obj = dict(payload or {})
+    obj["workspace_id"] = _normalize_workspace_id(workspace_id)
+    return obj
+
+
+def _inject_workspace_into_next_commands(next_commands: Any, workspace_id: str) -> List[Dict[str, Any]]:
+    ws = _normalize_workspace_id(workspace_id)
+    output: List[Dict[str, Any]] = []
+
+    if not isinstance(next_commands, list):
+        return output
+
+    for item in next_commands:
+        if not isinstance(item, dict):
+            continue
+
+        cloned = dict(item)
+        input_payload = cloned.get("input")
+
+        if isinstance(input_payload, dict):
+            cloned["input"] = _inject_workspace(input_payload, ws)
+        else:
+            cloned["input"] = {"workspace_id": ws}
+
+        if not cloned.get("workspace_id"):
+            cloned["workspace_id"] = ws
+
+        output.append(cloned)
+
+    return output
+
+
+def _inject_workspace_into_result(result_obj: Optional[Dict[str, Any]], workspace_id: str) -> Dict[str, Any]:
+    obj = dict(result_obj or {})
+    obj["workspace_id"] = _normalize_workspace_id(workspace_id)
+
+    if "next_commands" in obj:
+        obj["next_commands"] = _inject_workspace_into_next_commands(obj.get("next_commands"), workspace_id)
+
+    return obj
+
+
+def _workspace_keys_map() -> Dict[str, str]:
+    """
+    Format env:
+    BOSAI_WORKSPACE_API_KEYS="default:key-default,production:key-prod,clientA:key-123"
+    """
+    raw = WORKSPACE_API_KEYS_RAW
+    result: Dict[str, str] = {}
+
+    if not raw:
+        return result
+
+    for chunk in raw.split(","):
+        part = chunk.strip()
+        if not part or ":" not in part:
+            continue
+        ws, key = part.split(":", 1)
+        ws = _normalize_workspace_id(ws)
+        key = str(key or "").strip()
+        if ws and key:
+            result[ws] = key
+
+    return result
+
+
+def _validate_workspace_api_key(request: Request, workspace_id: str) -> None:
+    mapping = _workspace_keys_map()
+    if not mapping:
+        return
+
+    expected = mapping.get(_normalize_workspace_id(workspace_id))
+    if not expected:
+        return
+
+    provided = (request.headers.get(WORKSPACE_API_KEY_HEADER) or "").strip()
+    if not provided or not hmac.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="invalid workspace api key")
+
+
+def _workspace_matches_record(record_fields: Dict[str, Any], workspace_id: Optional[str]) -> bool:
+    if not workspace_id:
+        return True
+
+    target = _normalize_workspace_id(workspace_id)
+    current = _normalize_workspace_id(
+        record_fields.get("Workspace_ID")
+        or record_fields.get("workspace_id")
+        or record_fields.get("WorkspaceId")
+    )
+    return current == target
+
+
+def _fields_with_workspace(fields: Optional[Dict[str, Any]], workspace_id: str) -> Dict[str, Any]:
+    obj = dict(fields or {})
+    obj["Workspace_ID"] = _normalize_workspace_id(workspace_id)
+    return obj
 
 
 # ============================================================
