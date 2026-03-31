@@ -5382,7 +5382,7 @@ def _create_command_from_next_command(
         return {"ok": False, "error": "invalid_next_command"}
 
     next_cmd = _normalize_keys_deep(next_cmd)
-    next_cmd = _unwrap_command_payload(next_cmd)
+    
 
     capability = str(
         next_cmd.get("capability")
