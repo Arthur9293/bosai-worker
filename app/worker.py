@@ -5839,7 +5839,8 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
     step_index = _resolve_flow_step_index(payload, 0)
 
     result = capability_http_exec(input_data=payload)
-
+    print("[HTTP_EXEC_WRAPPED] raw result =", repr(result))
+    
     if not isinstance(result, dict):
         result = {
             "ok": False,
