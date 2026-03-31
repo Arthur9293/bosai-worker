@@ -7619,7 +7619,7 @@ async def run(request: Request, response: Response) -> RunResponse:
             for cmd in next_cmds:
                 try:
                     cmd = _normalize_keys_deep(cmd)
-                    cmd = _unwrap_command_payload(cmd)
+                
 
                     spawn_res = _create_command_from_next_command(
                         next_cmd=cmd,
