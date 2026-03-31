@@ -5786,7 +5786,7 @@ def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, An
         "root_event_id": root_event_id,
         "run_record_id": run_record_id,
     }
-    
+
 def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     print("HTTP_EXEC_WRAPPER_V5_ENTERED", flush=True)
 
@@ -5993,6 +5993,42 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         print("[worker.wrapper] failure_path result =", result, flush=True)
         print("[worker.wrapper] incident_input =", incident_input, flush=True)
 
+        try:
+            _append_flow_step_safe(
+                flow_id=flow_id,
+                workspace_id=workspace_id,
+                step_obj={
+                    "step_index": step_index,
+                    "capability": "http_exec",
+                    "status": "error",
+                    "http_status": status_code,
+                    "goal": goal,
+                    "error": result.get("error"),
+                    "error_message": result.get("error_message"),
+                    "run_record_id": run_record_id,
+                },
+            )
+        except Exception as e:
+            print("[worker.wrapper] append_flow_step_safe error =", str(e), flush=True)
+
+        try:
+            _update_flow_registry_safe(
+                flow_id=flow_id,
+                workspace_id=workspace_id,
+                status="Running",
+                current_step=step_index,
+                last_decision="http_exec_error",
+                memory_obj={
+                    "last_http_status": status_code,
+                    "last_goal": goal,
+                    "last_error": result.get("error"),
+                },
+                result_obj=result,
+                linked_run=[run_record_id],
+            )
+        except Exception as e:
+            print("[worker.wrapper] update_flow_registry_safe error =", str(e), flush=True)
+
         incident_req = RunRequest.from_payload(
             {
                 "worker": req.worker,
@@ -6052,6 +6088,39 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
     result.setdefault("http_status", status_code)
     result.setdefault("status_code", status_code)
     result.setdefault("terminal", True)
+
+    try:
+        _append_flow_step_safe(
+            flow_id=flow_id,
+            workspace_id=workspace_id,
+            step_obj={
+                "step_index": step_index,
+                "capability": "http_exec",
+                "status": "done",
+                "http_status": status_code,
+                "goal": goal,
+                "run_record_id": run_record_id,
+            },
+        )
+    except Exception as e:
+        print("[worker.wrapper] append_flow_step_safe success error =", str(e), flush=True)
+
+    try:
+        _update_flow_registry_safe(
+            flow_id=flow_id,
+            workspace_id=workspace_id,
+            status="Running",
+            current_step=step_index,
+            last_decision="http_exec_done",
+            memory_obj={
+                "last_http_status": status_code,
+                "last_goal": goal,
+            },
+            result_obj=result,
+            linked_run=[run_record_id],
+        )
+    except Exception as e:
+        print("[worker.wrapper] update_flow_registry_safe success error =", str(e), flush=True)
 
     print("[worker.wrapper] returning success result =", result, flush=True)
     return result
