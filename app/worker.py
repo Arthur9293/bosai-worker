@@ -6403,6 +6403,7 @@ EVENT_CAPABILITY_ALLOWLIST = {
     "smart_resolve",
     "close_incident",
     "planner_monitoring",
+    "decision_monitoring",
     
 }
 
@@ -6428,6 +6429,7 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "smart_resolve",
     "close_incident",
     "planner_monitoring",
+    "decision_monitoring",
 }
 
 def _to_int(value: Any, default: int = 0) -> int:
@@ -6567,6 +6569,7 @@ CAPABILITIES = {
     "close_incident": capability_close_incident_wrapped,
     "smart_resolve": capability_smart_resolve_wrapped,
     "planner_monitoring": capability_planner_monitoring,
+    "decision_monitoring": capability_decision_monitoring,
 
 }
   
