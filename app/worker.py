@@ -1439,6 +1439,26 @@ def _resolve_workspace_id(
         or fallback
     )
     return workspace_id
+
+def resolve_workspace_from_headers(headers: Dict[str, str]) -> Optional[Dict[str, Any]]:
+    api_key = headers.get("x-api-key") or headers.get("x_api_key")
+
+    if not api_key:
+        return None
+
+    try:
+        records = airtable_list_filtered(
+            WORKSPACES_TABLE_NAME,
+            formula=f"{{API_Key}}='{api_key}'",
+            max_records=1,
+        )
+    except Exception:
+        return None
+
+    if not records:
+        return None
+
+    return records[0]
     
 def _verify_hmac_signature(raw_body: bytes, signature_header: Optional[str]) -> bool:
     if not RUN_SHARED_SECRET:
@@ -7492,12 +7512,54 @@ async def run(request: Request, response: Response) -> RunResponse:
     raw = await request.body()
 
     headers_lc = {k.lower(): v for k, v in request.headers.items()}
-    verify_request_auth_or_401(raw, headers_lc)
 
     try:
         payload = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body.")
+
+    # ------------------------------------------------------------
+    # Workspace auth (multi-tenant) OR fallback legacy auth
+    # ------------------------------------------------------------
+    workspace_record = resolve_workspace_from_headers(headers_lc)
+
+    if workspace_record:
+        req_workspace_id = str(
+            (payload.get("input") or {}).get("workspace_id")
+            or payload.get("workspace_id")
+            or ""
+        ).strip()
+
+        workspace_id = str(
+            workspace_record.get("fields", {}).get("Workspace_ID") or ""
+        ).strip()
+
+        if req_workspace_id and req_workspace_id != workspace_id:
+            raise HTTPException(status_code=403, detail="workspace_mismatch")
+    else:
+        verify_request_auth_or_401(raw, headers_lc)
+        workspace_id = _extract_workspace_id(payload=payload, request=request)
+
+    # ------------------------------------------------------------
+    # Inject workspace ONLY inside input (not top-level)
+    # ------------------------------------------------------------
+    payload_input = payload.get("input") or {}
+    if not isinstance(payload_input, dict):
+        payload_input = {}
+
+    payload_input = _inject_workspace(payload_input, workspace_id)
+    payload["input"] = payload_input
+
+    # ------------------------------------------------------------
+    # Auto idempotency_key if missing
+    # ------------------------------------------------------------
+    capability_name = str(payload.get("capability") or "").strip()
+    if not payload.get("idempotency_key"):
+        flow_id = str(payload_input.get("flow_id") or "").strip()
+        root_event_id = str(payload_input.get("root_event_id") or "").strip()
+        payload["idempotency_key"] = (
+            f"{workspace_id}:{capability_name}:{flow_id or root_event_id or uuid.uuid4().hex}"
+        )
 
     req = RunRequest.from_payload(payload)
     cleanup_stale_runs()
@@ -7556,7 +7618,7 @@ async def run(request: Request, response: Response) -> RunResponse:
                         next_cmd=cmd,
                         parent_run_id=run_record_id,
                         workspace_id=(req.input or {}).get("workspace_id"),
-                    ) 
+                    )
                     spawned_results.append(spawn_res)
 
                     print(
@@ -7589,6 +7651,11 @@ async def run(request: Request, response: Response) -> RunResponse:
 
         finish_system_run(run_record_id, "Done", result_obj)
 
+        try:
+            _touch_workspace_last_seen(workspace_id)
+        except Exception:
+            pass
+
         return RunResponse(
             ok=True,
             worker=req.worker,
@@ -7605,7 +7672,6 @@ async def run(request: Request, response: Response) -> RunResponse:
     except Exception as e:
         fail_system_run(run_record_id, repr(e))
         raise HTTPException(status_code=500, detail="Internal error.")
-        
 # ============================================================
 # Incidents / graphs / details
 # ============================================================
