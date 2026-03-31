@@ -5869,6 +5869,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
     result.setdefault("root_event_id", root_event_id)
     result.setdefault("step_index", step_index)
     result["run_record_id"] = run_record_id
+    result["goal"] = goal or result.get("goal") or ""
 
     if "next_commands" not in result or not isinstance(result.get("next_commands"), list):
         result["next_commands"] = []
@@ -5877,7 +5878,6 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         result["terminal"] = not bool(result["next_commands"])
 
     print("[HTTP_EXEC_WRAPPER_RESULT]", result)
-
 
     def _spawn_commands(next_commands: List[Dict[str, Any]], idem_suffix: str) -> None:
         for next_cmd in next_commands:
@@ -6033,6 +6033,18 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
         print("[worker.wrapper] returning failure result =", result)
         return result
+
+    # ------------------------------------------------------------
+    # SUCCESS PATH
+    # ------------------------------------------------------------
+    result.setdefault("ok", True)
+    result.setdefault("status", "done")
+    result.setdefault("http_status", status_code)
+    result.setdefault("status_code", status_code)
+    result.setdefault("terminal", True)
+
+    print("[worker.wrapper] returning success result =", result)
+    return result
     
 def capability_retry_router_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
