@@ -7467,7 +7467,6 @@ async def create_workspace(request: Request):
             allowed_capabilities,
             ensure_ascii=False,
         ),
-        "Created_At": created_at,
         "Last_Seen_At": created_at,
     }
 
