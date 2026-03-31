@@ -7680,11 +7680,12 @@ async def run(request: Request, response: Response) -> RunResponse:
          # 🔒 GUARD CRITIQUE
         if not isinstance(result_obj, dict):
             print("[RUN WARNING] capability returned non-dict → forcing safe result")
-        result_obj = {
-            "ok": False,
-            "error": "capability_returned_none_or_invalid",
-            "capability": req.capability,
-        }
+            result_obj = {
+                "ok": False,
+                "error": "capability_returned_none_or_invalid",
+                "capability": req.capability,
+                "run_record_id": run_record_id,
+            }
         
         next_cmds = result_obj.get("next_commands") if isinstance(result_obj, dict) else None
 
