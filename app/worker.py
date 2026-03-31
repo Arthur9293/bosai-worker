@@ -361,6 +361,29 @@ def _generate_workspace_id_from_name(name: str) -> str:
         slug = slug.replace("--", "-")
     return slug or f"workspace-{uuid.uuid4().hex[:8]}"
 
+def airtable_create(table_name: str, fields: Dict[str, Any]) -> Dict[str, Any]:
+    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+        raise RuntimeError("Airtable is not configured")
+
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{quote(table_name)}"
+    headers = {
+        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {"fields": fields}
+
+    resp = requests.post(url, headers=headers, json=payload, timeout=20)
+
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"Airtable create failed table={table_name} status={resp.status_code} body={resp.text[:500]}"
+        )
+
+    data = resp.json()
+    print(f"[AIRTABLE] create = {table_name} ({resp.status_code})")
+    return data
+
+
 # ============================================================
 # Env / settings
 # ============================================================
