@@ -5825,8 +5825,9 @@ def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, An
     }
     
 def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    print("HTTP_EXEC_WRAPPER_V5_ENTERED")
-
+    print("HTTP_EXEC_WRAPPER_V5_ENTERED", flush=True)
+    print("[HTTP_EXEC_WRAPPED] raw result =", repr(result), flush=True)
+    
     payload = _normalize_flow_keys(req.input or {})
     workspace_id = _resolve_workspace_id(req=req)
 
@@ -7635,7 +7636,14 @@ async def run(request: Request, response: Response) -> RunResponse:
                 detail=f"Unsupported capability: {req.capability}",
             )
 
+        print("[RUN] capability requested =", req.capability, flush=True)
+        print("[RUN] resolved fn =", getattr(fn, "__name__", str(fn)), flush=True)
+        print("[RUN] about to execute function", flush=True)
+
         result_obj = fn(req, run_record_id)
+
+        print("[RUN] result_obj type =", type(result_obj).__name__, flush=True)
+        print("[RUN] result_obj repr =", repr(result_obj), flush=True)
 
          # 🔒 GUARD CRITIQUE
         if not isinstance(result_obj, dict):
