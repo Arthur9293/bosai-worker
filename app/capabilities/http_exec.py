@@ -12,6 +12,8 @@ from urllib.parse import urlparse
 
 import requests
 
+print("HTTP_EXEC_MODULE_LOADED_V3")
+
 HTTP_EXEC_ENABLED = True
 DEFAULT_RETRY_MAX = 3
 DEFAULT_TIMEOUT_SECONDS = 20
@@ -371,6 +373,7 @@ def capability_http_exec(
     context: Optional[Dict[str, Any]] = None,
     **kwargs: Any,
 ) -> Dict[str, Any]:
+    print("[HTTP_EXEC CORE] entered")
     context = context or {}
 
     if payload is None and isinstance(kwargs.get("input_data"), dict):
@@ -382,7 +385,7 @@ def capability_http_exec(
     meta = _extract_retry_meta(original_payload)
 
     if not HTTP_EXEC_ENABLED:
-        return {
+        result = {
             "ok": False,
             "status": "blocked",
             "error": "http_exec_disabled",
@@ -392,10 +395,14 @@ def capability_http_exec(
             "step_index": meta["step_index"],
             "retry_planned": False,
             "next_commands": [],
+            "http_status": None,
+            "status_code": None,
         }
+        print("[HTTP_EXEC CORE] error return =", result)
+        return result
 
     if _get_depth(original_payload) >= _to_int(original_payload.get("max_depth"), DEFAULT_MAX_DEPTH):
-        return {
+        result = {
             "ok": False,
             "status": "blocked",
             "error": "max_depth_exceeded",
@@ -405,7 +412,11 @@ def capability_http_exec(
             "step_index": meta["step_index"],
             "retry_planned": False,
             "next_commands": [],
+            "http_status": None,
+            "status_code": None,
         }
+        print("[HTTP_EXEC CORE] error return =", result)
+        return result
 
     url = str(original_payload.get("url") or "").strip()
     method = _normalize_method(original_payload.get("method"))
@@ -423,7 +434,7 @@ def capability_http_exec(
 
     allowlist = _parse_allowlist(original_payload)
     if not url:
-        return {
+        result = {
             "ok": False,
             "status": "error",
             "error": "missing_url",
@@ -433,7 +444,11 @@ def capability_http_exec(
             "step_index": meta["step_index"],
             "retry_planned": False,
             "next_commands": [],
+            "http_status": None,
+            "status_code": None,
         }
+        print("[HTTP_EXEC CORE] error return =", result)
+        return result
 
     allowed, allow_reason, url_debug = _validate_url(url, allowlist)
     request_summary = {
@@ -450,7 +465,7 @@ def capability_http_exec(
     }
 
     if not allowed:
-        return {
+        result = {
             "ok": False,
             "status": "blocked",
             "error": allow_reason,
@@ -462,10 +477,14 @@ def capability_http_exec(
             "request": request_summary,
             "retry_planned": False,
             "next_commands": [],
+            "http_status": None,
+            "status_code": None,
         }
+        print("[HTTP_EXEC CORE] error return =", result)
+        return result
 
     if dry_run:
-        return {
+        result = {
             "ok": True,
             "status": "done",
             "dry_run": True,
@@ -485,7 +504,11 @@ def capability_http_exec(
             },
             "retry_planned": False,
             "next_commands": [],
+            "http_status": 0,
+            "status_code": 0,
         }
+        print("[HTTP_EXEC CORE] success return")
+        return result
 
     started_at = time.time()
 
@@ -515,7 +538,7 @@ def capability_http_exec(
             is_success = 200 <= int(response.status_code) < 300
 
         if is_success:
-            return {
+            result = {
                 "ok": True,
                 "status": "done",
                 "ts": _now_ts(),
@@ -525,9 +548,12 @@ def capability_http_exec(
                 "request": request_summary,
                 "response": response_payload,
                 "status_code": int(response.status_code),
+                "http_status": int(response.status_code),
                 "retry_planned": False,
                 "next_commands": [],
             }
+            print("[HTTP_EXEC CORE] success return")
+            return result
 
         retry_count_after_failure = meta["retry_count"] + 1
         retry_allowed = retry_count_after_failure <= meta["retry_max"]
@@ -542,6 +568,7 @@ def capability_http_exec(
             "request": request_summary,
             "response": response_payload,
             "status_code": int(response.status_code),
+            "http_status": int(response.status_code),
             "error": "http_status_error",
             "error_message": f"HTTP request failed with status {response.status_code}",
             "retry_count": retry_count_after_failure,
@@ -567,6 +594,7 @@ def capability_http_exec(
                     "input": retry_input,
                 }
             ]
+            print("[HTTP_EXEC CORE] error return =", result)
             return result
 
         incident_command = _build_incident_router_command(
@@ -580,6 +608,7 @@ def capability_http_exec(
         )
 
         result["next_commands"] = [incident_command]
+        print("[HTTP_EXEC CORE] error return =", result)
         return result
 
     except requests.Timeout as exc:
@@ -605,6 +634,7 @@ def capability_http_exec(
                 "elapsed_ms": elapsed_ms,
             },
             "status_code": None,
+            "http_status": None,
             "error": "timeout",
             "error_message": _trim_text(str(exc), 1000) or "Request timeout",
             "retry_count": retry_count_after_failure,
@@ -630,6 +660,7 @@ def capability_http_exec(
                     "input": retry_input,
                 }
             ]
+            print("[HTTP_EXEC CORE] error return =", result)
             return result
 
         incident_command = _build_incident_router_command(
@@ -642,6 +673,7 @@ def capability_http_exec(
             response_summary=result["response"],
         )
         result["next_commands"] = [incident_command]
+        print("[HTTP_EXEC CORE] error return =", result)
         return result
 
     except requests.RequestException as exc:
@@ -667,6 +699,7 @@ def capability_http_exec(
                 "elapsed_ms": elapsed_ms,
             },
             "status_code": None,
+            "http_status": None,
             "error": "request_exception",
             "error_message": _trim_text(str(exc), 1000) or exc.__class__.__name__,
             "retry_count": retry_count_after_failure,
@@ -692,6 +725,7 @@ def capability_http_exec(
                     "input": retry_input,
                 }
             ]
+            print("[HTTP_EXEC CORE] error return =", result)
             return result
 
         incident_command = _build_incident_router_command(
@@ -704,6 +738,7 @@ def capability_http_exec(
             response_summary=result["response"],
         )
         result["next_commands"] = [incident_command]
+        print("[HTTP_EXEC CORE] error return =", result)
         return result
 
     except Exception as exc:
@@ -729,6 +764,7 @@ def capability_http_exec(
                 "elapsed_ms": elapsed_ms,
             },
             "status_code": None,
+            "http_status": None,
             "error": "unexpected_exception",
             "error_message": _trim_text(f"{exc.__class__.__name__}: {exc}", 1000),
             "retry_count": retry_count_after_failure,
@@ -754,6 +790,7 @@ def capability_http_exec(
                     "input": retry_input,
                 }
             ]
+            print("[HTTP_EXEC CORE] error return =", result)
             return result
 
         incident_command = _build_incident_router_command(
@@ -766,6 +803,7 @@ def capability_http_exec(
             response_summary=result["response"],
         )
         result["next_commands"] = [incident_command]
+        print("[HTTP_EXEC CORE] error return =", result)
         return result
 
 
