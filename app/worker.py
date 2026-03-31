@@ -5826,8 +5826,7 @@ def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, An
     
 def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     print("HTTP_EXEC_WRAPPER_V5_ENTERED", flush=True)
-    print("[HTTP_EXEC_WRAPPED] raw result =", repr(result), flush=True)
-    
+
     payload = _normalize_flow_keys(req.input or {})
     workspace_id = _resolve_workspace_id(req=req)
 
@@ -5841,8 +5840,20 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
     flow_id, root_event_id = _resolve_flow_ids(payload)
     step_index = _resolve_flow_step_index(payload, 0)
 
-    result = capability_http_exec(input_data=payload)
-    print("[HTTP_EXEC_WRAPPED] raw result =", repr(result))
+    try:
+        result = capability_http_exec(input_data=payload)
+        print("[HTTP_EXEC_WRAPPED] raw result =", repr(result), flush=True)
+    except Exception as e:
+        print("[HTTP_EXEC_WRAPPED] EXCEPTION =", str(e), flush=True)
+        result = {
+            "ok": False,
+            "capability": "http_exec",
+            "status": "error",
+            "error": "exception_in_http_exec",
+            "error_message": str(e),
+            "next_commands": [],
+            "terminal": True,
+        }
 
     if not isinstance(result, dict):
         result = {
@@ -5881,17 +5892,17 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
     if "terminal" not in result:
         result["terminal"] = not bool(result["next_commands"])
 
-    print("[HTTP_EXEC_WRAPPER_RESULT]", result)
+    print("[HTTP_EXEC_WRAPPER_RESULT]", result, flush=True)
 
     def _spawn_commands(next_commands: List[Dict[str, Any]], idem_suffix: str) -> None:
         for next_cmd in next_commands:
             if not isinstance(next_cmd, dict):
-                print("[spawn] skipped non-dict next_cmd =", next_cmd)
+                print("[spawn] skipped non-dict next_cmd =", next_cmd, flush=True)
                 continue
 
             next_capability = str(next_cmd.get("capability") or "").strip()
             if not next_capability:
-                print("[spawn] skipped empty capability next_cmd =", next_cmd)
+                print("[spawn] skipped empty capability next_cmd =", next_cmd, flush=True)
                 continue
 
             next_input = (
@@ -5902,7 +5913,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             next_priority = int(next_cmd.get("priority") or 1)
 
             if not isinstance(next_input, dict):
-                print("[spawn] next_input not dict, fallback to {} =", next_input)
+                print("[spawn] next_input not dict, fallback to {} =", next_input, flush=True)
                 next_input = {}
 
             next_input = _normalize_flow_keys(dict(next_input))
@@ -5943,8 +5954,8 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                 next_input["retry_reason"] = next_input.get("reason")
 
             if next_capability == "http_exec" and not next_input.get("url"):
-                print("[spawn] skipped http_exec without url")
-                print("[spawn] rejected next_input =", next_input)
+                print("[spawn] skipped http_exec without url", flush=True)
+                print("[spawn] rejected next_input =", next_input, flush=True)
                 continue
 
             spawn_fields = {
@@ -5963,13 +5974,13 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             if root_event_id:
                 spawn_fields["Root_Event_ID"] = root_event_id
 
-            print("[SPAWN next_capability] =", next_capability)
-            print("[SPAWN next_input] =", next_input)
-            print("[SPAWN Input_JSON] =", json.dumps(next_input, ensure_ascii=False))
-            print("[SPAWN fields] =", spawn_fields)
+            print("[SPAWN next_capability] =", next_capability, flush=True)
+            print("[SPAWN next_input] =", next_input, flush=True)
+            print("[SPAWN Input_JSON] =", json.dumps(next_input, ensure_ascii=False), flush=True)
+            print("[SPAWN fields] =", spawn_fields, flush=True)
 
             create_res = _airtable_create(COMMANDS_TABLE_NAME, spawn_fields)
-            print("[SPAWN create_res] =", create_res)
+            print("[SPAWN create_res] =", create_res, flush=True)
 
     # ------------------------------------------------------------
     # FAILURE PATH -> incident_router_v2
@@ -6014,10 +6025,10 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             "parent_command_id": payload.get("parent_command_id") or "",
         }
 
-        print("[worker.wrapper] failure_path status_code =", status_code)
-        print("[worker.wrapper] failure_path payload =", payload)
-        print("[worker.wrapper] failure_path result =", result)
-        print("[worker.wrapper] incident_input =", incident_input)
+        print("[worker.wrapper] failure_path status_code =", status_code, flush=True)
+        print("[worker.wrapper] failure_path payload =", payload, flush=True)
+        print("[worker.wrapper] failure_path result =", result, flush=True)
+        print("[worker.wrapper] incident_input =", incident_input, flush=True)
 
         incident_req = RunRequest.from_payload(
             {
@@ -6030,23 +6041,44 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             }
         )
 
-        incident_result = capability_incident_router_v2(incident_req, run_record_id)
+        try:
+            incident_result = capability_incident_router_v2(incident_req, run_record_id)
+            print("[worker.wrapper] incident_result =", incident_result, flush=True)
+        except Exception as e:
+            print("[worker.wrapper] incident_router_v2 EXCEPTION =", str(e), flush=True)
+            incident_result = {
+                "ok": False,
+                "error": "incident_router_v2_exception",
+                "error_message": str(e),
+                "next_commands": [],
+                "terminal": True,
+            }
 
-        print("[worker.wrapper] incident_result =", incident_result)
+        if not isinstance(incident_result, dict):
+            incident_result = {
+                "ok": False,
+                "error": "incident_router_v2 returned non-dict result",
+                "next_commands": [],
+                "terminal": True,
+            }
 
-        if isinstance(incident_result, dict) and isinstance(incident_result.get("next_commands"), list) and incident_result.get("next_commands"):
-            print("[worker.wrapper] incident_result next_commands =", incident_result.get("next_commands", []))
+        if isinstance(incident_result.get("next_commands"), list) and incident_result.get("next_commands"):
+            print(
+                "[worker.wrapper] incident_result next_commands =",
+                incident_result.get("next_commands", []),
+                flush=True,
+            )
             _spawn_commands(incident_result.get("next_commands", []), "incident-router-v2")
         else:
-            print("[worker.wrapper] no next_commands from incident_result")
+            print("[worker.wrapper] no next_commands from incident_result", flush=True)
 
         result["flow_id"] = flow_id
         result["root_event_id"] = root_event_id
-        result["next_commands"] = incident_result.get("next_commands", []) if isinstance(incident_result, dict) else []
-        result["terminal"] = bool(incident_result.get("terminal", False)) if isinstance(incident_result, dict) else True
+        result["next_commands"] = incident_result.get("next_commands", [])
+        result["terminal"] = bool(incident_result.get("terminal", False))
         result["incident_result"] = incident_result
 
-        print("[worker.wrapper] returning failure result =", result)
+        print("[worker.wrapper] returning failure result =", result, flush=True)
         return result
 
     # ------------------------------------------------------------
@@ -6058,7 +6090,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
     result.setdefault("status_code", status_code)
     result.setdefault("terminal", True)
 
-    print("[worker.wrapper] returning success result =", result)
+    print("[worker.wrapper] returning success result =", result, flush=True)
     return result
     
 def capability_retry_router_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
