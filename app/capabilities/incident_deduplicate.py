@@ -280,7 +280,9 @@ def _build_incident_key(data: Dict[str, Any], meta: Dict[str, Any]) -> str:
         or data.get("targeturl")
         or ""
     ).strip()
-    http_status = _to_str(data.get("http_status") or data.get("httpstatus") or "0").strip()
+    http_status = _to_str(
+        data.get("http_status") or data.get("httpstatus") or "0"
+    ).strip()
     incident_code = _to_str(
         data.get("incident_code")
         or data.get("incidentcode")
@@ -546,32 +548,13 @@ def run(
         "priority_score": decision_block["priority_score"],
     }
 
-    next_commands: List[Dict[str, Any]] = []
-
-    if decision_block["next_action"] == "internal_escalate":
-        next_commands.append(
-            {
-                "capability": "incident_create",
-                "priority": 1,
-                "input": create_input,
-            }
-        )
-    elif decision_block["next_action"] == "resolve_incident":
-        next_commands.append(
-            {
-                "capability": "resolve_incident",
-                "priority": 1,
-                "input": create_input,
-            }
-        )
-    else:
-        next_commands.append(
-            {
-                "capability": "incident_create",
-                "priority": 1,
-                "input": create_input,
-            }
-        )
+    next_commands: List[Dict[str, Any]] = [
+        {
+            "capability": "incident_create",
+            "priority": 1,
+            "input": create_input,
+        }
+    ]
 
     return {
         "ok": True,
