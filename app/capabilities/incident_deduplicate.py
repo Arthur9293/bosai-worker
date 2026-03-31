@@ -384,10 +384,7 @@ def _update_existing_incident_best_effort(
     seen = set()
 
     for fields in attempts:
-        clean_fields = {
-            k: v for k, v in fields.items()
-            if v not in ("", None, [])
-        }
+        clean_fields = {k: v for k, v in fields.items() if v not in ("", None, [])}
         signature = tuple(sorted(clean_fields.keys()))
         if not clean_fields or signature in seen:
             continue
@@ -549,6 +546,33 @@ def run(
         "priority_score": decision_block["priority_score"],
     }
 
+    next_commands: List[Dict[str, Any]] = []
+
+    if decision_block["next_action"] == "internal_escalate":
+        next_commands.append(
+            {
+                "capability": "incident_create",
+                "priority": 1,
+                "input": create_input,
+            }
+        )
+    elif decision_block["next_action"] == "resolve_incident":
+        next_commands.append(
+            {
+                "capability": "resolve_incident",
+                "priority": 1,
+                "input": create_input,
+            }
+        )
+    else:
+        next_commands.append(
+            {
+                "capability": "incident_create",
+                "priority": 1,
+                "input": create_input,
+            }
+        )
+
     return {
         "ok": True,
         "capability": "incident_deduplicate",
@@ -562,17 +586,11 @@ def run(
         "next_action": decision_block["next_action"],
         "auto_executable": decision_block["auto_executable"],
         "priority_score": decision_block["priority_score"],
-        "next_commands": [
-            {
-                "capability": "incident_create",
-                "priority": 1,
-                "input": create_input,
-            }
-        ],
+        "next_commands": next_commands,
         "terminal": False,
         "spawn_summary": {
             "ok": True,
-            "spawned": 1,
+            "spawned": len(next_commands),
             "skipped": 0,
             "errors": [],
         },
