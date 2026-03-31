@@ -5667,7 +5667,6 @@ def _create_incident_log_record(incident_payload: Dict[str, Any]) -> Dict[str, A
             "ok": False,
             "error": repr(e),
         }
-
 def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
 
@@ -5752,6 +5751,7 @@ def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, An
                     "method": "GET",
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
+                    "workspace_id": workspace_id,
                     "step_index": 1,
                     "goal": "fetch_probe",
                 },
@@ -5764,8 +5764,20 @@ def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, An
                     "method": "GET",
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
+                    "workspace_id": workspace_id,
                     "step_index": 2,
                     "goal": "confirm_probe",
+                },
+            },
+            {
+                "capability": "decision_demo",
+                "priority": 1,
+                "input": {
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "workspace_id": workspace_id,
+                    "step_index": 3,
+                    "goal": "final_decision",
                 },
             },
         ],
@@ -5773,6 +5785,7 @@ def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, An
         "root_event_id": root_event_id,
         "run_record_id": run_record_id,
     }
+
     
 def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     print("HTTP_EXEC_WRAPPER_V5_ENTERED", flush=True)
