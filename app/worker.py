@@ -7619,7 +7619,6 @@ async def run(request: Request, response: Response) -> RunResponse:
             for cmd in next_cmds:
                 try:
                     cmd = _normalize_keys_deep(cmd)
-                
 
                     spawn_res = _create_command_from_next_command(
                         next_cmd=cmd,
@@ -7631,7 +7630,7 @@ async def run(request: Request, response: Response) -> RunResponse:
                     print(
                         "[worker.spawn] next_command -> command",
                         {
-                            "capability": cmd.get("capability"),
+                            "capability": cmd.get("capability") if isinstance(cmd, dict) else None,
                             "ok": spawn_res.get("ok"),
                             "mode": spawn_res.get("mode"),
                             "command_record_id": spawn_res.get("command_record_id"),
@@ -7660,8 +7659,8 @@ async def run(request: Request, response: Response) -> RunResponse:
 
         try:
             _touch_workspace_last_seen(workspace_id)
-        except Exception:
-            pass
+        except Exception as touch_err:
+            print(f"[workspace] touch skipped err={repr(touch_err)}")
 
         return RunResponse(
             ok=True,
@@ -7674,11 +7673,25 @@ async def run(request: Request, response: Response) -> RunResponse:
         )
 
     except HTTPException as e:
-        fail_system_run(run_record_id, str(e.detail))
+        try:
+            fail_system_run(run_record_id, str(e.detail))
+        except Exception as fail_err:
+            print("[RUN ERROR] fail_system_run failed =", repr(fail_err))
+            traceback.print_exc()
         raise
+
     except Exception as e:
-        fail_system_run(run_record_id, repr(e))
-        raise HTTPException(status_code=500, detail="Internal error.")
+        print("[RUN ERROR] repr =", repr(e))
+        traceback.print_exc()
+
+        try:
+            fail_system_run(run_record_id, repr(e))
+        except Exception as fail_err:
+            print("[RUN ERROR] fail_system_run failed =", repr(fail_err))
+            traceback.print_exc()
+
+        raise HTTPException(status_code=500, detail=repr(e))
+        
 # ============================================================
 # Incidents / graphs / details
 # ============================================================
