@@ -180,6 +180,193 @@ def _fields_with_workspace(fields: Optional[Dict[str, Any]], workspace_id: str) 
 
 
 # ============================================================
+# WORKSPACES REGISTRY PATCH
+# ============================================================
+
+def _safe_str(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _parse_allowed_capabilities(value: Any) -> List[str]:
+    if value is None:
+        return []
+
+    if isinstance(value, list):
+        return [_safe_str(v) for v in value if _safe_str(v)]
+
+    text = _safe_str(value)
+    if not text:
+        return []
+
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return [_safe_str(v) for v in parsed if _safe_str(v)]
+    except Exception:
+        pass
+
+    return [_safe_str(v) for v in text.split(",") if _safe_str(v)]
+
+
+def _airtable_list_records_raw(
+    table_name: str,
+    view: Optional[str] = None,
+    formula: Optional[str] = None,
+    max_records: int = 100,
+) -> List[Dict[str, Any]]:
+    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID or not table_name:
+        return []
+
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{quote(table_name)}"
+    headers = {
+        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    params: Dict[str, Any] = {"pageSize": min(max_records, 100)}
+    if view:
+        params["view"] = view
+    if formula:
+        params["filterByFormula"] = formula
+
+    out: List[Dict[str, Any]] = []
+    offset = None
+
+    while True:
+        local_params = dict(params)
+        if offset:
+            local_params["offset"] = offset
+
+        resp = requests.get(url, headers=headers, params=local_params, timeout=20)
+        if resp.status_code >= 400:
+            print(f"[AIRTABLE] list raw failed table={table_name} status={resp.status_code} body={resp.text[:500]}")
+            return out
+
+        data = resp.json()
+        records = data.get("records", []) or []
+        out.extend(records)
+
+        offset = data.get("offset")
+        if not offset:
+            break
+
+    return out
+
+
+def _get_workspace_record_by_id(workspace_id: str) -> Optional[Dict[str, Any]]:
+    ws = _normalize_workspace_id(workspace_id)
+
+    records = _airtable_list_records_raw(
+        WORKSPACES_TABLE_NAME,
+        view=WORKSPACES_VIEW_NAME or None,
+        max_records=100,
+    )
+
+    for record in records:
+        fields = record.get("fields", {}) or {}
+        current = _normalize_workspace_id(fields.get("Workspace_ID"))
+        if current == ws:
+            return record
+
+    return None
+
+
+def _get_workspace_config(workspace_id: str) -> Dict[str, Any]:
+    ws = _normalize_workspace_id(workspace_id)
+    record = _get_workspace_record_by_id(ws)
+
+    if not record:
+        return {
+            "exists": False,
+            "workspace_id": ws,
+            "status": "",
+            "api_key": "",
+            "allowed_capabilities": [],
+            "record_id": "",
+        }
+
+    fields = record.get("fields", {}) or {}
+
+    return {
+        "exists": True,
+        "record_id": record.get("id", ""),
+        "workspace_id": _normalize_workspace_id(fields.get("Workspace_ID")),
+        "name": _safe_str(fields.get("Name")),
+        "status": _safe_str(fields.get("Status_select")).lower(),
+        "api_key": _safe_str(fields.get("API_Key")),
+        "plan": _safe_str(fields.get("Plan")).lower(),
+        "owner_email": _safe_str(fields.get("Owner_Email")),
+        "allowed_capabilities": _parse_allowed_capabilities(fields.get("Allowed_Capabilities")),
+    }
+
+
+def _workspace_is_active(config: Dict[str, Any]) -> bool:
+    status = _safe_str(config.get("status")).lower()
+    return status in ("active", "")
+
+
+def _validate_workspace_from_registry(request: Request, workspace_id: str, capability: Optional[str] = None) -> Dict[str, Any]:
+    ws = _normalize_workspace_id(workspace_id)
+    config = _get_workspace_config(ws)
+
+    if not config.get("exists"):
+        raise HTTPException(status_code=404, detail=f"workspace not found: {ws}")
+
+    if not _workspace_is_active(config):
+        raise HTTPException(status_code=403, detail=f"workspace not active: {ws}")
+
+    expected_key = _safe_str(config.get("api_key"))
+    provided_key = _safe_str(request.headers.get("x-bosai-key"))
+
+    if expected_key:
+        if not provided_key or not hmac.compare_digest(provided_key, expected_key):
+            raise HTTPException(status_code=401, detail="invalid workspace api key")
+
+    allowed = config.get("allowed_capabilities") or []
+    if capability and allowed:
+        if capability not in allowed:
+            raise HTTPException(status_code=403, detail=f"capability not allowed for workspace: {capability}")
+
+    return config
+
+
+def _touch_workspace_last_seen(workspace_id: str) -> None:
+    ws = _normalize_workspace_id(workspace_id)
+    config = _get_workspace_config(ws)
+    record_id = _safe_str(config.get("record_id"))
+    if not record_id:
+        return
+
+    try:
+        airtable_update(
+            WORKSPACES_TABLE_NAME,
+            record_id,
+            {
+                "Last_Seen_At": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+    except Exception as e:
+        print(f"[workspace] touch last seen failed ws={ws} err={e}")
+        
+# WORKSPACES REGISTRY PATCH helper
+
+def _generate_workspace_api_key() -> str:
+    return f"bosai_{uuid.uuid4().hex}{uuid.uuid4().hex[:8]}"
+
+def _generate_workspace_id_from_name(name: str) -> str:
+    base = _safe_str(name).lower()
+    allowed = []
+    for ch in base:
+        if ch.isalnum():
+            allowed.append(ch)
+        elif ch in (" ", "-", "_"):
+            allowed.append("-")
+    slug = "".join(allowed).strip("-")
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+    return slug or f"workspace-{uuid.uuid4().hex[:8]}"
+
+# ============================================================
 # Env / settings
 # ============================================================
 
@@ -7190,6 +7377,91 @@ def process_events(limit: int = 50) -> Dict[str, Any]:
 # ============================================================
 # Run endpoint
 # ============================================================
+@app.post("/workspace/create")
+async def create_workspace(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.")
+
+    name = _safe_str(body.get("name"))
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+
+    workspace_id = _normalize_workspace_id(
+        body.get("workspace_id") or _generate_workspace_id_from_name(name)
+    )
+
+    existing = _get_workspace_record_by_id(workspace_id)
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"workspace already exists: {workspace_id}",
+        )
+
+    plan = _safe_str(body.get("plan") or "monitor").lower()
+    if plan not in ("monitor", "control", "orchestrate"):
+        plan = "monitor"
+
+    allowed_capabilities = body.get("allowed_capabilities")
+    if not allowed_capabilities:
+        if plan == "monitor":
+            allowed_capabilities = ["health_tick"]
+        elif plan == "control":
+            allowed_capabilities = [
+                "health_tick",
+                "incident_router_v2",
+                "incident_deduplicate",
+                "incident_create",
+            ]
+        else:
+            allowed_capabilities = [
+                "decision_router",
+                "http_exec",
+                "incident_router_v2",
+                "incident_deduplicate",
+                "incident_create",
+                "internal_escalate",
+                "resolve_incident",
+                "complete_flow_incident",
+                "health_tick",
+            ]
+
+    api_key = _generate_workspace_api_key()
+    created_at = datetime.now(timezone.utc).isoformat()
+
+    fields = {
+        "Name": name,
+        "Workspace_ID": workspace_id,
+        "Status_select": "active",
+        "API_Key": api_key,
+        "Owner_Email": _safe_str(body.get("owner_email")),
+        "Plan": plan,
+        "Allowed_Capabilities": json.dumps(
+            allowed_capabilities,
+            ensure_ascii=False,
+        ),
+        "Created_At": created_at,
+        "Last_Seen_At": created_at,
+    }
+
+    record = airtable_create(WORKSPACES_TABLE_NAME, fields)
+
+    return {
+        "ok": True,
+        "workspace": {
+            "record_id": record.get("id", "") if isinstance(record, dict) else "",
+            "name": name,
+            "workspace_id": workspace_id,
+            "status": "active",
+            "plan": plan,
+            "owner_email": _safe_str(body.get("owner_email")),
+            "allowed_capabilities": allowed_capabilities,
+            "created_at": created_at,
+        },
+        "api_key": api_key,
+    }
+    
 @app.post("/run", response_model=RunResponse)
 async def run(request: Request, response: Response) -> RunResponse:
     started = time.time()
