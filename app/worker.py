@@ -5843,6 +5843,7 @@ def capability_planner_monitoring(req: RunRequest, run_record_id: str) -> Dict[s
             }
         )
 
+        # Step 1: probe
         next_commands.append(
             {
                 "capability": "http_exec",
@@ -5856,6 +5857,26 @@ def capability_planner_monitoring(req: RunRequest, run_record_id: str) -> Dict[s
                     "step_index": 1,
                     "goal": "monitor_probe",
                     "endpoint_name": name,
+                    "expected_status": expected_status,
+                    "timeout_ms": timeout_ms,
+                },
+            }
+        )
+
+        # Step 2: decision after probe
+        next_commands.append(
+            {
+                "capability": "decision_monitoring",
+                "priority": 1,
+                "input": {
+                    "workspace_id": workspace_id,
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": 2,
+                    "goal": "monitor_decision",
+                    "endpoint_name": name,
+                    "url": url,
+                    "method": method,
                     "expected_status": expected_status,
                     "timeout_ms": timeout_ms,
                 },
