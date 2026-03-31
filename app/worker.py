@@ -1135,19 +1135,14 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
 
         candidates: List[str] = []
 
-        # brut
         candidates.append(raw_text)
-
-        # guillemets échappés
         candidates.append(raw_text.replace('\\"', '"'))
 
-        # unicode escape
         try:
             candidates.append(bytes(raw_text, "utf-8").decode("unicode_escape"))
         except Exception:
             pass
 
-        # retire les backslashes invalides devant underscore
         candidates.append(raw_text.replace("\\_", "_"))
         candidates.append(raw_text.replace('\\"', '"').replace("\\_", "_"))
 
@@ -1157,7 +1152,6 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             pass
 
-        # dédoublonne
         seen = set()
         unique_candidates: List[str] = []
         for c in candidates:
@@ -1252,30 +1246,17 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     base = _unwrap_command_payload(base)
 
     field_alias_map = {
-        "url": ("url", "URL", "http_target", "Http_Target"),
-        "http_target": ("http_target", "Http_Target", "URL", "url"),
-        "method": ("method", "HTTP_Method", "Http_Method"),
+        "url": ("url", "URL", "http_target", "Http_Target", "httptarget"),
+        "http_target": ("http_target", "Http_Target", "httptarget", "URL", "url"),
+        "method": ("method", "HTTP_Method", "Http_Method", "HTTPMethod"),
         "headers": ("headers", "HTTP_Headers_JSON"),
         "body": ("body", "HTTP_Payload_JSON"),
         "json": ("json", "JSON", "Payload_JSON"),
         "timeout": ("timeout",),
 
         "flow_id": ("flow_id", "flowid", "flowId", "Flow_ID"),
-
-        "event_id": (
-            "event_id",
-            "eventid",
-            "eventId",
-            "Event_ID",
-        ),
-
-        "root_event_id": (
-            "root_event_id",
-            "rooteventid",
-            "rootEventId",
-            "Root_Event_ID",
-        ),
-
+        "event_id": ("event_id", "eventid", "eventId", "Event_ID"),
+        "root_event_id": ("root_event_id", "rooteventid", "rootEventId", "Root_Event_ID"),
         "step_index": ("step_index", "stepindex", "stepIndex", "Step_Index"),
         "goal": ("goal", "Goal", "failed_goal", "failedgoal", "Failed_Goal"),
         "reason": ("reason", "retry_reason", "retryreason", "Reason"),
@@ -1289,7 +1270,7 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         "status_code": ("status_code", "statuscode", "http_status", "httpstatus", "HTTP_Status"),
         "error": ("error", "last_error", "Error"),
         "original_capability": ("original_capability", "originalcapability", "source_capability"),
-        "workspace_id": ("workspace_id", "workspaceid", "Workspace_ID"),
+        "workspace_id": ("workspace_id", "workspaceid", "workspaceId", "Workspace_ID"),
         "run_record_id": ("run_record_id", "runrecordid", "Run_Record_ID"),
         "target_capability": ("target_capability", "targetcapability"),
         "original_input": ("original_input", "originalinput"),
@@ -1325,6 +1306,50 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     base = _unwrap_command_payload(base)
     base = _normalize_flow_keys(base)
 
+    # Renfort HTTP
+    if not str(base.get("url") or "").strip():
+        fallback_url = str(
+            base.get("http_target")
+            or base.get("URL")
+            or fields.get("http_target")
+            or fields.get("URL")
+            or fields.get("httptarget")
+            or ""
+        ).strip()
+        if fallback_url:
+            base["url"] = fallback_url
+
+    if not str(base.get("http_target") or "").strip():
+        fallback_http_target = str(
+            base.get("url")
+            or base.get("URL")
+            or fields.get("http_target")
+            or fields.get("URL")
+            or fields.get("httptarget")
+            or ""
+        ).strip()
+        if fallback_http_target:
+            base["http_target"] = fallback_http_target
+
+    if not str(base.get("method") or "").strip():
+        fallback_method = str(
+            base.get("HTTP_Method")
+            or base.get("HTTPMethod")
+            or fields.get("HTTP_Method")
+            or fields.get("HTTPMethod")
+            or "GET"
+        ).strip().upper()
+        base["method"] = fallback_method or "GET"
+
+    if base.get("step_index") in (None, ""):
+        base["step_index"] = 0
+
+    if parse_errors:
+        print(f"[compose_command_input] parse_errors={json.dumps(parse_errors, ensure_ascii=False)}")
+
+    print(f"[compose_command_input] final_base={json.dumps(base, ensure_ascii=False)}")
+    return base
+    
 def airtable_create(table_name: str, fields: Dict[str, Any]) -> Dict[str, Any]:
     if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
         raise RuntimeError("Airtable is not configured")
@@ -1346,81 +1371,6 @@ def airtable_create(table_name: str, fields: Dict[str, Any]) -> Dict[str, Any]:
     data = resp.json()
     print(f"[AIRTABLE] create = {table_name} ({resp.status_code})")
     return data
-
-    # ------------------------------------------------------------
-    # FLOW / ROOT propagation stricte
-    # ------------------------------------------------------------
-    parent_command_id = str(
-        fields.get("id")
-        or fields.get("record_id")
-        or fields.get("Command_ID")
-        or base.get("parent_command_id")
-        or ""
-    ).strip()
-
-    # workspace
-    if not str(base.get("workspace_id") or "").strip():
-        workspace_id = str(
-            fields.get("Workspace_ID")
-            or fields.get("workspace_id")
-            or ""
-        ).strip()
-        if workspace_id:
-            base["workspace_id"] = workspace_id
-
-    # parent
-    if not str(base.get("parent_command_id") or "").strip() and parent_command_id:
-        base["parent_command_id"] = parent_command_id
-
-    # ROOT_EVENT_ID prioritaire : event_id d'abord
-    root_event_id = str(
-        base.get("root_event_id")
-        or base.get("event_id")
-        or fields.get("event_id")
-        or fields.get("Event_ID")
-        or ""
-    ).strip()
-
-    if not root_event_id:
-        print("[compose_command_input][WARNING] missing root_event_id")
-    else:
-        base["root_event_id"] = root_event_id
-
-    # FLOW_ID dépend du flow, sinon root, sinon parent
-    flow_id = str(base.get("flow_id") or "").strip()
-
-    if not flow_id:
-        explicit_flow = str(
-            fields.get("flow_id")
-            or fields.get("Flow_ID")
-            or fields.get("flowid")
-            or ""
-        ).strip()
-
-        if explicit_flow:
-            flow_id = explicit_flow
-        elif root_event_id:
-            flow_id = root_event_id
-        elif parent_command_id:
-            flow_id = f"flow_{parent_command_id}"
-
-    if flow_id:
-        base["flow_id"] = flow_id
-
-    # STEP INDEX
-    if base.get("step_index") in (None, ""):
-        base["step_index"] = 0
-
-    if parse_errors:
-        print(
-            f"[compose_command_input] parse_errors={json.dumps(parse_errors, ensure_ascii=False)}"
-        )
-
-    print(
-        f"[compose_command_input] final_base={json.dumps(base, ensure_ascii=False)}"
-    )
-
-    return base
     
 def _resolve_workspace_id(
     req: Optional[RunRequest] = None,
