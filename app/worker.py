@@ -5825,6 +5825,8 @@ def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, An
     }
     
 def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    print("HTTP_EXEC_WRAPPER_V5_ENTERED")
+
     payload = _normalize_flow_keys(req.input or {})
     workspace_id = _resolve_workspace_id(req=req)
 
@@ -5840,7 +5842,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
     result = capability_http_exec(input_data=payload)
     print("[HTTP_EXEC_WRAPPED] raw result =", repr(result))
-    
+
     if not isinstance(result, dict):
         result = {
             "ok": False,
@@ -5969,7 +5971,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             print("[SPAWN create_res] =", create_res)
 
     # ------------------------------------------------------------
-    # FAILURE PATH -> incident_router
+    # FAILURE PATH -> incident_router_v2
     # ------------------------------------------------------------
     if (result.get("ok") is False) or (isinstance(status_code, int) and status_code >= 400):
         incident_input = {
@@ -6016,13 +6018,24 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         print("[worker.wrapper] failure_path result =", result)
         print("[worker.wrapper] incident_input =", incident_input)
 
-        incident_result = capability_incident_router_run(incident_input)
+        incident_req = RunRequest.from_payload(
+            {
+                "worker": req.worker,
+                "capability": "incident_router_v2",
+                "idempotency_key": f"{workspace_id}:incident_router_v2:{flow_id or root_event_id or run_record_id}:http-failure",
+                "input": incident_input,
+                "priority": req.priority,
+                "dry_run": bool(req.dry_run),
+            }
+        )
+
+        incident_result = capability_incident_router_v2(incident_req, run_record_id)
 
         print("[worker.wrapper] incident_result =", incident_result)
 
         if isinstance(incident_result, dict) and isinstance(incident_result.get("next_commands"), list) and incident_result.get("next_commands"):
             print("[worker.wrapper] incident_result next_commands =", incident_result.get("next_commands", []))
-            _spawn_commands(incident_result.get("next_commands", []), "incident-router")
+            _spawn_commands(incident_result.get("next_commands", []), "incident-router-v2")
         else:
             print("[worker.wrapper] no next_commands from incident_result")
 
