@@ -5787,6 +5787,91 @@ def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, An
         "run_record_id": run_record_id,
     }
 
+def capability_planner_monitoring(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    workspace_id = _resolve_workspace_id(req=req)
+    payload = _normalize_flow_keys(req.input or {})
+
+    view_name = str(payload.get("view") or "Active").strip() or "Active"
+
+    try:
+        endpoints = airtable_list_view("Monitored_Endpoints", view_name, max_records=100)
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": "monitored_endpoints_read_failed",
+            "error_message": repr(e),
+            "next_commands": [],
+            "terminal": True,
+            "run_record_id": run_record_id,
+        }
+
+    next_commands: List[Dict[str, Any]] = []
+    planned: List[Dict[str, Any]] = []
+
+    for record in endpoints:
+        fields = record.get("fields", {}) or {}
+
+        endpoint_workspace = str(fields.get("Workspace_ID") or "").strip()
+        if endpoint_workspace and endpoint_workspace != workspace_id:
+            continue
+
+        enabled = fields.get("Enabled")
+        if enabled not in (True, 1, "1", "true", "True", "yes", "on"):
+            continue
+
+        name = str(fields.get("Name") or "Unnamed endpoint").strip()
+        url = str(fields.get("URL") or "").strip()
+        method = str(fields.get("Method") or "GET").strip().upper()
+
+        if not url:
+            continue
+
+        expected_status = fields.get("Expected_Status")
+        timeout_ms = fields.get("Timeout_ms")
+
+        flow_id = f"flow-monitor-{uuid.uuid4().hex[:10]}"
+        root_event_id = flow_id
+
+        planned.append(
+            {
+                "name": name,
+                "url": url,
+                "method": method,
+                "expected_status": expected_status,
+                "timeout_ms": timeout_ms,
+                "flow_id": flow_id,
+            }
+        )
+
+        next_commands.append(
+            {
+                "capability": "http_exec",
+                "priority": 1,
+                "input": {
+                    "workspace_id": workspace_id,
+                    "url": url,
+                    "method": method,
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": 1,
+                    "goal": "monitor_probe",
+                    "endpoint_name": name,
+                    "expected_status": expected_status,
+                    "timeout_ms": timeout_ms,
+                },
+            }
+        )
+
+    return {
+        "ok": True,
+        "message": "planner_monitoring_executed",
+        "planned_count": len(planned),
+        "planned": planned,
+        "next_commands": next_commands,
+        "terminal": False,
+        "run_record_id": run_record_id,
+    }
+    
 def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     print("HTTP_EXEC_WRAPPER_V5_ENTERED", flush=True)
 
@@ -6296,6 +6381,7 @@ EVENT_CAPABILITY_ALLOWLIST = {
     "resolve_incident",
     "smart_resolve",
     "close_incident",
+    "planner_monitoring",
     
 }
 
@@ -6320,6 +6406,7 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "resolve_incident",
     "smart_resolve",
     "close_incident",
+    "planner_monitoring",
 }
 
 def _to_int(value: Any, default: int = 0) -> int:
@@ -6458,6 +6545,7 @@ CAPABILITIES = {
     "resolve_incident": capability_resolve_incident_wrapped,
     "close_incident": capability_close_incident_wrapped,
     "smart_resolve": capability_smart_resolve_wrapped,
+    "planner_monitoring": capability_planner_monitoring,
 
 }
   
