@@ -1325,7 +1325,7 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     base = _unwrap_command_payload(base)
     base = _normalize_flow_keys(base)
 
-    def airtable_create(table_name: str, fields: Dict[str, Any]) -> Dict[str, Any]:
+def airtable_create(table_name: str, fields: Dict[str, Any]) -> Dict[str, Any]:
     if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
         raise RuntimeError("Airtable is not configured")
 
