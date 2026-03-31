@@ -7512,6 +7512,7 @@ async def run(request: Request, response: Response) -> RunResponse:
     raw = await request.body()
 
     headers_lc = {k.lower(): v for k, v in request.headers.items()}
+    print("[RUN DEBUG] headers_lc =", headers_lc)
 
     try:
         payload = await request.json()
@@ -7522,6 +7523,7 @@ async def run(request: Request, response: Response) -> RunResponse:
     # Workspace auth (multi-tenant) OR fallback legacy auth
     # ------------------------------------------------------------
     workspace_record = resolve_workspace_from_headers(headers_lc)
+    print("[RUN DEBUG] workspace_record =", workspace_record)
 
     if workspace_record:
         req_workspace_id = str(
