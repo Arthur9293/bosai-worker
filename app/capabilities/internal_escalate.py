@@ -5,6 +5,9 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 
+DEFAULT_MAX_DEPTH = 8
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -81,8 +84,8 @@ def _try_update_one(
         print("[TRY_UPDATE_ONE] table =", table_name)
         print("[TRY_UPDATE_ONE] record_id =", record_id)
         print("[TRY_UPDATE_ONE] fields =", _safe_json(fields))
-        airtable_update(table_name, record_id, fields)
-        return {"ok": True, "fields": fields}
+        response = airtable_update(table_name, record_id, fields)
+        return {"ok": True, "fields": fields, "response": response}
     except Exception as e:
         print("[TRY_UPDATE_ONE] error =", repr(e))
         return {"ok": False, "fields": fields, "error": repr(e)}
@@ -222,6 +225,37 @@ def capability_internal_escalate(
 ):
     payload = _extract_input(req)
 
+    depth = _to_int(
+        payload.get("_depth")
+        if payload.get("_depth") is not None
+        else payload.get("depth"),
+        0,
+    )
+    if depth >= DEFAULT_MAX_DEPTH:
+        return {
+            "ok": False,
+            "capability": "internal_escalate",
+            "status": "error",
+            "error": "max_depth_reached",
+            "flow_id": _to_str(payload.get("flow_id")).strip(),
+            "root_event_id": _to_str(
+                payload.get("root_event_id") or payload.get("event_id") or payload.get("id")
+            ).strip(),
+            "run_record_id": _to_str(
+                run_record_id
+                or payload.get("run_record_id")
+                or payload.get("linked_run")
+                or ""
+            ).strip(),
+            "terminal": True,
+            "spawn_summary": {
+                "ok": True,
+                "spawned": 0,
+                "skipped": 0,
+                "errors": [],
+            },
+        }
+
     flow_id = _to_str(
         payload.get("flow_id")
         or payload.get("flowid")
@@ -304,6 +338,8 @@ def capability_internal_escalate(
 
     escalation_result = {
         "ok": True,
+        "capability": "internal_escalate",
+        "status": "done",
         "mode": "internal_escalate",
         "delivered": True,
         "channel": "internal",
@@ -322,6 +358,7 @@ def capability_internal_escalate(
         "root_event_id": root_event_id,
         "workspace_id": workspace_id,
         "parent_command_id": parent_command_id,
+        "command_id": parent_command_id,
         "ts": utc_now_iso(),
     }
 
@@ -381,15 +418,18 @@ def capability_internal_escalate(
         "incident_record_id": incident_record_id,
         "log_record_id": log_record_id,
         "step_index": _to_int(payload.get("step_index"), 0) + 1,
+        "_depth": depth + 1,
         "goal": "escalation_sent",
         "workspace_id": workspace_id,
         "parent_command_id": parent_command_id,
         "command_id": parent_command_id,
+        "linked_command": parent_command_id,
         "severity": severity,
         "final_failure": final_failure,
         "failed_url": failed_url,
         "http_status": http_status,
         "run_record_id": effective_run_record_id,
+        "linked_run": effective_run_record_id,
         "decision_status": "Escalated",
         "decision_reason": "internal_escalation_sent",
         "next_action": "complete_flow_incident",
@@ -397,6 +437,8 @@ def capability_internal_escalate(
 
     return {
         "ok": True,
+        "capability": "internal_escalate",
+        "status": "done",
         "mode": "internal_escalate",
         "delivered": True,
         "flow_id": flow_id,
@@ -405,6 +447,7 @@ def capability_internal_escalate(
         "log_record_id": log_record_id,
         "message": "internal_escalation_sent",
         "run_record_id": effective_run_record_id,
+        "command_id": parent_command_id,
         "logs_update_ok": bool(logs_update_res.get("ok")),
         "incident_update_ok": bool(incident_update_res.get("ok")),
         "incident_update_res": incident_update_res,
@@ -416,6 +459,12 @@ def capability_internal_escalate(
             }
         ],
         "terminal": False,
+        "spawn_summary": {
+            "ok": True,
+            "spawned": 1,
+            "skipped": 0,
+            "errors": [],
+        },
     }
 
 
