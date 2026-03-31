@@ -1441,7 +1441,12 @@ def _resolve_workspace_id(
     return workspace_id
 
 def resolve_workspace_from_headers(headers: Dict[str, str]) -> Optional[Dict[str, Any]]:
-    api_key = headers.get("x-api-key") or headers.get("x_api_key")
+    api_key = (
+        headers.get("x-bosai-key")
+        or headers.get("x-api-key")
+        or headers.get("x_api_key")
+        or ""
+    ).strip()
 
     if not api_key:
         return None
