@@ -7576,7 +7576,7 @@ async def run(request: Request, response: Response) -> RunResponse:
     raw = await request.body()
 
     headers_lc = {k.lower(): v for k, v in request.headers.items()}
-    print("[RUN DEBUG] headers_lc =", headers_lc)
+    print("[RUN DEBUG] headers_lc =", headers_lc, flush=True)
 
     try:
         payload = await request.json()
@@ -7587,7 +7587,7 @@ async def run(request: Request, response: Response) -> RunResponse:
     # Workspace auth (multi-tenant) OR fallback legacy auth
     # ------------------------------------------------------------
     workspace_record = resolve_workspace_from_headers(headers_lc)
-    print("[RUN DEBUG] workspace_record =", workspace_record)
+    print("[RUN DEBUG] workspace_record =", workspace_record, flush=True)
 
     if workspace_record:
         req_workspace_id = str(
@@ -7677,17 +7677,22 @@ async def run(request: Request, response: Response) -> RunResponse:
         print("[RUN] result_obj type =", type(result_obj).__name__, flush=True)
         print("[RUN] result_obj repr =", repr(result_obj), flush=True)
 
-         # 🔒 GUARD CRITIQUE
+        # ------------------------------------------------------------
+        # GUARD CRITIQUE
+        # ------------------------------------------------------------
         if not isinstance(result_obj, dict):
-            print("[RUN WARNING] capability returned non-dict → forcing safe result")
+            print(
+                "[RUN WARNING] capability returned non-dict -> forcing safe result",
+                flush=True,
+            )
             result_obj = {
                 "ok": False,
                 "error": "capability_returned_none_or_invalid",
                 "capability": req.capability,
                 "run_record_id": run_record_id,
             }
-        
-        next_cmds = result_obj.get("next_commands") if isinstance(result_obj, dict) else None
+
+        next_cmds = result_obj.get("next_commands")
 
         if isinstance(next_cmds, list) and next_cmds:
             spawned_results = []
@@ -7711,6 +7716,7 @@ async def run(request: Request, response: Response) -> RunResponse:
                             "mode": spawn_res.get("mode"),
                             "command_record_id": spawn_res.get("command_record_id"),
                         },
+                        flush=True,
                     )
                 except Exception as e:
                     err = {
@@ -7719,7 +7725,7 @@ async def run(request: Request, response: Response) -> RunResponse:
                         "capability": cmd.get("capability") if isinstance(cmd, dict) else None,
                     }
                     spawned_results.append(err)
-                    print("[worker.spawn] failed to create command:", err)
+                    print("[worker.spawn] failed to create command:", err, flush=True)
 
             result_obj["spawn_summary"] = {
                 "ok": all(bool(x.get("ok")) for x in spawned_results) if spawned_results else True,
@@ -7728,7 +7734,7 @@ async def run(request: Request, response: Response) -> RunResponse:
                 "results": spawned_results,
             }
 
-        if isinstance(result_obj, dict) and "run_record_id" not in result_obj:
+        if "run_record_id" not in result_obj:
             result_obj["run_record_id"] = run_record_id
 
         finish_system_run(run_record_id, "Done", result_obj)
@@ -7736,7 +7742,7 @@ async def run(request: Request, response: Response) -> RunResponse:
         try:
             _touch_workspace_last_seen(workspace_id)
         except Exception as touch_err:
-            print(f"[workspace] touch skipped err={repr(touch_err)}")
+            print(f"[workspace] touch skipped err={repr(touch_err)}", flush=True)
 
         return RunResponse(
             ok=True,
@@ -7752,22 +7758,21 @@ async def run(request: Request, response: Response) -> RunResponse:
         try:
             fail_system_run(run_record_id, str(e.detail))
         except Exception as fail_err:
-            print("[RUN ERROR] fail_system_run failed =", repr(fail_err))
+            print("[RUN ERROR] fail_system_run failed =", repr(fail_err), flush=True)
             traceback.print_exc()
         raise
 
     except Exception as e:
-        print("[RUN ERROR] repr =", repr(e))
+        print("[RUN ERROR] repr =", repr(e), flush=True)
         traceback.print_exc()
 
         try:
             fail_system_run(run_record_id, repr(e))
         except Exception as fail_err:
-            print("[RUN ERROR] fail_system_run failed =", repr(fail_err))
+            print("[RUN ERROR] fail_system_run failed =", repr(fail_err), flush=True)
             traceback.print_exc()
 
         raise HTTPException(status_code=500, detail=repr(e))
-        
 # ============================================================
 # Incidents / graphs / details
 # ============================================================
