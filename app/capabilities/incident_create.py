@@ -165,8 +165,7 @@ def _build_incident_name(data: Dict[str, Any]) -> str:
     )
 
     if category and failed_url:
-        short_url = failed_url[:80]
-        return f"{category.upper()} | {short_url}"
+        return f"{category.upper()} | {failed_url[:80]}"
 
     if code and http_status:
         return f"{code} | {http_status}"
@@ -255,9 +254,8 @@ def _normalize_decision_block(data: Dict[str, Any]) -> Dict[str, Any]:
         else:
             next_action = "complete_flow_incident"
 
-    if not auto_executable:
-        if next_action in {"internal_escalate", "resolve_incident"}:
-            auto_executable = True
+    if not auto_executable and next_action in {"internal_escalate", "resolve_incident"}:
+        auto_executable = True
 
     if priority_score <= 0:
         if next_action == "internal_escalate":
@@ -303,11 +301,18 @@ def run(
     if depth >= DEFAULT_MAX_DEPTH:
         return {
             "ok": False,
+            "capability": "incident_create",
             "error": "max_depth_reached",
             "flow_id": meta.get("flow_id", ""),
             "root_event_id": meta.get("root_event_id", ""),
             "run_record_id": meta.get("run_record_id", "") or run_record_id,
             "terminal": True,
+            "spawn_summary": {
+                "ok": True,
+                "spawned": 0,
+                "skipped": 0,
+                "errors": [],
+            },
         }
 
     effective_run_record_id = _to_str(
@@ -340,17 +345,8 @@ def run(
         or ""
     ).strip()
 
-    linked_run_ids = (
-        [effective_run_record_id]
-        if effective_run_record_id.startswith("rec")
-        else []
-    )
-
-    linked_command_ids = (
-        [effective_command_id]
-        if effective_command_id.startswith("rec")
-        else []
-    )
+    linked_run_ids = [effective_run_record_id] if effective_run_record_id.startswith("rec") else []
+    linked_command_ids = [effective_command_id] if effective_command_id.startswith("rec") else []
 
     effective_flow_id = _to_str(meta.get("flow_id", "")).strip()
     effective_root_event_id = _to_str(meta.get("root_event_id", "")).strip()
@@ -364,6 +360,7 @@ def run(
 
     incident_key = _to_str(data.get("incident_key") or "").strip()
     deduplicate_action = _to_str(data.get("deduplicate_action") or "").strip()
+
     final_failure = _to_bool(
         data.get("final_failure")
         if data.get("final_failure") is not None
@@ -434,10 +431,7 @@ def run(
         "SLA_Status": "Open",
     }
 
-    clean_fields = {
-        k: v for k, v in incident_fields.items()
-        if v not in ("", None, [])
-    }
+    clean_fields = {k: v for k, v in incident_fields.items() if v not in ("", None, [])}
 
     try:
         create_res = airtable_create(incidents_table_name, clean_fields)
@@ -468,11 +462,18 @@ def run(
     except Exception as e:
         return {
             "ok": False,
+            "capability": "incident_create",
             "error": f"incident_create_failed:{repr(e)}",
             "flow_id": effective_flow_id,
             "root_event_id": effective_root_event_id,
             "run_record_id": effective_run_record_id,
             "terminal": True,
+            "spawn_summary": {
+                "ok": True,
+                "spawned": 0,
+                "skipped": 0,
+                "errors": [],
+            },
         }
 
     if not effective_flow_id and incident_record_id:
@@ -491,9 +492,11 @@ def run(
     next_input = {
         "flow_id": effective_flow_id,
         "root_event_id": effective_root_event_id,
+        "event_id": effective_root_event_id,
         "step_index": _to_int(meta.get("step_index"), 0) + 1,
         "_depth": depth + 1,
         "workspace_id": meta.get("workspace_id", ""),
+        "workspace": meta.get("workspace_id", ""),
         "tenant_id": meta.get("tenant_id", ""),
         "app_name": meta.get("app_name", ""),
         "goal": _to_str(data.get("goal") or "incident_created"),
@@ -530,6 +533,13 @@ def run(
             or "",
         ),
         "target_url": _to_str(
+            data.get("target_url")
+            or data.get("targeturl")
+            or data.get("failed_url")
+            or data.get("failedurl")
+            or "",
+        ),
+        "http_target": _to_str(
             data.get("target_url")
             or data.get("targeturl")
             or data.get("failed_url")
@@ -602,10 +612,7 @@ def run(
             {
                 "capability": "complete_flow_incident",
                 "priority": 1,
-                "input": {
-                    **next_input,
-                    "goal": _to_str(data.get("goal") or "incident_created"),
-                },
+                "input": next_input,
             }
         )
 
