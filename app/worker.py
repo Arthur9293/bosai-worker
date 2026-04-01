@@ -1006,6 +1006,137 @@ def airtable_list_records(
 
     return out[:max_records]
 
+
+
+def airtable_update_lead_by_lead_id(lead_id: str, fields_to_update: Dict[str, Any]) -> Dict[str, Any]:
+    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+        raise RuntimeError("Airtable is not configured")
+
+    lead_id = str(lead_id or "").strip()
+    if not lead_id:
+        raise RuntimeError("lead_id is required")
+
+    record = airtable_find_first(
+        table_name=LEADS_TABLE_NAME,
+        filter_formula=f"{{Lead_ID}}='{lead_id}'",
+    )
+
+    if not record:
+        raise RuntimeError(f"Lead not found for Lead_ID={lead_id}")
+
+    record_id = record.get("id")
+    if not record_id:
+        raise RuntimeError("Lead record missing Airtable id")
+
+    return airtable_update(LEADS_TABLE_NAME, record_id, fields_to_update)
+
+def capability_send_lead_email(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    payload = _normalize_flow_keys(req.input or {})
+
+    workspace_id = _resolve_workspace_id(req=req)
+    flow_id, root_event_id = _resolve_flow_ids(payload)
+    step_index = _resolve_flow_step_index(payload, 0)
+
+    lead_id = str(payload.get("lead_id") or "").strip()
+    lead_name = str(payload.get("lead_name") or "").strip()
+    lead_email = str(payload.get("lead_email") or "").strip()
+    lead_status = str(payload.get("lead_status") or "").strip()
+    action = str(payload.get("action") or "first_contact_attempt").strip()
+
+    if not lead_id:
+        raise HTTPException(status_code=400, detail="send_lead_email missing lead_id")
+
+    if not lead_email:
+        raise HTTPException(status_code=400, detail="send_lead_email missing lead_email")
+
+    from_name = os.getenv("SMTP_FROM_NAME", "").strip() or "Ferrera"
+
+    subject = "Nous avons bien reçu votre demande"
+    body = (
+        f"Bonjour {lead_name or ''},\n\n"
+        f"Nous avons bien reçu votre demande.\n"
+        f"Notre équipe reviendra vers vous rapidement.\n\n"
+        f"Cordialement,\n"
+        f"{from_name}"
+    )
+
+    smtp_result = send_email_smtp(lead_email, subject, body)
+
+    attempted_at = utc_now_iso()
+
+    if smtp_result.get("ok"):
+        update_fields = {
+            "Contact_Status": "Contacted",
+            "Last_Contact_Attempt_At": attempted_at,
+            "Last_Contact_Error": "",
+            "Last_Contact_Run_ID": run_record_id,
+        }
+
+        try:
+            airtable_update_lead_by_lead_id(lead_id, update_fields)
+        except Exception as e:
+            return {
+                "ok": False,
+                "message": "lead_email_sent_but_lead_update_failed",
+                "error": str(e),
+                "lead_id": lead_id,
+                "lead_email": lead_email,
+                "flow_id": flow_id,
+                "root_event_id": root_event_id,
+                "step_index": step_index,
+                "terminal": True,
+                "run_record_id": run_record_id,
+            }
+
+        return {
+            "ok": True,
+            "message": "lead_email_sent",
+            "lead_id": lead_id,
+            "lead_email": lead_email,
+            "lead_status_before": lead_status,
+            "contact_status_after": "Contacted",
+            "action": action,
+            "workspace_id": workspace_id,
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
+            "step_index": step_index,
+            "terminal": True,
+            "run_record_id": run_record_id,
+        }
+
+    error_text = str(smtp_result.get("error") or "unknown_email_error")
+
+    try:
+        airtable_update_lead_by_lead_id(
+            lead_id,
+            {
+                "Contact_Status": "Email Failed",
+                "Last_Contact_Attempt_At": attempted_at,
+                "Last_Contact_Error": error_text,
+                "Last_Contact_Run_ID": run_record_id,
+            },
+        )
+    except Exception:
+        pass
+
+    return {
+        "ok": False,
+        "message": "lead_email_failed",
+        "error": error_text,
+        "lead_id": lead_id,
+        "lead_email": lead_email,
+        "lead_status_before": lead_status,
+        "contact_status_after": "Email Failed",
+        "action": action,
+        "workspace_id": workspace_id,
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "step_index": step_index,
+        "terminal": True,
+        "run_record_id": run_record_id,
+    }
+
+
 def _json_load_maybe(val: Any) -> Dict[str, Any]:
     if val is None:
         return {}
@@ -6130,8 +6261,6 @@ def capability_lead_machine_demo(req: RunRequest, run_record_id: str) -> Dict[st
         "root_event_id": root_event_id,
         "run_record_id": run_record_id,
     }
-
-
 def capability_lead_decision(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
 
@@ -6150,34 +6279,32 @@ def capability_lead_decision(req: RunRequest, run_record_id: str) -> Dict[str, A
     if not lead_id:
         raise HTTPException(status_code=400, detail="lead_decision missing lead_id")
 
+    if not root_event_id:
+        root_event_id = flow_id
+
     decision = ""
     reason = ""
     next_commands: List[Dict[str, Any]] = []
 
     if lead_status == "New":
-        decision = "simulate_first_contact"
+        decision = "send_first_contact"
         reason = "lead_is_new"
 
         next_commands = [
             {
-                "capability": "http_exec",
+                "capability": "send_lead_email",
                 "priority": 1,
                 "input": {
-                    "url": "https://bosai-worker.onrender.com/send-lead-email",
-                    "method": "POST",
+                    "workspace_id": workspace_id,
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
-                    "workspace_id": workspace_id,
                     "step_index": step_index + 1,
                     "goal": "send_lead_email",
-                    "json": {
-                        "lead_id": lead_id,
-                        "lead_name": lead_name,
-                        "lead_email": lead_email,
-                        "lead_status": lead_status,
-                        "action": "first_contact_attempt",
-                        "run_record_id": run_record_id,
-                    },
+                    "lead_id": lead_id,
+                    "lead_name": lead_name,
+                    "lead_email": lead_email,
+                    "lead_status": lead_status,
+                    "action": "first_contact_attempt",
                 },
             }
         ]
@@ -6190,11 +6317,13 @@ def capability_lead_decision(req: RunRequest, run_record_id: str) -> Dict[str, A
                 "capability": "complete_flow_demo",
                 "priority": 1,
                 "input": {
+                    "workspace_id": workspace_id,
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
-                    "workspace_id": workspace_id,
                     "step_index": step_index + 1,
                     "goal": "lead_flow_complete",
+                    "lead_id": lead_id,
+                    "lead_status": lead_status,
                 },
             }
         ]
@@ -6206,12 +6335,17 @@ def capability_lead_decision(req: RunRequest, run_record_id: str) -> Dict[str, A
         "reason": reason,
         "lead_id": lead_id,
         "lead_status": lead_status,
+        "lead_email": lead_email,
+        "lead_name": lead_name,
+        "workspace_id": workspace_id,
         "flow_id": flow_id,
         "root_event_id": root_event_id,
         "next_commands": next_commands,
         "terminal": False,
         "run_record_id": run_record_id,
     }
+
+
     
 def capability_planner_monitoring(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     workspace_id = _resolve_workspace_id(req=req)
