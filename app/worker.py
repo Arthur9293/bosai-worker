@@ -6020,7 +6020,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         result = capability_http_exec(
         input_data=payload,
         run_record_id=run_record_id,
-        airtable_update_by_field=_airtable_update_by_field,
+        airtable_update_by_field=airtable_update_by_field,
     )
         print("[HTTP_EXEC_WRAPPED] raw result =", repr(result), flush=True)
     except Exception as e:
