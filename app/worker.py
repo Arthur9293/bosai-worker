@@ -377,6 +377,7 @@ load_dotenv(os.path.join(BASE_DIR, "..", ".env"), override=True)
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY", "").strip()
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID", "").strip()
 
+LEADS_TABLE_NAME = os.getenv("LEADS_TABLE_NAME", "Leads").strip()
 SYSTEM_RUNS_TABLE_NAME = os.getenv("SYSTEM_RUNS_TABLE_NAME", "System_Runs").strip()
 COMMANDS_TABLE_NAME = os.getenv("COMMANDS_TABLE_NAME", "Commands").strip()
 LOGS_ERRORS_TABLE_NAME = os.getenv("LOGS_ERRORS_TABLE_NAME", "Logs_Erreurs").strip()
