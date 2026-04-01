@@ -544,20 +544,38 @@ app.add_middleware(
     expose_headers=CORS_EXPOSE_HEADERS,
 )
 @app.post("/send-lead-email")
-async def send_lead_email(request: Request) -> Dict[str, Any]:
+async def send_lead_email(request: Request):
     try:
         payload = await request.json()
     except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON body.")
+        raise HTTPException(status_code=400, detail="Invalid JSON")
 
     if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="Payload must be an object.")
+        raise HTTPException(status_code=400, detail="Payload must be an object")
 
-    print("EMAIL_SIMULATION_RECEIVED:", payload, flush=True)
+    lead_email = str(payload.get("lead_email") or "").strip()
+    lead_name = str(payload.get("lead_name") or "").strip()
+
+    if not lead_email:
+        raise HTTPException(status_code=400, detail="lead_email is required")
+
+    from_name = os.getenv("SMTP_FROM_NAME", "").strip() or "Ferrera"
+
+    subject = "Nous avons bien reçu votre demande"
+    body = (
+        f"Bonjour {lead_name or ''},\n\n"
+        f"Nous avons bien reçu votre demande.\n"
+        f"Notre équipe reviendra vers vous rapidement.\n\n"
+        f"Cordialement,\n"
+        f"{from_name}"
+    )
+
+    result = send_email_smtp(lead_email, subject, body)
 
     return {
-        "ok": True,
-        "message": "email_sent_simulation",
+        "ok": result["ok"],
+        "message": "email_sent_real" if result["ok"] else "email_failed",
+        "error": result.get("error"),
         "received": payload,
         "ts": utc_now_iso(),
     }
