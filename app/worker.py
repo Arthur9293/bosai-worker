@@ -8036,6 +8036,9 @@ async def run(request: Request, response: Response) -> RunResponse:
         except Exception:
             payload = {}
 
+    if not isinstance(payload, dict):
+        payload = {}
+
     # ------------------------------------------------------------
     # Workspace auth (multi-tenant) OR fallback legacy auth
     # ------------------------------------------------------------
@@ -8043,8 +8046,12 @@ async def run(request: Request, response: Response) -> RunResponse:
     print("[RUN DEBUG] workspace_record =", workspace_record)
 
     if workspace_record:
+        payload_input_for_auth = payload.get("input") or {}
+        if not isinstance(payload_input_for_auth, dict):
+            payload_input_for_auth = {}
+
         req_workspace_id = str(
-            (payload.get("input") or {}).get("workspace_id")
+            payload_input_for_auth.get("workspace_id")
             or payload.get("workspace_id")
             or ""
         ).strip()
@@ -8157,7 +8164,9 @@ async def run(request: Request, response: Response) -> RunResponse:
                     spawn_res = _create_command_from_next_command(
                         next_cmd=cmd,
                         parent_run_id=run_record_id,
-                        workspace_id=(req.input or {}).get("workspace_id"),
+                        workspace_id=(req.input or {}).get("workspace_id")
+                        if isinstance(req.input, dict)
+                        else None,
                     )
                     spawned_results.append(spawn_res)
 
