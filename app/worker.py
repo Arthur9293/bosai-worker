@@ -1689,7 +1689,32 @@ def find_command_by_idem(idem_key: str) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
+def send_email_smtp(to_email: str, subject: str, body: str) -> dict:
+    try:
+        smtp_host = os.getenv("SMTP_HOST", "").strip()
+        smtp_port = int(os.getenv("SMTP_PORT", "587").strip())
+        smtp_user = os.getenv("SMTP_USERNAME", "").strip()
+        smtp_pass = os.getenv("SMTP_PASSWORD", "").strip()
+        smtp_from_email = os.getenv("SMTP_FROM_EMAIL", "").strip() or smtp_user
 
+        msg = MIMEMultipart()
+        msg["From"] = smtp_from_email
+        msg["To"] = to_email
+        msg["Subject"] = subject
+
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+
+        server = smtplib.SMTP(smtp_host, smtp_port, timeout=20)
+        server.starttls()
+        server.login(smtp_user, smtp_pass)
+        server.send_message(msg)
+        server.quit()
+
+        return {"ok": True}
+
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+        
 # ============================================================
 # Best-effort Airtable helpers
 # ============================================================
@@ -9070,7 +9095,43 @@ async def internal_escalate(request: Request) -> Dict[str, Any]:
         "received": payload,
         "ts": utc_now_iso(),
     }
+@app.post("/send-lead-email")
+async def send_lead_email(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
 
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be an object")
+
+    lead_email = str(payload.get("lead_email") or "").strip()
+    lead_name = str(payload.get("lead_name") or "").strip()
+
+    if not lead_email:
+        raise HTTPException(status_code=400, detail="lead_email is required")
+
+    from_name = os.getenv("SMTP_FROM_NAME", "").strip() or "Ferrera"
+
+    subject = "Nous avons bien reçu votre demande"
+    body = (
+        f"Bonjour {lead_name or ''},\n\n"
+        f"Nous avons bien reçu votre demande.\n"
+        f"Notre équipe reviendra vers vous rapidement.\n\n"
+        f"Cordialement,\n"
+        f"{from_name}"
+    )
+
+    result = send_email_smtp(lead_email, subject, body)
+
+    return {
+        "ok": result["ok"],
+        "message": "email_sent_real" if result["ok"] else "email_failed",
+        "error": result.get("error"),
+        "received": payload,
+        "ts": utc_now_iso(),
+    }
+    
 @app.get("/runs/{record_id}")
 def get_run_detail(record_id: str) -> Dict[str, Any]:
     try:
