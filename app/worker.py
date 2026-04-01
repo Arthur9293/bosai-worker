@@ -6659,7 +6659,7 @@ def capability_decision_monitoring(req: RunRequest, run_record_id: str) -> Dict[
     matched_command_id = ""
 
     # ------------------------------------------------------------
-    # 1) Lookup prioritaire dans Commands
+    # 1) Lookup Commands
     # ------------------------------------------------------------
     try:
         records = airtable_list_filtered(
@@ -6699,7 +6699,7 @@ def capability_decision_monitoring(req: RunRequest, run_record_id: str) -> Dict[
             break
 
     # ------------------------------------------------------------
-    # 2) Fallback dans System_Runs si rien trouvé dans Commands
+    # 2) Fallback System_Runs
     # ------------------------------------------------------------
     if actual_status is None:
         try:
@@ -6751,7 +6751,24 @@ def capability_decision_monitoring(req: RunRequest, run_record_id: str) -> Dict[
                 break
 
     # ------------------------------------------------------------
-    # 3) Décision monitoring
+    # MONITORING WRITEBACK (CRITIQUE)
+    # ------------------------------------------------------------
+    try:
+        if endpoint_name:
+            airtable_update_by_field(
+                table="Monitored_Endpoints",
+                field="Name",
+                value=endpoint_name,
+                fields={
+                    "Last_Status": actual_status,
+                    "Last_Error": "" if actual_status == expected_status_int else "expected_status_mismatch",
+                },
+            )
+    except Exception as e:
+        print("[decision_monitoring] endpoint update failed =", repr(e), flush=True)
+
+    # ------------------------------------------------------------
+    # DECISION
     # ------------------------------------------------------------
     if actual_status == expected_status_int:
         return {
