@@ -6045,7 +6045,7 @@ def capability_lead_machine_demo(req: RunRequest, run_record_id: str) -> Dict[st
                 },
             },
             {
-                "capability": "decision_demo",
+                "capability": "lead_decision",
                 "priority": 1,
                 "input": {
                     "workspace_id": workspace_id,
@@ -6053,11 +6053,97 @@ def capability_lead_machine_demo(req: RunRequest, run_record_id: str) -> Dict[st
                     "root_event_id": root_event_id,
                     "step_index": 2,
                     "goal": "lead_followup_decision",
+                    "lead_id": lead_id,
+                    "lead_status": lead_status,
+                    "lead_name": lead_name,
+                    "lead_email": lead_email,
                 },
             },
         ],
         "flow_id": flow_id,
         "root_event_id": root_event_id,
+        "run_record_id": run_record_id,
+    }
+
+
+def capability_lead_decision(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    payload = _normalize_flow_keys(req.input or {})
+
+    workspace_id = _resolve_workspace_id(req=req)
+    flow_id, root_event_id = _resolve_flow_ids(payload)
+    step_index = _resolve_flow_step_index(payload, 0)
+
+    lead_id = str(payload.get("lead_id") or "").strip()
+    lead_status = str(payload.get("lead_status") or "New").strip()
+    lead_email = str(payload.get("lead_email") or "").strip()
+    lead_name = str(payload.get("lead_name") or "").strip()
+
+    if not flow_id:
+        raise HTTPException(status_code=400, detail="lead_decision missing flow_id")
+
+    if not lead_id:
+        raise HTTPException(status_code=400, detail="lead_decision missing lead_id")
+
+    decision = ""
+    reason = ""
+    next_commands: List[Dict[str, Any]] = []
+
+    if lead_status == "New":
+        decision = "simulate_first_contact"
+        reason = "lead_is_new"
+
+        next_commands = [
+            {
+                "capability": "http_exec",
+                "priority": 1,
+                "input": {
+                    "url": "https://httpbin.org/post",
+                    "method": "POST",
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "workspace_id": workspace_id,
+                    "step_index": step_index + 1,
+                    "goal": "simulate_contact_attempt",
+                    "json": {
+                        "lead_id": lead_id,
+                        "lead_name": lead_name,
+                        "lead_email": lead_email,
+                        "lead_status": lead_status,
+                        "action": "first_contact_attempt",
+                        "run_record_id": run_record_id,
+                    },
+                },
+            }
+        ]
+    else:
+        decision = "complete_flow"
+        reason = "lead_not_new"
+
+        next_commands = [
+            {
+                "capability": "complete_flow_demo",
+                "priority": 1,
+                "input": {
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "workspace_id": workspace_id,
+                    "step_index": step_index + 1,
+                    "goal": "lead_flow_complete",
+                },
+            }
+        ]
+
+    return {
+        "ok": True,
+        "message": "lead_decision_executed",
+        "decision": decision,
+        "reason": reason,
+        "lead_id": lead_id,
+        "lead_status": lead_status,
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "next_commands": next_commands,
+        "terminal": False,
         "run_record_id": run_record_id,
     }
     
@@ -6733,6 +6819,7 @@ EVENT_CAPABILITY_ALLOWLIST = {
     "planner_monitoring",
     "decision_monitoring",
     "lead_machine_demo",
+    "lead_decision",
     
 }
 
@@ -6760,6 +6847,7 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "planner_monitoring",
     "decision_monitoring",
     "lead_machine_demo",
+    "lead_decision",
 }
 
 def _to_int(value: Any, default: int = 0) -> int:
@@ -7118,6 +7206,7 @@ CAPABILITIES = {
     "smart_resolve": capability_smart_resolve_wrapped,
     "planner_monitoring": capability_planner_monitoring,
     "decision_monitoring": capability_decision_monitoring,
+    "lead_decision": capability_lead_decision,
 
 }
   
