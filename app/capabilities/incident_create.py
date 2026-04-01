@@ -284,6 +284,7 @@ def run(
     run_record_id: str = "",
     *,
     airtable_create,
+    airtable_update_by_field=None,
     incidents_table_name: str,
     **kwargs: Any,
 ) -> Dict[str, Any]:
