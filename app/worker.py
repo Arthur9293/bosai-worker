@@ -6104,7 +6104,7 @@ def capability_lead_decision(req: RunRequest, run_record_id: str) -> Dict[str, A
                     "root_event_id": root_event_id,
                     "workspace_id": workspace_id,
                     "step_index": step_index + 1,
-                    "goal": "simulate_contact_attempt",
+                    "goal": "send_lead_email",
                     "json": {
                         "lead_id": lead_id,
                         "lead_name": lead_name,
