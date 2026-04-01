@@ -367,6 +367,7 @@ def _build_incident_router_command(
         "input": incident_input,
     }
 
+
 def _update_monitored_endpoint_best_effort(
     *,
     original_payload: Dict[str, Any],
@@ -411,18 +412,18 @@ def _update_monitored_endpoint_best_effort(
             return
 
         fields: Dict[str, Any] = {
-            "Last_Check_At": _now_ts(),
-            "Last_Error": str(error_text or ""),
+            "last_check_at": _now_ts(),
+            "last_error": str(error_text or ""),
         }
 
         if status_code is not None:
-            fields["Last_Status"] = int(status_code)
+            fields["last_status"] = int(status_code)
 
         if elapsed_ms is not None:
-            fields["Last_Response_Time_ms"] = int(elapsed_ms)
+            fields["last_response_time_ms"] = int(elapsed_ms)
 
         if run_record_id:
-            fields["Last_Run_ID"] = run_record_id
+            fields["last_run_id"] = run_record_id
 
         print("[http_exec][endpoint_update] fields =", fields, flush=True)
 
