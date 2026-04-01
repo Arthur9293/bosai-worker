@@ -7,10 +7,14 @@ import threading
 import time
 import traceback
 import uuid
+import smtplib
 
 print("WORKER_MAIN_FILE_MARKER")
 
 from dotenv import load_dotenv
+
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
