@@ -6098,7 +6098,7 @@ def capability_lead_decision(req: RunRequest, run_record_id: str) -> Dict[str, A
                 "capability": "http_exec",
                 "priority": 1,
                 "input": {
-                    "url": "https://httpbin.org/post",
+                    "url": "https://bosai-worker.onrender.com/send-lead-email",
                     "method": "POST",
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
