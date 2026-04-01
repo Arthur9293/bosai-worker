@@ -8023,7 +8023,7 @@ async def run(request: Request, response: Response) -> RunResponse:
     raw = await request.body()
 
     headers_lc = {k.lower(): v for k, v in request.headers.items()}
-    print("[RUN DEBUG] headers_lc =", headers_lc)
+    print("[RUN DEBUG] headers_lc =", headers_lc, flush=True)
 
     try:
         payload = await request.json()
@@ -8043,10 +8043,15 @@ async def run(request: Request, response: Response) -> RunResponse:
     # Workspace auth (multi-tenant) OR fallback legacy auth
     # ------------------------------------------------------------
     workspace_record = resolve_workspace_from_headers(headers_lc)
-    print("[RUN DEBUG] workspace_record =", workspace_record)
+    print("[RUN DEBUG] workspace_record =", workspace_record, flush=True)
 
     if workspace_record:
         payload_input_for_auth = payload.get("input") or {}
+        if isinstance(payload_input_for_auth, str):
+            try:
+                payload_input_for_auth = json.loads(payload_input_for_auth)
+            except Exception:
+                payload_input_for_auth = {}
         if not isinstance(payload_input_for_auth, dict):
             payload_input_for_auth = {}
 
@@ -8067,14 +8072,30 @@ async def run(request: Request, response: Response) -> RunResponse:
         workspace_id = _extract_workspace_id(payload=payload, request=request)
 
     # ------------------------------------------------------------
-    # Inject workspace ONLY inside input (not top-level)
+    # Normalize / inject workspace ONLY inside input
     # ------------------------------------------------------------
     payload_input = payload.get("input") or {}
+
+    if isinstance(payload_input, str):
+        try:
+            payload_input = json.loads(payload_input)
+        except Exception:
+            payload_input = {}
+
     if not isinstance(payload_input, dict):
         payload_input = {}
 
     payload_input = _inject_workspace(payload_input, workspace_id)
     payload["input"] = payload_input
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object")
+
+    if "input" in payload and not isinstance(payload.get("input"), dict):
+        try:
+            payload["input"] = json.loads(payload["input"])
+        except Exception:
+            payload["input"] = {}
 
     # ------------------------------------------------------------
     # Auto idempotency_key if missing
