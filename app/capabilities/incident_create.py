@@ -298,9 +298,6 @@ def run(
     data = _extract_input(payload)
     meta = _extract_meta(data)
 
-    # SAFE optional helper injection
-    airtable_update_by_field = kwargs.get("airtable_update_by_field")
-
     depth = _to_int(meta.get("depth"), 0)
     if depth >= DEFAULT_MAX_DEPTH:
         return {
@@ -468,9 +465,9 @@ def run(
         # ------------------------------------------------------------
         try:
             endpoint_name = _to_str(
-            data.get("endpoint_name")
-            or data.get("endpoint")
-            or ""
+                data.get("endpoint_name")
+                or data.get("endpoint")
+                or ""
             ).strip()
 
             if endpoint_name and incident_record_id and callable(airtable_update_by_field):
@@ -485,12 +482,14 @@ def run(
                     },
                 )
                 print("[incident_create] linked to Monitored_Endpoints =", endpoint_name, flush=True)
+            else:
+                print(
+                    "[incident_create] skip monitored_endpoints update (missing helper or endpoint_name)",
+                    flush=True,
+                )
 
-        else:
-                print("[incident_create] skip monitored_endpoints update (missing helper or endpoint_name)", flush=True)
-
-    except Exception as e:
-        print("[incident_create] monitored_endpoints_update_error =", str(e), flush=True)
+        except Exception as e:
+            print("[incident_create] monitored_endpoints_update_error =", str(e), flush=True)
 
     except Exception as e:
         return {
