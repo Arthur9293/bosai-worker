@@ -38,7 +38,7 @@ from app.capabilities.incident_update import run as capability_incident_update
 from app.capabilities.resolve_incident import run as capability_resolve_incident
 from app.capabilities.close_incident import run as capability_close_incident
 from app.capabilities.smart_resolve import run as capability_smart_resolve
-from app.routes.lead_email import router as lead_email_router
+
 
 # ============================================================
 # MULTI-TENANT PATCH
@@ -539,7 +539,25 @@ app.add_middleware(
     allow_headers=CORS_ALLOW_HEADERS,
     expose_headers=CORS_EXPOSE_HEADERS,
 )
+@app.post("/send-lead-email")
+async def send_lead_email(request: Request) -> Dict[str, Any]:
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.")
 
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be an object.")
+
+    print("EMAIL_SIMULATION_RECEIVED:", payload, flush=True)
+
+    return {
+        "ok": True,
+        "message": "email_sent_simulation",
+        "received": payload,
+        "ts": utc_now_iso(),
+    }
+    
 _HTTP_SESSION = requests.Session()
 
 SCHEDULER_LAST_TICK_AT: Optional[str] = None
