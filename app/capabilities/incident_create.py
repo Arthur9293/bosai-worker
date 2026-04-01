@@ -297,6 +297,9 @@ def run(
     data = _extract_input(payload)
     meta = _extract_meta(data)
 
+    # SAFE optional helper injection
+    airtable_update_by_field = kwargs.get("airtable_update_by_field")
+
     depth = _to_int(meta.get("depth"), 0)
     if depth >= DEFAULT_MAX_DEPTH:
         return {
@@ -458,6 +461,34 @@ def run(
         print("[incident_create] linked root_event_id =", effective_root_event_id)
         print("[incident_create] linked command_id =", effective_command_id)
         print("[incident_create] linked run_record_id =", effective_run_record_id)
+
+        # ------------------------------------------------------------
+        # LINK INCIDENT -> MONITORED ENDPOINT
+        # ------------------------------------------------------------
+        try:
+            endpoint_name = _to_str(data.get("endpoint_name") or "").strip()
+
+            if endpoint_name and incident_record_id and callable(airtable_update_by_field):
+                airtable_update_by_field(
+                    table="Monitored_Endpoints",
+                    field="Name",
+                    value=endpoint_name,
+                    fields={
+                        "Last_Incident_ID": incident_record_id
+                    },
+                )
+
+                print(
+                    "[incident_create] linked endpoint -> incident",
+                    {
+                        "endpoint_name": endpoint_name,
+                        "incident_id": incident_record_id,
+                    },
+                    flush=True,
+                )
+
+        except Exception as e:
+            print("[incident_create] endpoint link failed =", repr(e), flush=True)
 
     except Exception as e:
         return {
