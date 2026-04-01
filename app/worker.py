@@ -6541,44 +6541,41 @@ def capability_event_engine(req: RunRequest, run_record_id: str) -> Dict[str, An
 def capability_decision_monitoring(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
     workspace_id = _resolve_workspace_id(req=req)
-
-    flow_id = str(
-        payload.get("flow_id")
-        or payload.get("root_event_id")
-        or ""
-    ).strip()
-
-    root_event_id = str(
-        payload.get("root_event_id")
-        or flow_id
-        or ""
-    ).strip()
-
+    flow_id, root_event_id = _resolve_flow_ids(payload)
     step_index = _resolve_flow_step_index(payload, 0)
 
     endpoint_name = str(payload.get("endpoint_name") or "Unnamed endpoint").strip()
-    expected_status = payload.get("expected_status")
     url = str(payload.get("url") or "").strip()
     method = str(payload.get("method") or "GET").strip().upper()
 
-    last_probe_formula = (
-        "AND("
-        f"{{Flow_ID}}='{flow_id}',"
-        "{Capability}='http_exec',"
-        "{Status_select}='Done'"
-        ")"
-    )
+    expected_status = payload.get("expected_status")
+    try:
+        expected_status = int(expected_status) if expected_status is not None else 200
+    except Exception:
+        expected_status = 200
+
+    if not flow_id:
+        return {
+            "ok": False,
+            "error": "missing_flow_id",
+            "run_record_id": run_record_id,
+            "next_commands": [],
+            "terminal": True,
+        }
+
+    actual_status = None
+    matched_command_id = ""
 
     try:
-        probe_records = airtable_list_filtered(
+        records = airtable_list_filtered(
             COMMANDS_TABLE_NAME,
-            formula=last_probe_formula,
+            formula=f"AND({{Flow_ID}}='{flow_id}',{{Capability}}='http_exec',{{Status_select}}='Done')",
             max_records=10,
         )
     except Exception as e:
         return {
             "ok": False,
-            "error": "probe_lookup_failed",
+            "error": "commands_lookup_failed",
             "error_message": repr(e),
             "flow_id": flow_id,
             "root_event_id": root_event_id,
@@ -6587,56 +6584,77 @@ def capability_decision_monitoring(req: RunRequest, run_record_id: str) -> Dict[
             "terminal": True,
         }
 
-    last_probe = probe_records[0] if probe_records else None
-    probe_result = {}
+    for record in records:
+        fields = record.get("fields", {}) or {}
+        result_json = _json_load_maybe(fields.get("Result_JSON"))
 
-    if last_probe:
-        probe_fields = last_probe.get("fields", {}) or {}
-        probe_result = _json_load_maybe(probe_fields.get("Result_JSON"))
+        if not isinstance(result_json, dict):
+            continue
 
-    actual_status = None
-    if isinstance(probe_result, dict):
-        actual_status = (
-            probe_result.get("http_status")
-            or probe_result.get("status_code")
+        candidate_status = (
+            result_json.get("http_status")
+            or result_json.get("status_code")
             or (
-                probe_result.get("response", {}).get("status_code")
-                if isinstance(probe_result.get("response"), dict)
+                result_json.get("response", {}).get("status_code")
+                if isinstance(result_json.get("response"), dict)
                 else None
             )
         )
 
-    try:
-        actual_status = int(actual_status) if actual_status is not None else None
-    except Exception:
-        actual_status = None
+        try:
+            candidate_status = int(candidate_status) if candidate_status is not None else None
+        except Exception:
+            candidate_status = None
 
-    try:
-        expected_status_int = int(expected_status) if expected_status is not None else 200
-    except Exception:
-        expected_status_int = 200
+        if candidate_status is not None:
+            actual_status = candidate_status
+            matched_command_id = str(record.get("id") or "").strip()
+            break
 
-    if actual_status == expected_status_int:
-        decision = "close_monitoring_flow"
-        reason = "expected_status_matched"
-        next_commands = [
-            {
-                "capability": "complete_flow_demo",
-                "priority": 1,
-                "input": {
-                    "workspace_id": workspace_id,
-                    "flow_id": flow_id,
-                    "root_event_id": root_event_id,
-                    "step_index": step_index + 1,
-                    "goal": "monitoring_complete",
-                },
-            }
-        ]
-        terminal = False
-    else:
-        decision = "create_incident"
-        reason = "expected_status_mismatch"
-        next_commands = [
+    if actual_status == expected_status:
+        return {
+            "ok": True,
+            "decision": "close_monitoring_flow",
+            "reason": "expected_status_matched",
+            "endpoint_name": endpoint_name,
+            "url": url,
+            "method": method,
+            "expected_status": expected_status,
+            "actual_status": actual_status,
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
+            "run_record_id": run_record_id,
+            "matched_command_id": matched_command_id,
+            "next_commands": [
+                {
+                    "capability": "complete_flow_demo",
+                    "priority": 1,
+                    "input": {
+                        "workspace_id": workspace_id,
+                        "flow_id": flow_id,
+                        "root_event_id": root_event_id,
+                        "step_index": step_index + 1,
+                        "goal": "monitoring_completed",
+                    },
+                }
+            ],
+            "terminal": False,
+        }
+
+    return {
+        "ok": True,
+        "decision": "create_incident",
+        "reason": "expected_status_mismatch",
+        "endpoint_name": endpoint_name,
+        "url": url,
+        "method": method,
+        "expected_status": expected_status,
+        "actual_status": actual_status,
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "run_record_id": run_record_id,
+        "matched_command_id": matched_command_id,
+        "next_commands": [
             {
                 "capability": "incident_create",
                 "priority": 1,
@@ -6646,31 +6664,16 @@ def capability_decision_monitoring(req: RunRequest, run_record_id: str) -> Dict[
                     "root_event_id": root_event_id,
                     "step_index": step_index + 1,
                     "goal": "monitoring_incident",
-                    "reason": reason,
+                    "reason": "expected_status_mismatch",
                     "endpoint_name": endpoint_name,
                     "url": url,
                     "method": method,
-                    "expected_status": expected_status_int,
+                    "expected_status": expected_status,
                     "actual_status": actual_status,
                 },
             }
-        ]
-        terminal = False
-
-    return {
-        "ok": True,
-        "decision": decision,
-        "reason": reason,
-        "endpoint_name": endpoint_name,
-        "url": url,
-        "method": method,
-        "expected_status": expected_status_int,
-        "actual_status": actual_status,
-        "flow_id": flow_id,
-        "root_event_id": root_event_id,
-        "run_record_id": run_record_id,
-        "next_commands": next_commands,
-        "terminal": terminal,
+        ],
+        "terminal": False,
     }
     
 # ============================================================
