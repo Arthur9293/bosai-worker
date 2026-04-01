@@ -6541,18 +6541,30 @@ def capability_event_engine(req: RunRequest, run_record_id: str) -> Dict[str, An
 def capability_decision_monitoring(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
     workspace_id = _resolve_workspace_id(req=req)
-    flow_id, root_event_id = _resolve_flow_ids(payload)
+
+    flow_id = str(
+        payload.get("flow_id")
+        or payload.get("root_event_id")
+        or ""
+    ).strip()
+
+    root_event_id = str(
+        payload.get("root_event_id")
+        or flow_id
+        or ""
+    ).strip()
+
     step_index = _resolve_flow_step_index(payload, 0)
 
     endpoint_name = str(payload.get("endpoint_name") or "Unnamed endpoint").strip()
+    expected_status = payload.get("expected_status")
     url = str(payload.get("url") or "").strip()
     method = str(payload.get("method") or "GET").strip().upper()
 
-    expected_status = payload.get("expected_status")
     try:
-        expected_status = int(expected_status) if expected_status is not None else 200
+        expected_status_int = int(expected_status) if expected_status is not None else 200
     except Exception:
-        expected_status = 200
+        expected_status_int = 200
 
     if not flow_id:
         return {
@@ -6566,6 +6578,9 @@ def capability_decision_monitoring(req: RunRequest, run_record_id: str) -> Dict[
     actual_status = None
     matched_command_id = ""
 
+    # ------------------------------------------------------------
+    # 1) Lookup prioritaire dans Commands
+    # ------------------------------------------------------------
     try:
         records = airtable_list_filtered(
             COMMANDS_TABLE_NAME,
@@ -6573,16 +6588,8 @@ def capability_decision_monitoring(req: RunRequest, run_record_id: str) -> Dict[
             max_records=10,
         )
     except Exception as e:
-        return {
-            "ok": False,
-            "error": "commands_lookup_failed",
-            "error_message": repr(e),
-            "flow_id": flow_id,
-            "root_event_id": root_event_id,
-            "run_record_id": run_record_id,
-            "next_commands": [],
-            "terminal": True,
-        }
+        records = []
+        print("[decision_monitoring] commands lookup failed =", repr(e), flush=True)
 
     for record in records:
         fields = record.get("fields", {}) or {}
@@ -6611,7 +6618,62 @@ def capability_decision_monitoring(req: RunRequest, run_record_id: str) -> Dict[
             matched_command_id = str(record.get("id") or "").strip()
             break
 
-    if actual_status == expected_status:
+    # ------------------------------------------------------------
+    # 2) Fallback dans System_Runs si rien trouvé dans Commands
+    # ------------------------------------------------------------
+    if actual_status is None:
+        try:
+            run_records = airtable_list_filtered(
+                SYSTEM_RUNS_TABLE_NAME,
+                formula=f"AND({{Capability}}='http_exec',{{Status_select}}='Done')",
+                max_records=20,
+            )
+        except Exception as e:
+            run_records = []
+            print("[decision_monitoring] system_runs lookup failed =", repr(e), flush=True)
+
+        for record in run_records:
+            fields = record.get("fields", {}) or {}
+
+            result_json = _json_load_maybe(fields.get("Result_JSON"))
+            input_json = _json_load_maybe(fields.get("Input_JSON"))
+
+            if not isinstance(result_json, dict):
+                continue
+
+            run_flow_id = str(
+                result_json.get("flow_id")
+                or input_json.get("flow_id")
+                or ""
+            ).strip()
+
+            if run_flow_id != flow_id:
+                continue
+
+            candidate_status = (
+                result_json.get("http_status")
+                or result_json.get("status_code")
+                or (
+                    result_json.get("response", {}).get("status_code")
+                    if isinstance(result_json.get("response"), dict)
+                    else None
+                )
+            )
+
+            try:
+                candidate_status = int(candidate_status) if candidate_status is not None else None
+            except Exception:
+                candidate_status = None
+
+            if candidate_status is not None:
+                actual_status = candidate_status
+                matched_command_id = str(record.get("id") or "").strip()
+                break
+
+    # ------------------------------------------------------------
+    # 3) Décision monitoring
+    # ------------------------------------------------------------
+    if actual_status == expected_status_int:
         return {
             "ok": True,
             "decision": "close_monitoring_flow",
@@ -6619,7 +6681,7 @@ def capability_decision_monitoring(req: RunRequest, run_record_id: str) -> Dict[
             "endpoint_name": endpoint_name,
             "url": url,
             "method": method,
-            "expected_status": expected_status,
+            "expected_status": expected_status_int,
             "actual_status": actual_status,
             "flow_id": flow_id,
             "root_event_id": root_event_id,
@@ -6648,7 +6710,7 @@ def capability_decision_monitoring(req: RunRequest, run_record_id: str) -> Dict[
         "endpoint_name": endpoint_name,
         "url": url,
         "method": method,
-        "expected_status": expected_status,
+        "expected_status": expected_status_int,
         "actual_status": actual_status,
         "flow_id": flow_id,
         "root_event_id": root_event_id,
@@ -6668,14 +6730,13 @@ def capability_decision_monitoring(req: RunRequest, run_record_id: str) -> Dict[
                     "endpoint_name": endpoint_name,
                     "url": url,
                     "method": method,
-                    "expected_status": expected_status,
+                    "expected_status": expected_status_int,
                     "actual_status": actual_status,
                 },
             }
         ],
         "terminal": False,
     }
-    
 # ============================================================
 # Capabilities registry
 # ============================================================
