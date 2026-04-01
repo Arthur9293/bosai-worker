@@ -6345,7 +6345,113 @@ def capability_lead_decision(req: RunRequest, run_record_id: str) -> Dict[str, A
         "run_record_id": run_record_id,
     }
 
+def capability_send_lead_email(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    payload = _normalize_flow_keys(req.input or {})
 
+    workspace_id = _resolve_workspace_id(req=req)
+    flow_id, root_event_id = _resolve_flow_ids(payload)
+    step_index = _resolve_flow_step_index(payload, 0)
+
+    lead_id = str(payload.get("lead_id") or "").strip()
+    lead_name = str(payload.get("lead_name") or "").strip()
+    lead_email = str(payload.get("lead_email") or "").strip()
+    lead_status = str(payload.get("lead_status") or "").strip()
+    action = str(payload.get("action") or "first_contact_attempt").strip()
+
+    if not lead_id:
+        raise HTTPException(status_code=400, detail="send_lead_email missing lead_id")
+
+    if not lead_email:
+        raise HTTPException(status_code=400, detail="send_lead_email missing lead_email")
+
+    from_name = os.getenv("SMTP_FROM_NAME", "").strip() or "Ferrera"
+
+    subject = "Nous avons bien reçu votre demande"
+    body = (
+        f"Bonjour {lead_name or ''},\n\n"
+        f"Nous avons bien reçu votre demande.\n"
+        f"Notre équipe reviendra vers vous rapidement.\n\n"
+        f"Cordialement,\n"
+        f"{from_name}"
+    )
+
+    # ===== Envoi SMTP =====
+    smtp_result = send_email_smtp(lead_email, subject, body)
+
+    attempted_at = utc_now_iso()
+
+    # ===== SUCCÈS =====
+    if smtp_result.get("ok"):
+        try:
+            airtable_update_lead_by_lead_id(
+                lead_id,
+                {
+                    "Contact_Status": "Contacted",
+                    "Last_Contact_Attempt_At": attempted_at,
+                    "Last_Contact_Error": "",
+                    "Last_Contact_Run_ID": run_record_id,
+                },
+            )
+        except Exception as e:
+            return {
+                "ok": False,
+                "message": "email_sent_but_lead_update_failed",
+                "error": str(e),
+                "lead_id": lead_id,
+                "lead_email": lead_email,
+                "flow_id": flow_id,
+                "root_event_id": root_event_id,
+                "step_index": step_index,
+                "terminal": True,
+                "run_record_id": run_record_id,
+            }
+
+        return {
+            "ok": True,
+            "message": "email_sent_real",
+            "lead_id": lead_id,
+            "lead_email": lead_email,
+            "contact_status": "Contacted",
+            "action": action,
+            "workspace_id": workspace_id,
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
+            "step_index": step_index,
+            "terminal": True,
+            "run_record_id": run_record_id,
+        }
+
+    # ===== ÉCHEC =====
+    error_text = str(smtp_result.get("error") or "unknown_email_error")
+
+    try:
+        airtable_update_lead_by_lead_id(
+            lead_id,
+            {
+                "Contact_Status": "Email Failed",
+                "Last_Contact_Attempt_At": attempted_at,
+                "Last_Contact_Error": error_text,
+                "Last_Contact_Run_ID": run_record_id,
+            },
+        )
+    except Exception:
+        pass
+
+    return {
+        "ok": False,
+        "message": "email_failed",
+        "error": error_text,
+        "lead_id": lead_id,
+        "lead_email": lead_email,
+        "contact_status": "Email Failed",
+        "action": action,
+        "workspace_id": workspace_id,
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "step_index": step_index,
+        "terminal": True,
+        "run_record_id": run_record_id,
+    }
     
 def capability_planner_monitoring(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     workspace_id = _resolve_workspace_id(req=req)
@@ -7020,6 +7126,7 @@ EVENT_CAPABILITY_ALLOWLIST = {
     "decision_monitoring",
     "lead_machine_demo",
     "lead_decision",
+    "send_lead_email",
     
 }
 
@@ -7048,6 +7155,7 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "decision_monitoring",
     "lead_machine_demo",
     "lead_decision",
+    "send_lead_email",
 }
 
 def _to_int(value: Any, default: int = 0) -> int:
@@ -7407,6 +7515,7 @@ CAPABILITIES = {
     "planner_monitoring": capability_planner_monitoring,
     "decision_monitoring": capability_decision_monitoring,
     "lead_decision": capability_lead_decision,
+    "send_lead_email": capability_send_lead_email,
 
 }
   
