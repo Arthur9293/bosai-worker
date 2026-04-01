@@ -3412,7 +3412,12 @@ def _spawn_next_commands_from_result(
             skipped += 1
             errors.append(f"next_commands[{idx}] missing_capability")
             continue
+            
 
+        print("[ORCH] capability =", capability, flush=True)
+        print("[ORCH] allowlisted =", capability in EXECUTABLE_CAPABILITY_ALLOWLIST, flush=True)
+        print("[ORCH] allowlist =", EXECUTABLE_CAPABILITY_ALLOWLIST, flush=True)
+        
         if capability not in EXECUTABLE_CAPABILITY_ALLOWLIST:
             skipped += 1
             errors.append(f"next_commands[{idx}] disallowed_capability:{capability}")
