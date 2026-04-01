@@ -383,14 +383,27 @@ def _update_monitored_endpoint_best_effort(
             or ""
         ).strip()
 
+        endpoint_record_id = str(
+            original_payload.get("endpoint_record_id")
+            or original_payload.get("record_id")
+            or ""
+        ).strip()
+
         airtable_update_by_field = runtime_context.get("airtable_update_by_field")
+        airtable_update = runtime_context.get("airtable_update")
         run_record_id = str(runtime_context.get("run_record_id") or "").strip()
 
         print("[http_exec][endpoint_update] endpoint_name =", repr(endpoint_name), flush=True)
+        print("[http_exec][endpoint_update] endpoint_record_id =", repr(endpoint_record_id), flush=True)
         print("[http_exec][endpoint_update] run_record_id =", repr(run_record_id), flush=True)
         print(
-            "[http_exec][endpoint_update] helper_callable =",
+            "[http_exec][endpoint_update] helper_callable_by_field =",
             callable(airtable_update_by_field),
+            flush=True,
+        )
+        print(
+            "[http_exec][endpoint_update] helper_callable_update =",
+            callable(airtable_update),
             flush=True,
         )
         print(
@@ -402,14 +415,6 @@ def _update_monitored_endpoint_best_effort(
             },
             flush=True,
         )
-
-        if not endpoint_name:
-            print("[http_exec] skip monitored endpoint update: missing endpoint_name", flush=True)
-            return
-
-        if not callable(airtable_update_by_field):
-            print("[http_exec] skip monitored endpoint update: missing helper", flush=True)
-            return
 
         fields: Dict[str, Any] = {
             "last_check_at": _now_ts(),
@@ -427,6 +432,39 @@ def _update_monitored_endpoint_best_effort(
 
         print("[http_exec][endpoint_update] fields =", fields, flush=True)
 
+        # ------------------------------------------------------------
+        # PREFERRED PATH: direct update by Airtable record_id
+        # ------------------------------------------------------------
+        if endpoint_record_id and callable(airtable_update):
+            airtable_update(
+                table_name="Monitored_Endpoints",
+                record_id=endpoint_record_id,
+                fields=fields,
+            )
+            print(
+                "[http_exec] endpoint runtime updated by record_id =",
+                endpoint_record_id,
+                flush=True,
+            )
+            return
+
+        # ------------------------------------------------------------
+        # FALLBACK PATH: lookup by Name
+        # ------------------------------------------------------------
+        if not endpoint_name:
+            print(
+                "[http_exec] skip monitored endpoint update: missing endpoint_name and endpoint_record_id",
+                flush=True,
+            )
+            return
+
+        if not callable(airtable_update_by_field):
+            print(
+                "[http_exec] skip monitored endpoint update: missing helper for fallback by field",
+                flush=True,
+            )
+            return
+
         res = airtable_update_by_field(
             table="Monitored_Endpoints",
             field="Name",
@@ -434,12 +472,11 @@ def _update_monitored_endpoint_best_effort(
             fields=fields,
         )
 
-        print("[http_exec] endpoint runtime updated =", endpoint_name, flush=True)
+        print("[http_exec] endpoint runtime updated by Name =", endpoint_name, flush=True)
         print("[http_exec][endpoint_update] airtable response =", repr(res), flush=True)
 
     except Exception as e:
         print("[http_exec] endpoint update error =", repr(e), flush=True)
-
 
 def capability_http_exec(
     payload: Optional[Dict[str, Any]] = None,
