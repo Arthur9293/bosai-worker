@@ -6292,7 +6292,7 @@ def capability_lead_decision(req: RunRequest, run_record_id: str) -> Dict[str, A
 
         next_commands = [
             {
-                "capability": "send_lead_email",
+                "capability": "http_exec",
                 "priority": 1,
                 "input": {
                     "workspace_id": workspace_id,
