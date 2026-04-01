@@ -1371,6 +1371,38 @@ def airtable_create(table_name: str, fields: Dict[str, Any]) -> Dict[str, Any]:
     data = resp.json()
     print(f"[AIRTABLE] create = {table_name} ({resp.status_code})")
     return data
+
+
+def airtable_update_by_field(
+    table: str,
+    field: str,
+    value: Any,
+    fields: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+        raise RuntimeError("Airtable is not configured")
+
+    safe_value = str(value).replace("'", "\\'")
+    formula = f"{{{field}}}='{safe_value}'"
+
+    records = airtable_list_filtered(
+        table,
+        formula=formula,
+        max_records=1,
+    )
+
+    if not records:
+        raise RuntimeError(
+            f"Airtable update_by_field target not found table={table} field={field} value={value}"
+        )
+
+    record_id = str(records[0].get("id") or "").strip()
+    if not record_id:
+        raise RuntimeError(
+            f"Airtable update_by_field missing record id table={table} field={field} value={value}"
+        )
+
+    return airtable_update(table, record_id, fields)
     
 def _resolve_workspace_id(
     req: Optional[RunRequest] = None,
@@ -5959,6 +5991,54 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
     result.setdefault("step_index", step_index)
     result["run_record_id"] = run_record_id
     result["goal"] = goal or result.get("goal") or ""
+
+    # ------------------------------------------------------------
+    # Monitoring endpoint writeback
+    # ------------------------------------------------------------
+    try:
+        endpoint_name = str(payload.get("endpoint_name") or "").strip()
+
+        response_obj = result.get("response") if isinstance(result.get("response"), dict) else {}
+        elapsed_ms = response_obj.get("elapsed_ms")
+
+        try:
+            elapsed_ms = int(elapsed_ms) if elapsed_ms is not None else None
+        except Exception:
+            elapsed_ms = None
+
+        result_ok = bool(result.get("ok"))
+
+        if endpoint_name:
+            endpoint_update_fields = {
+                "Last_Status": status_code,
+                "Last_Check_At": utc_now_iso(),
+                "Last_Run_ID": run_record_id,
+                "Last_Error": "" if result_ok else (
+                    str(result.get("error_message") or result.get("error") or "http_error")
+                ),
+            }
+
+            if elapsed_ms is not None:
+                endpoint_update_fields["Last_Response_Time_ms"] = elapsed_ms
+
+            airtable_update_by_field(
+                table="Monitored_Endpoints",
+                field="Name",
+                value=endpoint_name,
+                fields=endpoint_update_fields,
+            )
+
+            print(
+                "[HTTP_EXEC_WRAPPED] endpoint updated =",
+                {
+                    "endpoint_name": endpoint_name,
+                    "fields": endpoint_update_fields,
+                },
+                flush=True,
+            )
+
+    except Exception as e:
+        print("[HTTP_EXEC_WRAPPED] endpoint update skipped =", repr(e), flush=True)
 
     if "next_commands" not in result or not isinstance(result.get("next_commands"), list):
         result["next_commands"] = []
