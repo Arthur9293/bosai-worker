@@ -367,7 +367,6 @@ def _build_incident_router_command(
         "input": incident_input,
     }
 
-
 def _update_monitored_endpoint_best_effort(
     *,
     original_payload: Dict[str, Any],
@@ -385,6 +384,23 @@ def _update_monitored_endpoint_best_effort(
 
         airtable_update_by_field = runtime_context.get("airtable_update_by_field")
         run_record_id = str(runtime_context.get("run_record_id") or "").strip()
+
+        print("[http_exec][endpoint_update] endpoint_name =", repr(endpoint_name), flush=True)
+        print("[http_exec][endpoint_update] run_record_id =", repr(run_record_id), flush=True)
+        print(
+            "[http_exec][endpoint_update] helper_callable =",
+            callable(airtable_update_by_field),
+            flush=True,
+        )
+        print(
+            "[http_exec][endpoint_update] status_code/error_text/elapsed_ms =",
+            {
+                "status_code": status_code,
+                "error_text": error_text,
+                "elapsed_ms": elapsed_ms,
+            },
+            flush=True,
+        )
 
         if not endpoint_name:
             print("[http_exec] skip monitored endpoint update: missing endpoint_name", flush=True)
@@ -408,13 +424,17 @@ def _update_monitored_endpoint_best_effort(
         if run_record_id:
             fields["Last_Run_ID"] = run_record_id
 
-        airtable_update_by_field(
+        print("[http_exec][endpoint_update] fields =", fields, flush=True)
+
+        res = airtable_update_by_field(
             table="Monitored_Endpoints",
             field="Name",
             value=endpoint_name,
             fields=fields,
         )
+
         print("[http_exec] endpoint runtime updated =", endpoint_name, flush=True)
+        print("[http_exec][endpoint_update] airtable response =", repr(res), flush=True)
 
     except Exception as e:
         print("[http_exec] endpoint update error =", repr(e), flush=True)
