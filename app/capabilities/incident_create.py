@@ -467,7 +467,11 @@ def run(
         # LINK INCIDENT -> MONITORED ENDPOINT
         # ------------------------------------------------------------
         try:
-            endpoint_name = _to_str(data.get("endpoint_name") or "").strip()
+            endpoint_name = _to_str(
+            data.get("endpoint_name")
+            or data.get("endpoint")
+            or ""
+            ).strip()
 
             if endpoint_name and incident_record_id and callable(airtable_update_by_field):
                 airtable_update_by_field(
@@ -475,21 +479,18 @@ def run(
                     field="Name",
                     value=endpoint_name,
                     fields={
-                        "Last_Incident_ID": incident_record_id
+                        "Last_Incident_ID": incident_record_id,
+                        "Last_Error": _to_str(data.get("reason") or ""),
+                        "Last_Check_At": now_ts,
                     },
                 )
+                print("[incident_create] linked to Monitored_Endpoints =", endpoint_name, flush=True)
 
-                print(
-                    "[incident_create] linked endpoint -> incident",
-                    {
-                        "endpoint_name": endpoint_name,
-                        "incident_id": incident_record_id,
-                    },
-                    flush=True,
-                )
+        else:
+                print("[incident_create] skip monitored_endpoints update (missing helper or endpoint_name)", flush=True)
 
-        except Exception as e:
-            print("[incident_create] endpoint link failed =", repr(e), flush=True)
+    except Exception as e:
+        print("[incident_create] monitored_endpoints_update_error =", str(e), flush=True)
 
     except Exception as e:
         return {
