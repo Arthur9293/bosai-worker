@@ -885,6 +885,54 @@ def airtable_list_filtered(
         raise HTTPException(status_code=500, detail=f"Airtable filtered list failed: {r.status_code} {r.text}")
     return r.json().get("records", [])
 
+def airtable_list_records(
+    table_name: str,
+    *,
+    view: Optional[str] = None,
+    formula: Optional[str] = None,
+    max_records: int = 100,
+) -> List[Dict[str, Any]]:
+    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+        return []
+
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{quote(table_name)}"
+    headers = {
+        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+    }
+
+    params: Dict[str, Any] = {
+        "maxRecords": max_records,
+    }
+    if view:
+        params["view"] = view
+    if formula:
+        params["filterByFormula"] = formula
+
+    out: List[Dict[str, Any]] = []
+    offset: Optional[str] = None
+
+    while True:
+        req_params = dict(params)
+        if offset:
+            req_params["offset"] = offset
+
+        resp = requests.get(url, headers=headers, params=req_params, timeout=20)
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"Airtable list failed table={table_name} status={resp.status_code} body={resp.text[:500]}"
+            )
+
+        data = resp.json()
+        records = data.get("records", [])
+        if isinstance(records, list):
+            out.extend(records)
+
+        offset = data.get("offset")
+        if not offset or len(out) >= max_records:
+            break
+
+    return out[:max_records]
+
 def _json_load_maybe(val: Any) -> Dict[str, Any]:
     if val is None:
         return {}
@@ -1403,7 +1451,29 @@ def airtable_update_by_field(
         )
 
     return airtable_update(table, record_id, fields)
-    
+
+
+def _monitoring_endpoint_to_api(record: Dict[str, Any]) -> Dict[str, Any]:
+    fields = record.get("fields", {}) if isinstance(record, dict) else {}
+    if not isinstance(fields, dict):
+        fields = {}
+
+    return {
+        "record_id": str(record.get("id") or "").strip(),
+        "name": str(fields.get("Name") or "").strip(),
+        "workspace_id": str(fields.get("Workspace_ID") or "").strip(),
+        "url": str(fields.get("URL") or "").strip(),
+        "method": str(fields.get("Method") or "").strip().upper(),
+        "expected_status": fields.get("Expected_Status"),
+        "timeout_ms": fields.get("Timeout_ms"),
+        "enabled": bool(fields.get("Enabled") in (True, 1, "1", "true", "True", "yes", "on")),
+        "last_status": fields.get("Last_Status"),
+        "last_error": str(fields.get("Last_Error") or "").strip(),
+        "last_incident_id": str(fields.get("Last_Incident_ID") or "").strip(),
+        "last_check_at": str(fields.get("Last_Check_At") or "").strip(),
+        "last_response_time_ms": fields.get("Last_Response_Time_ms"),
+        "last_run_id": str(fields.get("Last_Run_ID") or "").strip(),
+    }
 def _resolve_workspace_id(
     req: Optional[RunRequest] = None,
     fields: Optional[Dict[str, Any]] = None,
@@ -7215,7 +7285,38 @@ def _build_flows_from_command_items(commands: List[Dict[str, Any]]) -> List[Dict
 
     return flows
 
+@app.get("/monitoring/endpoints")
+def get_monitoring_endpoints(
+    workspace_id: Optional[str] = None,
+    view: str = "Grid view",
+    max_records: int = 100,
+) -> Dict[str, Any]:
+    try:
+        records = airtable_list_records(
+            "Monitored_Endpoints",
+            view=view,
+            max_records=max_records,
+        )
 
+        items = [_monitoring_endpoint_to_api(r) for r in records]
+
+        if workspace_id:
+            workspace_id = str(workspace_id).strip()
+            items = [x for x in items if x.get("workspace_id") == workspace_id]
+
+        return {
+            "ok": True,
+            "count": len(items),
+            "items": items,
+        }
+
+    except Exception as e:
+        return {
+            "ok": False,
+            "count": 0,
+            "items": [],
+            "error": repr(e),
+        }
 @app.get("/commands")
 def get_commands(limit: int = 30) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=30, minimum=1, maximum=100)
