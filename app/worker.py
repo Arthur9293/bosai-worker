@@ -837,7 +837,39 @@ def airtable_find_first(table_name: str, formula: str, max_records: int = 1) -> 
     records = r.json().get("records", [])
     return records[0] if records else None
 
+def airtable_find_lead_by_id(lead_id: str) -> Dict[str, Any]:
+    if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+        raise RuntimeError("Airtable is not configured")
 
+    lead_id = str(lead_id or "").strip()
+    if not lead_id:
+        return {}
+
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{quote('Leads')}"
+    headers = {
+        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    params = {
+        "filterByFormula": f"{{Lead_ID}}='{lead_id}'",
+        "maxRecords": 1,
+    }
+
+    resp = requests.get(url, headers=headers, params=params, timeout=20)
+
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"Airtable lead fetch failed status={resp.status_code} body={resp.text[:500]}"
+        )
+
+    data = resp.json()
+    records = data.get("records", []) or []
+
+    if not records:
+        return {}
+
+    return records[0]
+    
 def airtable_list_view(table_name: str, view_name: str, max_records: int = 100) -> List[Dict[str, Any]]:
     _require_airtable()
     r = _HTTP_SESSION.get(
@@ -5893,7 +5925,142 @@ def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, An
         "root_event_id": root_event_id,
         "run_record_id": run_record_id,
     }
+def capability_lead_machine_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    payload = _normalize_flow_keys(req.input or {})
+    workspace_id = _resolve_workspace_id(req=req)
 
+    lead_id = str(payload.get("lead_id") or "").strip()
+    if not lead_id:
+        raise HTTPException(status_code=400, detail="lead_machine_demo missing lead_id")
+
+    lead_record = airtable_find_lead_by_id(lead_id)
+    if not lead_record:
+        raise HTTPException(status_code=404, detail=f"lead not found: {lead_id}")
+
+    lead_fields = lead_record.get("fields", {}) or {}
+
+    flow_id = str(
+        payload.get("flow_id")
+        or payload.get("root_event_id")
+        or f"lead-flow-{lead_id}"
+    ).strip()
+
+    root_event_id = str(
+        payload.get("root_event_id")
+        or flow_id
+    ).strip() or flow_id
+
+    lead_name = str(lead_fields.get("Name") or "").strip()
+    lead_email = str(lead_fields.get("Email") or "").strip()
+    lead_phone = str(lead_fields.get("Phone") or "").strip()
+    lead_source = str(lead_fields.get("Source") or "").strip()
+    lead_status = str(lead_fields.get("Status_select") or "").strip()
+
+    plan = [
+        {
+            "step": 1,
+            "capability": "state_put",
+            "goal": "store_lead_snapshot",
+        },
+        {
+            "step": 2,
+            "capability": "decision_demo",
+            "goal": "lead_followup_decision",
+        },
+    ]
+
+    flow_get_or_create(
+        flow_id=flow_id,
+        root_event_id=root_event_id,
+        workspace_id=workspace_id,
+        goal=f"lead_machine:{lead_id}",
+        linked_run=[run_record_id],
+    )
+
+    flow_update(
+        flow_id=flow_id,
+        workspace_id=workspace_id,
+        status="Running",
+        current_step=0,
+        last_decision="lead_machine_initialized",
+        plan_obj={"steps": plan, "lead_id": lead_id},
+        memory_obj={
+            "lead_id": lead_id,
+            "lead_name": lead_name,
+            "lead_email": lead_email,
+            "lead_phone": lead_phone,
+            "lead_source": lead_source,
+            "lead_status": lead_status,
+        },
+        linked_run=[run_record_id],
+    )
+
+    flow_state_append_step(
+        flow_id=flow_id,
+        workspace_id=workspace_id,
+        step_obj={
+            "step_index": 0,
+            "capability": "lead_machine_demo",
+            "status": "done",
+            "lead_id": lead_id,
+            "run_record_id": run_record_id,
+        },
+    )
+
+    return {
+        "ok": True,
+        "message": "lead_machine_demo_executed",
+        "lead_id": lead_id,
+        "lead_record_id": lead_record.get("id"),
+        "lead": {
+            "name": lead_name,
+            "email": lead_email,
+            "phone": lead_phone,
+            "source": lead_source,
+            "status": lead_status,
+        },
+        "plan": plan,
+        "next_commands": [
+            {
+                "capability": "state_put",
+                "priority": 1,
+                "input": {
+                    "workspace_id": workspace_id,
+                    "app_key": f"lead:{lead_id}",
+                    "value": {
+                        "lead_id": lead_id,
+                        "lead_record_id": lead_record.get("id"),
+                        "name": lead_name,
+                        "email": lead_email,
+                        "phone": lead_phone,
+                        "source": lead_source,
+                        "status": lead_status,
+                        "flow_id": flow_id,
+                        "root_event_id": root_event_id,
+                    },
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": 1,
+                    "goal": "store_lead_snapshot",
+                },
+            },
+            {
+                "capability": "decision_demo",
+                "priority": 1,
+                "input": {
+                    "workspace_id": workspace_id,
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "step_index": 2,
+                    "goal": "lead_followup_decision",
+                },
+            },
+        ],
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "run_record_id": run_record_id,
+    }
+    
 def capability_planner_monitoring(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     workspace_id = _resolve_workspace_id(req=req)
     payload = _normalize_flow_keys(req.input or {})
@@ -6565,6 +6732,7 @@ EVENT_CAPABILITY_ALLOWLIST = {
     "close_incident",
     "planner_monitoring",
     "decision_monitoring",
+    "lead_machine_demo",
     
 }
 
@@ -6591,6 +6759,7 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "close_incident",
     "planner_monitoring",
     "decision_monitoring",
+    "lead_machine_demo",
 }
 
 def _to_int(value: Any, default: int = 0) -> int:
@@ -6933,6 +7102,7 @@ CAPABILITIES = {
     "event_engine": capability_event_engine,
     "chain_demo": capability_chain_demo,
     "planner_demo": capability_planner_demo,
+    "lead_machine_demo": capability_lead_machine_demo,
     "decision_demo": capability_decision_demo,
     "complete_flow": capability_complete_flow,
     "complete_flow_demo": capability_complete_flow_demo,
@@ -6951,8 +7121,8 @@ CAPABILITIES = {
 
 }
   
-# ============================================================
-# Root / health
+# =======================================================
+Root / health
 # ============================================================
 
 @app.get("/")
