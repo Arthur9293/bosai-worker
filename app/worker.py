@@ -6212,90 +6212,101 @@ def capability_lead_decision(req: RunRequest, run_record_id: str) -> Dict[str, A
         "terminal": False,
         "run_record_id": run_record_id,
     }
-def capability_lead_decision(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+
+def capability_lead_machine_demo(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
 
     workspace_id = _resolve_workspace_id(req=req)
-    flow_id, root_event_id = _resolve_flow_ids(payload)
-    step_index = _resolve_flow_step_index(payload, 0)
-
     lead_id = str(payload.get("lead_id") or "").strip()
-    lead_status = str(payload.get("lead_status") or "New").strip()
-    lead_email = str(payload.get("lead_email") or "").strip()
-    lead_name = str(payload.get("lead_name") or "").strip()
 
-    if not flow_id:
-        raise HTTPException(status_code=400, detail="lead_decision missing flow_id")
+    if not workspace_id:
+        raise HTTPException(status_code=400, detail="lead_machine_demo missing workspace_id")
 
     if not lead_id:
-        raise HTTPException(status_code=400, detail="lead_decision missing lead_id")
+        raise HTTPException(status_code=400, detail="lead_machine_demo missing lead_id")
 
-    if not root_event_id:
-        root_event_id = flow_id
+    lead_record = airtable_find_first(
+        table_name=LEADS_TABLE_NAME,
+        filter_formula=f"{{Lead_ID}}='{lead_id}'",
+    )
 
-    decision = ""
-    reason = ""
-    next_commands: List[Dict[str, Any]] = []
+    if not lead_record:
+        raise HTTPException(status_code=404, detail=f"Lead not found for Lead_ID={lead_id}")
 
-    if lead_status == "New":
-        decision = "send_first_contact"
-        reason = "lead_is_new"
+    fields = lead_record.get("fields", {})
 
-        next_commands = [
-            {
-                "capability": "http_exec",
-                "priority": 1,
-                "input": {
-                    "workspace_id": workspace_id,
+    lead_name = str(fields.get("Name") or "").strip()
+    lead_email = str(fields.get("Email") or "").strip()
+    lead_phone = str(fields.get("Phone") or "").strip()
+    lead_source = str(fields.get("Source") or "").strip()
+    lead_status = str(fields.get("Status_select") or "New").strip()
+
+    flow_id = f"lead-flow-{lead_id}"
+    root_event_id = flow_id
+
+    next_commands = [
+        {
+            "capability": "state_put",
+            "priority": 1,
+            "input": {
+                "workspace_id": workspace_id,
+                "app_key": f"lead:{lead_id}",
+                "value": {
+                    "lead_id": lead_id,
+                    "lead_record_id": lead_record.get("id"),
+                    "name": lead_name,
+                    "email": lead_email,
+                    "phone": lead_phone,
+                    "source": lead_source,
+                    "status": lead_status,
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
-                    "step_index": step_index + 1,
-                    "goal": "send_lead_email",
-                    "lead_id": lead_id,
-                    "lead_name": lead_name,
-                    "lead_email": lead_email,
-                    "lead_status": lead_status,
-                    "action": "first_contact_attempt",
                 },
-            }
-        ]
-    else:
-        decision = "complete_flow"
-        reason = "lead_not_new"
-
-        next_commands = [
-            {
-                "capability": "complete_flow_demo",
-                "priority": 1,
-                "input": {
-                    "workspace_id": workspace_id,
-                    "flow_id": flow_id,
-                    "root_event_id": root_event_id,
-                    "step_index": step_index + 1,
-                    "goal": "lead_flow_complete",
-                    "lead_id": lead_id,
-                    "lead_status": lead_status,
-                },
-            }
-        ]
+                "flow_id": flow_id,
+                "root_event_id": root_event_id,
+                "step_index": 1,
+                "goal": "store_lead_snapshot",
+            },
+        },
+        {
+            "capability": "lead_decision",
+            "priority": 1,
+            "input": {
+                "workspace_id": workspace_id,
+                "flow_id": flow_id,
+                "root_event_id": root_event_id,
+                "step_index": 2,
+                "goal": "lead_followup_decision",
+                "lead_id": lead_id,
+                "lead_status": lead_status,
+                "lead_name": lead_name,
+                "lead_email": lead_email,
+            },
+        },
+    ]
 
     return {
         "ok": True,
-        "message": "lead_decision_executed",
-        "decision": decision,
-        "reason": reason,
+        "message": "lead_machine_demo_executed",
         "lead_id": lead_id,
-        "lead_status": lead_status,
-        "lead_email": lead_email,
-        "lead_name": lead_name,
-        "workspace_id": workspace_id,
+        "lead_record_id": lead_record.get("id"),
+        "lead": {
+            "name": lead_name,
+            "email": lead_email,
+            "phone": lead_phone,
+            "source": lead_source,
+            "status": lead_status,
+        },
+        "plan": [
+            {"step": 1, "capability": "state_put", "goal": "store_lead_snapshot"},
+            {"step": 2, "capability": "lead_decision", "goal": "lead_followup_decision"},
+        ],
+        "next_commands": next_commands,
         "flow_id": flow_id,
         "root_event_id": root_event_id,
-        "next_commands": next_commands,
-        "terminal": False,
         "run_record_id": run_record_id,
     }
-
+    
 def capability_send_lead_email(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
 
