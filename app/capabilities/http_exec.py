@@ -367,7 +367,6 @@ def _build_incident_router_command(
         "input": incident_input,
     }
 
-
 def _update_monitored_endpoint_best_effort(
     *,
     original_payload: Dict[str, Any],
