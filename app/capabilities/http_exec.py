@@ -493,6 +493,9 @@ def capability_http_exec(
 
     if "airtable_update_by_field" not in runtime_context and kwargs.get("airtable_update_by_field"):
         runtime_context["airtable_update_by_field"] = kwargs.get("airtable_update_by_field")
+        
+    if "airtable_update" not in runtime_context and kwargs.get("airtable_update"):
+        runtime_context["airtable_update"] = kwargs.get("airtable_update")
 
     if payload is None and isinstance(kwargs.get("input_data"), dict):
         payload = kwargs["input_data"]
