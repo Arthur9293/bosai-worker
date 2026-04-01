@@ -368,6 +368,58 @@ def _build_incident_router_command(
     }
 
 
+def _update_monitored_endpoint_best_effort(
+    *,
+    original_payload: Dict[str, Any],
+    runtime_context: Dict[str, Any],
+    status_code: Optional[int],
+    error_text: str,
+    elapsed_ms: Optional[int],
+) -> None:
+    try:
+        endpoint_name = str(
+            original_payload.get("endpoint_name")
+            or original_payload.get("endpoint")
+            or ""
+        ).strip()
+
+        airtable_update_by_field = runtime_context.get("airtable_update_by_field")
+        run_record_id = str(runtime_context.get("run_record_id") or "").strip()
+
+        if not endpoint_name:
+            print("[http_exec] skip monitored endpoint update: missing endpoint_name", flush=True)
+            return
+
+        if not callable(airtable_update_by_field):
+            print("[http_exec] skip monitored endpoint update: missing helper", flush=True)
+            return
+
+        fields: Dict[str, Any] = {
+            "Last_Check_At": _now_ts(),
+            "Last_Error": str(error_text or ""),
+        }
+
+        if status_code is not None:
+            fields["Last_Status"] = int(status_code)
+
+        if elapsed_ms is not None:
+            fields["Last_Response_Time_ms"] = int(elapsed_ms)
+
+        if run_record_id:
+            fields["Last_Run_ID"] = run_record_id
+
+        airtable_update_by_field(
+            table="Monitored_Endpoints",
+            field="Name",
+            value=endpoint_name,
+            fields=fields,
+        )
+        print("[http_exec] endpoint runtime updated =", endpoint_name, flush=True)
+
+    except Exception as e:
+        print("[http_exec] endpoint update error =", repr(e), flush=True)
+
+
 def capability_http_exec(
     payload: Optional[Dict[str, Any]] = None,
     context: Optional[Dict[str, Any]] = None,
@@ -375,6 +427,14 @@ def capability_http_exec(
 ) -> Dict[str, Any]:
     print("[HTTP_EXEC CORE] entered")
     context = context or {}
+
+    runtime_context: Dict[str, Any] = dict(context) if isinstance(context, dict) else {}
+
+    if "run_record_id" not in runtime_context and kwargs.get("run_record_id"):
+        runtime_context["run_record_id"] = kwargs.get("run_record_id")
+
+    if "airtable_update_by_field" not in runtime_context and kwargs.get("airtable_update_by_field"):
+        runtime_context["airtable_update_by_field"] = kwargs.get("airtable_update_by_field")
 
     if payload is None and isinstance(kwargs.get("input_data"), dict):
         payload = kwargs["input_data"]
@@ -480,6 +540,13 @@ def capability_http_exec(
             "http_status": None,
             "status_code": None,
         }
+        _update_monitored_endpoint_best_effort(
+            original_payload=original_payload,
+            runtime_context=runtime_context,
+            status_code=None,
+            error_text=allow_reason,
+            elapsed_ms=None,
+        )
         print("[HTTP_EXEC CORE] error return =", result)
         return result
 
@@ -507,6 +574,13 @@ def capability_http_exec(
             "http_status": 0,
             "status_code": 0,
         }
+        _update_monitored_endpoint_best_effort(
+            original_payload=original_payload,
+            runtime_context=runtime_context,
+            status_code=0,
+            error_text="",
+            elapsed_ms=0,
+        )
         print("[HTTP_EXEC CORE] success return")
         return result
 
@@ -552,6 +626,13 @@ def capability_http_exec(
                 "retry_planned": False,
                 "next_commands": [],
             }
+            _update_monitored_endpoint_best_effort(
+                original_payload=original_payload,
+                runtime_context=runtime_context,
+                status_code=int(response.status_code),
+                error_text="",
+                elapsed_ms=elapsed_ms,
+            )
             print("[HTTP_EXEC CORE] success return")
             return result
 
@@ -576,6 +657,14 @@ def capability_http_exec(
             "retry_planned": False,
             "next_commands": [],
         }
+
+        _update_monitored_endpoint_best_effort(
+            original_payload=original_payload,
+            runtime_context=runtime_context,
+            status_code=int(response.status_code),
+            error_text="http_status_error",
+            elapsed_ms=elapsed_ms,
+        )
 
         if retry_allowed:
             delay_seconds = _compute_backoff_seconds(original_payload, retry_count_after_failure)
@@ -643,6 +732,14 @@ def capability_http_exec(
             "next_commands": [],
         }
 
+        _update_monitored_endpoint_best_effort(
+            original_payload=original_payload,
+            runtime_context=runtime_context,
+            status_code=None,
+            error_text="timeout",
+            elapsed_ms=elapsed_ms,
+        )
+
         if retry_allowed:
             delay_seconds = _compute_backoff_seconds(original_payload, retry_count_after_failure)
             next_retry_at = _build_next_retry_at(delay_seconds)
@@ -708,6 +805,14 @@ def capability_http_exec(
             "next_commands": [],
         }
 
+        _update_monitored_endpoint_best_effort(
+            original_payload=original_payload,
+            runtime_context=runtime_context,
+            status_code=None,
+            error_text="request_exception",
+            elapsed_ms=elapsed_ms,
+        )
+
         if retry_allowed:
             delay_seconds = _compute_backoff_seconds(original_payload, retry_count_after_failure)
             next_retry_at = _build_next_retry_at(delay_seconds)
@@ -772,6 +877,14 @@ def capability_http_exec(
             "retry_planned": False,
             "next_commands": [],
         }
+
+        _update_monitored_endpoint_best_effort(
+            original_payload=original_payload,
+            runtime_context=runtime_context,
+            status_code=None,
+            error_text="unexpected_exception",
+            elapsed_ms=elapsed_ms,
+        )
 
         if retry_allowed:
             delay_seconds = _compute_backoff_seconds(original_payload, retry_count_after_failure)
