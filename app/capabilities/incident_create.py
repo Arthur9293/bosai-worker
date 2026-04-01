@@ -114,13 +114,47 @@ def run(
     **kwargs: Any,
 ) -> Dict[str, Any]:
 
-    payload = getattr(req, "input", {}) if req else {}
+    if req is not None and hasattr(req, "input"):
+        payload = getattr(req, "input", {}) or {}
+    elif isinstance(req, dict):
+        payload = req
+    else:
+        payload = {}
+
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            payload = {}
+
+    if not isinstance(payload, dict):
+        payload = {}
+
     data = _extract_input(payload)
+
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except Exception:
+            data = {}
+
+    if not isinstance(data, dict):
+        data = {}
+
     meta = _extract_meta(data)
+
+    print("[incident_create] payload type =", type(payload).__name__, flush=True)
+    print("[incident_create] data type =", type(data).__name__, flush=True)
+    print("[incident_create] payload repr =", repr(payload), flush=True)
 
     depth = _to_int(meta.get("depth"), 0)
     if depth >= DEFAULT_MAX_DEPTH:
-        return {"ok": False, "error": "max_depth_reached", "terminal": True}
+        return {
+            "ok": False,
+            "capability": "incident_create",
+            "error": "max_depth_reached",
+            "terminal": True,
+        }
 
     flow_id = meta.get("flow_id")
     root_event_id = meta.get("root_event_id") or flow_id
@@ -144,15 +178,47 @@ def run(
         "Created_By_Capability": "incident_create",
         "Opened_At": now_ts,
         "Updated_At": now_ts,
+        "Payload_JSON": _safe_json(data),
     }
 
-    create_res = airtable_create(incidents_table_name, incident_fields)
-    incident_record_id = _to_str(create_res.get("id"))
+    try:
+        create_res = airtable_create(incidents_table_name, incident_fields)
+    except Exception as e:
+        return {
+            "ok": False,
+            "capability": "incident_create",
+            "error": f"incident_create_failed:{repr(e)}",
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
+            "run_record_id": run_record_id,
+            "terminal": True,
+        }
 
-    print("[incident_create] created =", incident_record_id)
+    incident_record_id = ""
+
+    try:
+        if isinstance(create_res, dict):
+            incident_record_id = _to_str(create_res.get("id") or "").strip()
+
+            if not incident_record_id:
+                records_obj = create_res.get("records")
+                if isinstance(records_obj, list) and records_obj:
+                    first_record = records_obj[0]
+                    if isinstance(first_record, dict):
+                        incident_record_id = _to_str(first_record.get("id") or "").strip()
+
+            if not incident_record_id:
+                incident_record_id = _to_str(create_res.get("record_id") or "").strip()
+        else:
+            incident_record_id = _to_str(create_res).strip()
+    except Exception as e:
+        print("[incident_create] incident_record_id parse error =", repr(e), flush=True)
+        incident_record_id = ""
+
+    print("[incident_create] created =", incident_record_id, flush=True)
 
     # ------------------------------------------------------------
-    # LINK INCIDENT → MONITORED ENDPOINT (FIX CLEAN)
+    # LINK INCIDENT → MONITORED ENDPOINT
     # ------------------------------------------------------------
     try:
         endpoint_name = _to_str(
@@ -170,21 +236,28 @@ def run(
                     "Last_Check_At": now_ts,
                 },
             )
-            print("[incident_create] endpoint linked =", endpoint_name)
+            print("[incident_create] endpoint linked =", endpoint_name, flush=True)
         else:
-            print("[incident_create] skip endpoint update")
+            print("[incident_create] skip endpoint update", flush=True)
 
     except Exception as e:
-        print("[incident_create] endpoint link error =", str(e))
+        print("[incident_create] endpoint link error =", repr(e), flush=True)
 
     # ------------------------------------------------------------
     # NEXT STEP
     # ------------------------------------------------------------
+    decision_block = _normalize_decision_block(data)
+
     next_input = {
         "flow_id": flow_id,
         "root_event_id": root_event_id,
         "workspace_id": workspace_id,
         "incident_record_id": incident_record_id,
+        "decision_status": decision_block["decision_status"],
+        "decision_reason": decision_block["decision_reason"],
+        "next_action": decision_block["next_action"],
+        "auto_executable": decision_block["auto_executable"],
+        "priority_score": decision_block["priority_score"],
     }
 
     return {
@@ -195,6 +268,11 @@ def run(
         "root_event_id": root_event_id,
         "incident_record_id": incident_record_id,
         "run_record_id": run_record_id,
+        "decision_status": decision_block["decision_status"],
+        "decision_reason": decision_block["decision_reason"],
+        "next_action": decision_block["next_action"],
+        "auto_executable": decision_block["auto_executable"],
+        "priority_score": decision_block["priority_score"],
         "next_commands": [
             {
                 "capability": "complete_flow_incident",
