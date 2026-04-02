@@ -865,17 +865,25 @@ def airtable_get_record(table_name: str, record_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"Airtable get failed: {r.status_code} {r.text}")
     return r.json()
 
-
 def airtable_find_first(table_name: str, formula: str, max_records: int = 1) -> Optional[Dict[str, Any]]:
     _require_airtable()
+
     r = _HTTP_SESSION.get(
         _airtable_url(table_name),
         headers=_airtable_headers(),
-        params={"filterByFormula": formula, "maxRecords": str(max_records)},
+        params={
+            "filterByFormula": formula,
+            "maxRecords": str(max_records),
+        },
         timeout=HTTP_TIMEOUT_SECONDS,
     )
+
     if r.status_code >= 300:
-        raise HTTPException(status_code=500, detail=f"Airtable search failed: {r.status_code} {r.text}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Airtable search failed: {r.status_code} {r.text}",
+        )
+
     records = r.json().get("records", [])
     return records[0] if records else None
 
@@ -6227,8 +6235,8 @@ def capability_lead_machine_demo(req: RunRequest, run_record_id: str) -> Dict[st
         raise HTTPException(status_code=400, detail="lead_machine_demo missing lead_id")
 
     lead_record = airtable_find_first(
-        table_name=LEADS_TABLE_NAME,
-        filter_formula=f"{{Lead_ID}}='{lead_id}'",
+        LEADS_TABLE_NAME,
+        f"{{Lead_ID}}='{lead_id}'",
     )
 
     if not lead_record:
@@ -6299,8 +6307,16 @@ def capability_lead_machine_demo(req: RunRequest, run_record_id: str) -> Dict[st
             "status": lead_status,
         },
         "plan": [
-            {"step": 1, "capability": "state_put", "goal": "store_lead_snapshot"},
-            {"step": 2, "capability": "lead_decision", "goal": "lead_followup_decision"},
+            {
+                "step": 1,
+                "capability": "state_put",
+                "goal": "store_lead_snapshot",
+            },
+            {
+                "step": 2,
+                "capability": "lead_decision",
+                "goal": "lead_followup_decision",
+            },
         ],
         "next_commands": next_commands,
         "flow_id": flow_id,
