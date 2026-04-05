@@ -5668,6 +5668,131 @@ def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
         "flow_id": command_input.get("flow_id"),
         "root_event_id": command_input.get("root_event_id"),
     }
+
+
+def _first_non_empty(*values: Any) -> str:
+    for value in values:
+        if value is None:
+            continue
+
+        if isinstance(value, list):
+            for item in value:
+                text = str(item or "").strip()
+                if text:
+                    return text
+            continue
+
+        text = str(value).strip()
+        if text:
+            return text
+
+    return ""
+
+
+def _command_context_from_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
+    input_obj = _json_load_maybe(
+        fields.get("Input_JSON")
+        or fields.get("Command_Input_JSON")
+        or fields.get("Payload_JSON")
+    )
+    result_obj = _json_load_maybe(fields.get("Result_JSON"))
+    payload_obj = _json_load_maybe(fields.get("Payload_JSON"))
+
+    flow_id = _first_non_empty(
+        fields.get("Flow_ID"),
+        fields.get("flow_id"),
+        input_obj.get("flow_id"),
+        input_obj.get("flowId"),
+        input_obj.get("flowid"),
+        result_obj.get("flow_id"),
+        result_obj.get("flowId"),
+        result_obj.get("flowid"),
+        payload_obj.get("flow_id"),
+        payload_obj.get("flowId"),
+        payload_obj.get("flowid"),
+    )
+
+    root_event_id = _first_non_empty(
+        fields.get("Root_Event_ID"),
+        fields.get("root_event_id"),
+        input_obj.get("root_event_id"),
+        input_obj.get("rootEventId"),
+        input_obj.get("rooteventid"),
+        result_obj.get("root_event_id"),
+        result_obj.get("rootEventId"),
+        result_obj.get("rooteventid"),
+        payload_obj.get("root_event_id"),
+        payload_obj.get("rootEventId"),
+        payload_obj.get("rooteventid"),
+    )
+
+    workspace_id = _first_non_empty(
+        fields.get("Workspace_ID"),
+        fields.get("workspace_id"),
+        fields.get("Workspace"),
+        input_obj.get("workspace_id"),
+        input_obj.get("workspaceId"),
+        result_obj.get("workspace_id"),
+        result_obj.get("workspaceId"),
+        payload_obj.get("workspace_id"),
+        payload_obj.get("workspaceId"),
+    )
+
+    parent_command_id = _first_non_empty(
+        fields.get("Parent_Command_ID"),
+        fields.get("parent_command_id"),
+        input_obj.get("parent_command_id"),
+        input_obj.get("parent_id"),
+        result_obj.get("parent_command_id"),
+        result_obj.get("parent_id"),
+    )
+
+    linked_run = _first_non_empty(
+        fields.get("Linked_Run"),
+        fields.get("Run_Record_ID"),
+        input_obj.get("run_record_id"),
+        input_obj.get("run_id"),
+        result_obj.get("run_record_id"),
+        result_obj.get("run_id"),
+        payload_obj.get("run_record_id"),
+        payload_obj.get("run_id"),
+    )
+
+    run_record_id = _first_non_empty(
+        fields.get("Run_Record_ID"),
+        fields.get("Linked_Run"),
+        input_obj.get("run_record_id"),
+        result_obj.get("run_record_id"),
+        payload_obj.get("run_record_id"),
+    )
+
+    step_index_raw = (
+        fields.get("Step_Index")
+        if fields.get("Step_Index") is not None
+        else fields.get("step_index")
+    )
+    if step_index_raw is None:
+        step_index_raw = input_obj.get("step_index")
+    if step_index_raw is None:
+        step_index_raw = result_obj.get("step_index")
+
+    try:
+        step_index = int(step_index_raw) if step_index_raw is not None else None
+    except Exception:
+        step_index = None
+
+    return {
+        "flow_id": flow_id or None,
+        "root_event_id": root_event_id or None,
+        "workspace_id": workspace_id or None,
+        "parent_command_id": parent_command_id or None,
+        "linked_run": linked_run or None,
+        "run_record_id": run_record_id or None,
+        "step_index": step_index,
+        "input_obj": input_obj if isinstance(input_obj, dict) else {},
+        "result_obj": result_obj if isinstance(result_obj, dict) else {},
+        "payload_obj": payload_obj if isinstance(payload_obj, dict) else {},
+    }
     
 def _create_command_from_next_command(
     next_cmd: Dict[str, Any],
@@ -7870,9 +7995,10 @@ def get_monitoring_endpoints(
             "items": [],
             "error": repr(e),
         }
+
 @app.get("/commands")
 def get_commands(limit: int = 30) -> Dict[str, Any]:
-    limit = _safe_limit(limit, default=30, minimum=1, maximum=100)
+    limit = _safe_limit(limit, default=30, minimum=1, maximum=300)
     records, meta = _safe_records_from_view(
         COMMANDS_TABLE_NAME,
         COMMANDS_DASHBOARD_VIEW_NAME,
@@ -7881,68 +8007,67 @@ def get_commands(limit: int = 30) -> Dict[str, Any]:
 
     commands: List[Dict[str, Any]] = []
     stats = {
+        "queue": 0,
         "queued": 0,
         "running": 0,
         "retry": 0,
-        "done": 0,
         "dead": 0,
-        "blocked": 0,
-        "unsupported": 0,
+        "done": 0,
         "error": 0,
+        "unsupported": 0,
         "other": 0,
     }
 
     for r in records:
         f = r.get("fields", {}) or {}
-        status = _read_command_status(f)
+        status = str(f.get("Status_select", f.get("Status", "")) or "").strip()
         key = status.lower()
-        flow_meta = _extract_flow_metadata_from_command_fields(f)
 
-        if key in ("queued", "queue"):
+        if key in ("queue", "queued"):
+            stats["queue"] += 1
             stats["queued"] += 1
         elif key == "running":
             stats["running"] += 1
         elif key == "retry":
             stats["retry"] += 1
-        elif key == "done":
-            stats["done"] += 1
         elif key == "dead":
             stats["dead"] += 1
-        elif key == "blocked":
-            stats["blocked"] += 1
-        elif key == "unsupported":
-            stats["unsupported"] += 1
+        elif key == "done":
+            stats["done"] += 1
         elif key == "error":
             stats["error"] += 1
+        elif key == "unsupported":
+            stats["unsupported"] += 1
         else:
             stats["other"] += 1
 
-        flow_meta = _extract_flow_metadata_from_command_fields(f)
+        ctx = _command_context_from_fields(f)
 
         commands.append(
             {
                 "id": r.get("id"),
+                "name": f.get("Name") or f.get("Capability"),
                 "capability": f.get("Capability"),
                 "status": status,
-                "priority": f.get("Priority"),
-                "retry_count": f.get("Retry_Count"),
-                "retry_max": f.get("Retry_Max"),
-                "scheduled_at": f.get("Scheduled_At"),
-                "next_retry_at": f.get("Next_Retry_At"),
-                "is_locked": f.get("Is_Locked"),
-                "locked_by": f.get("Locked_By"),
-                "idempotency_key": f.get("Idempotency_Key"),
-                "flow_id": flow_meta["flow_id"],
-                "root_event_id": flow_meta["root_event_id"],
-                "parent_command_id": flow_meta["parent_command_id"],
-                "step_index": flow_meta["step_index"],
-                "input_json": flow_meta["input_json"],
-                "result_json": flow_meta["result_json"],
-                "worker": f.get("Locked_By") or f.get("Worker"),
-                "workspace_id": f.get("Workspace_ID") or f.get("workspace_id"),
+                "tool_key": f.get("Tool_Key"),
+                "tool_mode": f.get("Tool_Mode"),
+                "workspace_id": ctx["workspace_id"],
+                "flow_id": ctx["flow_id"],
+                "root_event_id": ctx["root_event_id"],
+                "linked_run": ctx["linked_run"],
+                "run_record_id": ctx["run_record_id"],
+                "created_at": f.get("Created_At"),
+                "updated_at": f.get("Updated_At"),
                 "started_at": f.get("Started_At"),
                 "finished_at": f.get("Finished_At"),
-                "created_at": f.get("Created_At") or f.get("created_at"),
+                "parent_command_id": ctx["parent_command_id"],
+                "step_index": ctx["step_index"],
+                "worker": f.get("Worker"),
+                "error": f.get("Last_Error") or f.get("Error"),
+                "input_json": ctx["input_obj"],
+                "result_json": ctx["result_obj"],
+                "input": ctx["input_obj"],
+                "result": ctx["result_obj"],
             }
         )
 
@@ -7954,6 +8079,7 @@ def get_commands(limit: int = 30) -> Dict[str, Any]:
         "commands": commands,
         "ts": utc_now_iso(),
     }
+    
 @app.get("/flows")
 def get_flows(limit: int = 50) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=50, minimum=1, maximum=200)
