@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 DEFAULT_MAX_DEPTH = 8
@@ -74,6 +74,102 @@ def _extract_input(req: Any) -> Dict[str, Any]:
     return dict(payload)
 
 
+def _clean_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        k: v
+        for k, v in fields.items()
+        if v not in ("", None, [])
+    }
+
+
+def _safe_record_links(record_id: str) -> List[str]:
+    rid = _to_str(record_id).strip()
+    return [rid] if rid.startswith("rec") else []
+
+
+def _normalize_status_for_airtable(value: str) -> str:
+    raw = _to_str(value, "Open").strip().lower()
+
+    if raw in {"open", "opened", "active", "new", "en cours"}:
+        return "Open"
+    if raw in {"escalated", "escalade", "escaladé"}:
+        return "Escalated"
+    if raw in {"resolved", "closed", "done", "résolu", "resolve"}:
+        return "Resolved"
+
+    return "Open"
+
+
+def _normalize_severity_for_airtable(value: str) -> str:
+    raw = _to_str(value, "High").strip().lower()
+
+    if raw in {"critical", "critique"}:
+        return "Critical"
+    if raw in {"high", "élevé", "eleve"}:
+        return "High"
+    if raw in {"medium", "moyen", "warning", "warn"}:
+        return "Medium"
+    if raw in {"low", "faible"}:
+        return "Low"
+
+    return "High"
+
+
+def _normalize_sla_for_airtable(value: str) -> str:
+    raw = _to_str(value, "Open").strip().lower()
+
+    if raw in {"open", "opened"}:
+        return "Open"
+    if raw in {"warning", "warn"}:
+        return "Warning"
+    if raw in {"ok"}:
+        return "OK"
+    if raw in {"breached", "breach"}:
+        return "Breached"
+    if raw in {"resolved", "closed"}:
+        return "Resolved"
+
+    return "Open"
+
+
+def _extract_created_record_id(response: Any) -> str:
+    if isinstance(response, dict):
+        rid = _to_str(response.get("id")).strip()
+        if rid:
+            return rid
+
+        records = response.get("records")
+        if isinstance(records, list) and records:
+            first = records[0]
+            if isinstance(first, dict):
+                rid = _to_str(first.get("id")).strip()
+                if rid:
+                    return rid
+
+    return ""
+
+
+def _build_incident_title(
+    *,
+    category: str,
+    failed_url: str,
+    flow_id: str,
+    root_event_id: str,
+) -> str:
+    safe_category = _to_str(category, "incident").strip().upper()
+    safe_failed_url = _to_str(failed_url).strip()
+    safe_flow_id = _to_str(flow_id).strip()
+    safe_root_event_id = _to_str(root_event_id).strip()
+
+    if safe_failed_url:
+        return f"{safe_category} | {safe_failed_url}"
+    if safe_flow_id:
+        return f"{safe_category} | {safe_flow_id}"
+    if safe_root_event_id:
+        return f"{safe_category} | {safe_root_event_id}"
+    return safe_category or "INCIDENT"
+
+
 def _try_update_one(
     airtable_update,
     table_name: str,
@@ -89,6 +185,27 @@ def _try_update_one(
     except Exception as e:
         print("[TRY_UPDATE_ONE] error =", repr(e))
         return {"ok": False, "fields": fields, "error": repr(e)}
+
+
+def _try_create_one(
+    airtable_create,
+    table_name: str,
+    fields: Dict[str, Any],
+) -> Dict[str, Any]:
+    try:
+        print("[TRY_CREATE_ONE] table =", table_name)
+        print("[TRY_CREATE_ONE] fields =", _safe_json(fields))
+        response = airtable_create(table_name, fields)
+        record_id = _extract_created_record_id(response)
+        return {
+            "ok": True,
+            "fields": fields,
+            "response": response,
+            "record_id": record_id,
+        }
+    except Exception as e:
+        print("[TRY_CREATE_ONE] error =", repr(e))
+        return {"ok": False, "fields": fields, "error": repr(e), "record_id": ""}
 
 
 def _best_effort_update_logs_error(
@@ -131,6 +248,117 @@ def _best_effort_update_logs_error(
     }
 
 
+def _best_effort_create_incident(
+    airtable_create,
+    incidents_table_name: str,
+    *,
+    title: str,
+    status_select: str,
+    severity: str,
+    sla_status: str,
+    category: str,
+    reason: str,
+    flow_id: str,
+    root_event_id: str,
+    workspace_id: str,
+    run_record_id: str,
+    parent_command_id: str,
+    last_action: str,
+    failed_url: str,
+    http_status: Any,
+    incident_code: str,
+    final_failure: bool,
+) -> Dict[str, Any]:
+    if not airtable_create:
+        return {"ok": False, "reason": "missing_airtable_create", "attempts": []}
+
+    if not incidents_table_name:
+        return {"ok": False, "reason": "missing_incidents_table_name", "attempts": []}
+
+    now_ts = utc_now_iso()
+    linked_run_ids = _safe_record_links(run_record_id)
+    linked_command_ids = _safe_record_links(parent_command_id)
+
+    attempts: List[Dict[str, Any]] = [
+        {
+            "Name": title,
+            "Status_select": status_select,
+            "Severity": severity,
+            "SLA_Status": sla_status,
+            "Category": category,
+            "Reason": reason,
+            "Opened_At": now_ts,
+            "Updated_At": now_ts,
+            "Last_Action": last_action,
+            "Workspace_ID": workspace_id,
+            "Flow_ID": flow_id,
+            "Root_Event_ID": root_event_id,
+            "Run_Record_ID": run_record_id,
+            "Linked_Run": linked_run_ids,
+            "Command_ID": parent_command_id,
+            "Linked_Command": linked_command_ids,
+            "Failed_URL": failed_url,
+            "HTTP_Status": http_status,
+            "Incident_Code": incident_code,
+            "Final_Failure": final_failure,
+        },
+        {
+            "Name": title,
+            "Status_select": status_select,
+            "Severity": severity,
+            "SLA_Status": sla_status,
+            "Category": category,
+            "Reason": reason,
+            "Updated_At": now_ts,
+            "Workspace_ID": workspace_id,
+            "Flow_ID": flow_id,
+            "Root_Event_ID": root_event_id,
+            "Run_Record_ID": run_record_id,
+            "Command_ID": parent_command_id,
+        },
+        {
+            "Name": title,
+            "Status_select": status_select,
+            "Severity": severity,
+            "Workspace_ID": workspace_id,
+            "Flow_ID": flow_id,
+            "Root_Event_ID": root_event_id,
+        },
+        {
+            "Name": title,
+            "Status_select": status_select,
+            "Severity": severity,
+        },
+        {
+            "Name": title,
+            "Status_select": status_select,
+        },
+    ]
+
+    results: List[Dict[str, Any]] = []
+
+    for fields in attempts:
+        clean_fields = _clean_fields(fields)
+
+        res = _try_create_one(
+            airtable_create=airtable_create,
+            table_name=incidents_table_name,
+            fields=clean_fields,
+        )
+        results.append(res)
+
+        if res.get("ok") and res.get("record_id"):
+            print("[INCIDENT_CREATE] success with", clean_fields)
+            return {
+                "ok": True,
+                "record_id": res.get("record_id", ""),
+                "fields": clean_fields,
+                "attempts": results,
+            }
+
+    return {"ok": False, "record_id": "", "attempts": results}
+
+
 def _best_effort_update_incident(
     airtable_update,
     incidents_table_name: str,
@@ -146,9 +374,8 @@ def _best_effort_update_incident(
         return {"ok": False, "reason": "missing_incident_record_id"}
 
     now_ts = utc_now_iso()
-
-    linked_run_ids = [run_record_id] if _to_str(run_record_id).startswith("rec") else []
-    linked_command_ids = [parent_command_id] if _to_str(parent_command_id).startswith("rec") else []
+    linked_run_ids = _safe_record_links(run_record_id)
+    linked_command_ids = _safe_record_links(parent_command_id)
 
     attempts: List[Dict[str, Any]] = [
         {
@@ -195,10 +422,7 @@ def _best_effort_update_incident(
     results: List[Dict[str, Any]] = []
 
     for fields in attempts:
-        clean_fields = {
-            k: v for k, v in fields.items()
-            if v not in ("", None, [])
-        }
+        clean_fields = _clean_fields(fields)
 
         res = _try_update_one(
             airtable_update=airtable_update,
@@ -222,6 +446,7 @@ def capability_internal_escalate(
     airtable_update,
     logs_errors_table_name,
     incidents_table_name=None,
+    airtable_create=None,
 ):
     payload = _extract_input(req)
 
@@ -310,15 +535,19 @@ def capability_internal_escalate(
 
     reason = _to_str(payload.get("reason"), "internal_escalation")
     goal = _to_str(payload.get("goal"), "escalation_send")
-    severity = _to_str(payload.get("severity"), "critical")
+    severity_raw = _to_str(payload.get("severity"), "high")
     http_status = payload.get("http_status")
     failed_goal = _to_str(payload.get("failed_goal"))
-    failed_url = _to_str(
-        payload.get("failed_url")
-        or payload.get("target_url")
-    )
-    sla_status = _to_str(payload.get("sla_status"))
+    failed_url = _to_str(payload.get("failed_url") or payload.get("target_url"))
+    sla_status_raw = _to_str(payload.get("sla_status"), "open")
     final_failure = _to_bool(payload.get("final_failure"), False)
+    category = _to_str(payload.get("category"), "http_failure")
+    incident_code = _to_str(
+        payload.get("incident_code")
+        or payload.get("incidentCode")
+        or payload.get("error_code")
+        or ""
+    )
 
     workspace_id = _to_str(
         payload.get("workspace_id")
@@ -336,6 +565,85 @@ def capability_internal_escalate(
     if not root_event_id:
         root_event_id = flow_id
 
+    status_select = _normalize_status_for_airtable("open")
+    severity_select = _normalize_severity_for_airtable(severity_raw)
+    sla_select = _normalize_sla_for_airtable(sla_status_raw)
+    incident_title = _build_incident_title(
+        category=category,
+        failed_url=failed_url,
+        flow_id=flow_id,
+        root_event_id=root_event_id,
+    )
+
+    incident_create_res: Dict[str, Any] = {"ok": False, "skipped": True}
+    incident_created_now = False
+
+    try:
+        if not incident_record_id and incidents_table_name and airtable_create:
+            incident_create_res = _best_effort_create_incident(
+                airtable_create=airtable_create,
+                incidents_table_name=incidents_table_name,
+                title=incident_title,
+                status_select=status_select,
+                severity=severity_select,
+                sla_status=sla_select,
+                category=category,
+                reason=reason,
+                flow_id=flow_id,
+                root_event_id=root_event_id,
+                workspace_id=workspace_id,
+                run_record_id=effective_run_record_id,
+                parent_command_id=parent_command_id,
+                last_action="internal_escalate",
+                failed_url=failed_url,
+                http_status=http_status,
+                incident_code=incident_code,
+                final_failure=final_failure,
+            )
+            incident_record_id = _to_str(incident_create_res.get("record_id")).strip()
+            incident_created_now = bool(incident_record_id)
+        elif incident_record_id:
+            incident_create_res = {
+                "ok": True,
+                "skipped": True,
+                "reason": "incident_already_present",
+                "record_id": incident_record_id,
+            }
+        elif not incidents_table_name:
+            incident_create_res = {"ok": False, "reason": "missing_incidents_table_name"}
+        else:
+            incident_create_res = {"ok": False, "reason": "missing_airtable_create"}
+    except Exception as e:
+        incident_create_res = {"ok": False, "error": repr(e)}
+        print("[INTERNAL_ESCALATE] incident create exception =", repr(e))
+
+    incident_update_res: Dict[str, Any] = {"ok": False, "skipped": True}
+    try:
+        if incidents_table_name and incident_record_id:
+            incident_update_res = _best_effort_update_incident(
+                airtable_update=airtable_update,
+                incidents_table_name=incidents_table_name,
+                incident_record_id=incident_record_id,
+                run_record_id=effective_run_record_id,
+                flow_id=flow_id,
+                root_event_id=root_event_id,
+                parent_command_id=parent_command_id,
+                workspace_id=workspace_id,
+            )
+        elif not incidents_table_name:
+            incident_update_res = {
+                "ok": False,
+                "reason": "missing_incidents_table_name",
+            }
+        else:
+            incident_update_res = {
+                "ok": False,
+                "reason": "missing_incident_record_id",
+            }
+    except Exception as e:
+        incident_update_res = {"ok": False, "error": repr(e)}
+        print("[INTERNAL_ESCALATE] incident update exception =", repr(e))
+
     escalation_result = {
         "ok": True,
         "capability": "internal_escalate",
@@ -343,15 +651,19 @@ def capability_internal_escalate(
         "mode": "internal_escalate",
         "delivered": True,
         "channel": "internal",
-        "severity": severity,
+        "severity": severity_raw,
         "reason": reason,
         "goal": goal,
+        "category": category,
+        "incident_code": incident_code,
         "http_status": http_status,
         "failed_goal": failed_goal,
         "failed_url": failed_url,
-        "sla_status": sla_status,
+        "sla_status": sla_status_raw,
         "final_failure": final_failure,
         "incident_record_id": incident_record_id,
+        "incident_create_ok": bool(incident_record_id),
+        "incident_created_now": incident_created_now,
         "log_record_id": log_record_id,
         "run_record_id": effective_run_record_id,
         "flow_id": flow_id,
@@ -385,33 +697,6 @@ def capability_internal_escalate(
         logs_update_res = {"ok": False, "error": repr(e)}
         print("[INTERNAL_ESCALATE] logs_errors exception =", repr(e))
 
-    incident_update_res: Dict[str, Any] = {"ok": False, "skipped": True}
-    try:
-        if incidents_table_name and incident_record_id:
-            incident_update_res = _best_effort_update_incident(
-                airtable_update=airtable_update,
-                incidents_table_name=incidents_table_name,
-                incident_record_id=incident_record_id,
-                run_record_id=effective_run_record_id,
-                flow_id=flow_id,
-                root_event_id=root_event_id,
-                parent_command_id=parent_command_id,
-                workspace_id=workspace_id,
-            )
-        elif not incidents_table_name:
-            incident_update_res = {
-                "ok": False,
-                "reason": "missing_incidents_table_name",
-            }
-        else:
-            incident_update_res = {
-                "ok": False,
-                "reason": "missing_incident_record_id",
-            }
-    except Exception as e:
-        incident_update_res = {"ok": False, "error": repr(e)}
-        print("[INTERNAL_ESCALATE] incident update exception =", repr(e))
-
     next_input = {
         "flow_id": flow_id,
         "root_event_id": root_event_id,
@@ -424,7 +709,10 @@ def capability_internal_escalate(
         "parent_command_id": parent_command_id,
         "command_id": parent_command_id,
         "linked_command": parent_command_id,
-        "severity": severity,
+        "severity": severity_raw,
+        "category": category,
+        "reason": reason,
+        "incident_code": incident_code,
         "final_failure": final_failure,
         "failed_url": failed_url,
         "http_status": http_status,
@@ -433,6 +721,7 @@ def capability_internal_escalate(
         "decision_status": "Escalated",
         "decision_reason": "internal_escalation_sent",
         "next_action": "complete_flow_incident",
+        "incident_create_ok": bool(incident_record_id),
     }
 
     return {
@@ -444,6 +733,9 @@ def capability_internal_escalate(
         "flow_id": flow_id,
         "root_event_id": root_event_id,
         "incident_record_id": incident_record_id,
+        "incident_create_ok": bool(incident_record_id),
+        "incident_created_now": incident_created_now,
+        "incident_create_res": incident_create_res,
         "log_record_id": log_record_id,
         "message": "internal_escalation_sent",
         "run_record_id": effective_run_record_id,
@@ -475,6 +767,7 @@ def run(
     airtable_update,
     logs_errors_table_name,
     incidents_table_name=None,
+    airtable_create=None,
 ):
     return capability_internal_escalate(
         req,
@@ -482,4 +775,5 @@ def run(
         airtable_update=airtable_update,
         logs_errors_table_name=logs_errors_table_name,
         incidents_table_name=incidents_table_name,
+        airtable_create=airtable_create,
     )
