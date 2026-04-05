@@ -8912,6 +8912,87 @@ async def run(request: Request, response: Response) -> RunResponse:
 # ============================================================
 # Incidents / graphs / details
 # ============================================================
+def _airtable_scalar(value):
+    if value is None:
+        return ""
+
+    if isinstance(value, list):
+        for item in value:
+            picked = _airtable_scalar(item)
+            if picked != "":
+                return picked
+        return ""
+
+    if isinstance(value, dict):
+        for key in ("id", "name", "value", "text"):
+            if key in value:
+                picked = _airtable_scalar(value.get(key))
+                if picked != "":
+                    return picked
+        return ""
+
+    if isinstance(value, str):
+        return value.strip()
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+
+    if isinstance(value, bool):
+        return "true" if value else "false"
+
+    return str(value).strip()
+
+
+def _airtable_number(value):
+    if value is None or value == "":
+        return None
+
+    if isinstance(value, list):
+        for item in value:
+            num = _airtable_number(item)
+            if num is not None:
+                return num
+        return None
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+
+    text_value = _airtable_scalar(value)
+    if not text_value:
+        return None
+
+    try:
+        if "." in text_value:
+            return float(text_value)
+        return int(text_value)
+    except Exception:
+        try:
+            return float(text_value.replace(",", "."))
+        except Exception:
+            return None
+
+
+def _pick_field(fields: dict, *names: str):
+    for name in names:
+        if name in fields:
+            value = fields.get(name)
+            picked = _airtable_scalar(value)
+            if picked != "":
+                return picked
+    return ""
+
+
+def _is_resolved_incident(status: str, resolved_at: str) -> bool:
+    normalized_status = str(status or "").strip().lower()
+    return bool(resolved_at) or normalized_status in {
+        "resolved",
+        "closed",
+        "done",
+        "résolu",
+        "resolve",
+    }
+
+
 @app.get("/incidents")
 def get_incidents(flow_id: str = Query(default="")):
     try:
@@ -8955,7 +9036,8 @@ def get_incidents(flow_id: str = Query(default="")):
         response.raise_for_status()
 
         payload = response.json()
-        records = payload.get("records", [])
+        records = payload.get("records", []) or []
+
         incidents = []
         stats = {
             "open": 0,
@@ -8968,175 +9050,182 @@ def get_incidents(flow_id: str = Query(default="")):
         for r in records:
             f = r.get("fields", {}) or {}
 
-            status = str(
-                f.get("Status_select")
-                or f.get("Statut incident")
-                or f.get("status_select")
-                or f.get("status")
-                or f.get("Status")
-                or ""
-            ).strip()
+            record_id = str(r.get("id") or "").strip()
 
-            severity = str(
-                f.get("Severity")
-                or f.get("Urgence IA")
-                or f.get("severity")
-                or ""
-            ).strip()
-
-            raw_sla_status = (
-                f.get("SLA_Status")
-                or f.get("SLA status")
-                or f.get("sla_status")
-                or f.get("SLA")
+            status = _pick_field(
+                f,
+                "Status_select",
+                "Statut incident",
+                "status_select",
+                "status",
+                "Status",
             )
 
-            title = (
-                f.get("Name")
-                or f.get("Title")
-                or f.get("Incident_Title")
-                or f.get("Error_Message")
-                or f.get("Résumé")
-                or "Untitled incident"
+            severity = _pick_field(
+                f,
+                "Severity",
+                "Urgence IA",
+                "severity",
             )
 
-            workspace_id = (
-                f.get("Workspace_ID")
-                or f.get("workspace_id")
-                or f.get("Workspace")
-                or f.get("workspace")
+            raw_sla_status = _pick_field(
+                f,
+                "SLA_Status",
+                "SLA status",
+                "sla_status",
+                "SLA",
             )
 
-            linked_run = (
-                f.get("Linked_Run")
-                or f.get("Run_Record_ID")
-                or f.get("run_record_id")
-                or f.get("run_id")
-                or f.get("Linked run")
+            title = _pick_field(
+                f,
+                "Name",
+                "Title",
+                "Incident_Title",
+                "Error_Message",
+                "Résumé",
+            ) or "Untitled incident"
+
+            workspace_id = _pick_field(
+                f,
+                "Workspace_ID",
+                "workspace_id",
+                "Workspace",
+                "workspace",
             )
 
-            linked_command = (
-                f.get("Linked_Command")
-                or f.get("Command_ID")
-                or f.get("command_id")
-                or f.get("Linked command")
+            linked_run = _pick_field(
+                f,
+                "Linked_Run",
+                "Run_Record_ID",
+                "run_record_id",
+                "run_id",
+                "Run_ID",
+                "Linked run",
             )
 
-            created_at = (
-                f.get("Created time")
-                or f.get("Created_Time")
-                or f.get("created_at")
-                or f.get("Created_At")
+            linked_command = _pick_field(
+                f,
+                "Linked_Command",
+                "Command_ID",
+                "command_id",
+                "Linked command",
             )
 
-            updated_at = (
-                f.get("Last modified time")
-                or f.get("Updated_At")
-                or f.get("updated_at")
-                or f.get("Last_Seen_At")
+            created_at = _pick_field(
+                f,
+                "Created time",
+                "Created_Time",
+                "created_at",
+                "Created_At",
             )
 
-            opened_at = (
-                f.get("Opened_At")
-                or f.get("opened_at")
-                or created_at
+            updated_at = _pick_field(
+                f,
+                "Last modified time",
+                "Updated_At",
+                "updated_at",
+                "Last_Seen_At",
             )
 
-            resolved_at = (
-                f.get("Resolved_At")
-                or f.get("resolved_at")
-                or None
+            opened_at = _pick_field(
+                f,
+                "Opened_At",
+                "opened_at",
+            ) or created_at
+
+            resolved_at = _pick_field(
+                f,
+                "Resolved_At",
+                "resolved_at",
             )
 
-            current_flow_id = (
-                f.get("Flow_ID")
-                or f.get("flow_id")
+            current_flow_id = _pick_field(
+                f,
+                "Flow_ID",
+                "flow_id",
             )
 
-            root_event_id = (
-                f.get("Root_Event_ID")
-                or f.get("root_event_id")
+            root_event_id = _pick_field(
+                f,
+                "Root_Event_ID",
+                "root_event_id",
             )
 
-            command_id = (
-                f.get("Command_ID")
-                or f.get("command_id")
+            command_id = _pick_field(
+                f,
+                "Command_ID",
+                "command_id",
             )
 
-            run_record_id = (
-                f.get("Run_Record_ID")
-                or f.get("run_record_id")
-                or f.get("Linked_Run")
-                or f.get("run_id")
+            run_record_id = _pick_field(
+                f,
+                "Run_Record_ID",
+                "run_record_id",
+                "Linked_Run",
+                "run_id",
+                "Run_ID",
             )
 
-            category = (
-                f.get("Category")
-                or f.get("category")
+            category = _pick_field(
+                f,
+                "Category",
+                "category",
             )
 
-            reason = (
-                f.get("Reason")
-                or f.get("reason")
+            reason = _pick_field(
+                f,
+                "Reason",
+                "reason",
             )
 
-            resolution_note = (
-                f.get("Resolution_Note")
-                or f.get("resolution_note")
-                or f.get("resolutionNote")
-                or f.get("Resolution Note")
+            resolution_note = _pick_field(
+                f,
+                "Resolution_Note",
+                "resolution_note",
+                "resolutionNote",
+                "Resolution Note",
             )
 
-            last_action = (
-                f.get("Last_Action")
-                or f.get("last_action")
-                or f.get("lastAction")
-                or f.get("Last Action")
+            last_action = _pick_field(
+                f,
+                "Last_Action",
+                "last_action",
+                "lastAction",
+                "Last Action",
             )
 
-            error_id = (
-                f.get("Error_ID")
-                or f.get("error_id")
-                or f.get("Incident_Code")
-                or f.get("incident_code")
-                or f.get("Error Code")
+            error_id = _pick_field(
+                f,
+                "Error_ID",
+                "error_id",
+                "Incident_Code",
+                "incident_code",
+                "Error Code",
+                "Incident_Record_ID",
+                "incident_record_id",
             )
 
-            worker = (
-                f.get("Worker")
-                or f.get("worker")
+            worker = _pick_field(
+                f,
+                "Worker",
+                "worker",
             )
 
-            sla_remaining_minutes = (
+            sla_remaining_minutes = _airtable_number(
                 f.get("SLA_Remaining_Minutes")
                 or f.get("SLA remaining minutes")
                 or f.get("Temps restant SLA")
             )
 
-            current_flow_id_str = str(current_flow_id or "").strip()
             normalized_status = status.lower().strip()
             normalized_severity = severity.lower().strip()
-
-            # -------------------------------------------------
-            # Normalize SLA status so resolved incidents
-            # cannot keep showing "OPEN"
-            # -------------------------------------------------
-            resolved_like = bool(resolved_at) or normalized_status in (
-                "resolved",
-                "closed",
-                "done",
-                "résolu",
-                "resolve",
-            )
-
-            if isinstance(raw_sla_status, str):
-                sla_status = raw_sla_status.strip()
-            else:
-                sla_status = raw_sla_status
+            resolved_like = _is_resolved_incident(status, resolved_at)
 
             if resolved_like:
                 sla_status = "resolved"
-            elif not sla_status:
+            elif raw_sla_status:
+                sla_status = str(raw_sla_status).strip().lower()
+            else:
                 if isinstance(sla_remaining_minutes, (int, float)):
                     if sla_remaining_minutes < 0:
                         sla_status = "breached"
@@ -9147,12 +9236,18 @@ def get_incidents(flow_id: str = Query(default="")):
                 else:
                     sla_status = "open"
 
-            if requested_flow_id and current_flow_id_str != requested_flow_id:
-                continue
+            if requested_flow_id:
+                allowed_values = {
+                    str(current_flow_id or "").strip(),
+                    str(root_event_id or "").strip(),
+                    str(record_id or "").strip(),
+                }
+                if requested_flow_id not in allowed_values:
+                    continue
 
             incidents.append(
                 {
-                    "id": r.get("id"),
+                    "id": record_id,
                     "title": title,
                     "name": title,
                     "status": status,
@@ -9160,11 +9255,12 @@ def get_incidents(flow_id: str = Query(default="")):
                     "sla_status": sla_status,
                     "sla_remaining_minutes": sla_remaining_minutes,
                     "workspace_id": workspace_id,
+                    "workspace": workspace_id,
                     "linked_run": linked_run,
                     "linked_command": linked_command,
-                    "command_id": command_id,
-                    "run_record_id": run_record_id,
-                    "flow_id": current_flow_id_str,
+                    "command_id": command_id or linked_command,
+                    "run_record_id": run_record_id or linked_run,
+                    "flow_id": current_flow_id,
                     "root_event_id": root_event_id,
                     "category": category,
                     "reason": reason,
@@ -9174,21 +9270,29 @@ def get_incidents(flow_id: str = Query(default="")):
                     "created_at": created_at,
                     "updated_at": updated_at,
                     "opened_at": opened_at,
-                    "resolved_at": resolved_at,
+                    "resolved_at": resolved_at or None,
                     "source": "Incidents",
                     "worker": worker,
+                    "fields": f,
                 }
             )
 
             if resolved_like:
                 stats["resolved"] += 1
-            elif normalized_status in ("escalated", "escalade", "escaladé"):
+            elif normalized_status in {"escalated", "escalade", "escaladé"}:
                 stats["warning"] += 1
-            elif normalized_status in ("open", "opened", "new", "active", "en cours"):
-                stats["open"] += 1
-            elif normalized_severity in ("critical", "critique"):
+            elif normalized_severity in {"critical", "critique"}:
                 stats["critical"] += 1
-            elif normalized_severity in ("high", "warning", "warn", "medium", "surveillance", "moyen"):
+            elif normalized_status in {"open", "opened", "new", "active", "en cours"}:
+                stats["open"] += 1
+            elif normalized_severity in {
+                "high",
+                "warning",
+                "warn",
+                "medium",
+                "surveillance",
+                "moyen",
+            }:
                 stats["warning"] += 1
             else:
                 stats["other"] += 1
@@ -9212,7 +9316,7 @@ def get_incidents(flow_id: str = Query(default="")):
         raise HTTPException(status_code=502, detail=f"Airtable incidents request failed: {detail}")
     except Exception as exc:
         raise HTTPException(status_code=500, detail={"detail": "Internal error", "error": repr(exc)})
-
+        
 @app.get("/commands/{record_id}")
 def get_command_detail(record_id: str) -> Dict[str, Any]:
     try:
