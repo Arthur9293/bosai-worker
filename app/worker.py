@@ -8226,41 +8226,29 @@ def get_sla(limit: int = 50) -> Dict[str, Any]:
 @app.get("/events")
 def get_events(limit: int = 30) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=30, minimum=1, maximum=100)
-
-    candidate_views: List[str] = []
-    for view_name in [
+    records, meta = _safe_records_from_view(
+        EVENTS_TABLE_NAME,
         EVENTS_DASHBOARD_VIEW_NAME,
-        "ALL",
-        "Grid view",
-        EVENTS_VIEW_NAME,
-    ]:
-        v = str(view_name or "").strip()
-        if v and v not in candidate_views:
-            candidate_views.append(v)
+        limit,
+    )
 
-    records: List[Dict[str, Any]] = []
-    meta: Dict[str, Any] = {"ok": False}
-    selected_view = ""
-    tried_views: List[str] = []
+    def _pick_first_text(*values: Any) -> str:
+        for value in values:
+            if value is None:
+                continue
 
-    for view_name in candidate_views:
-        tried_views.append(view_name)
-        recs, current_meta = _safe_records_from_view(
-            EVENTS_TABLE_NAME,
-            view_name,
-            limit,
-        )
+            if isinstance(value, list):
+                for item in value:
+                    text = str(item or "").strip()
+                    if text:
+                        return text
+                continue
 
-        if current_meta.get("ok"):
-            meta = current_meta
+            text = str(value or "").strip()
+            if text:
+                return text
 
-        if recs:
-            records = recs
-            selected_view = view_name
-            break
-
-    if not selected_view and candidate_views:
-        selected_view = candidate_views[0]
+        return ""
 
     events: List[Dict[str, Any]] = []
     stats = {
@@ -8274,7 +8262,6 @@ def get_events(limit: int = 30) -> Dict[str, Any]:
 
     for r in records:
         f = r.get("fields", {}) or {}
-        payload = _json_load_maybe(f.get("Payload_JSON"))
 
         status = str(f.get("Status_select", f.get("Status", "")) or "").strip()
         key = status.lower()
@@ -8292,115 +8279,119 @@ def get_events(limit: int = 30) -> Dict[str, Any]:
         else:
             stats["other"] += 1
 
+        payload = _json_load_maybe(f.get("Payload_JSON"))
+
         linked_command = f.get("Linked_Command")
-        command_record_id = str(f.get("Command_Record_ID") or "").strip()
+        if linked_command is None:
+            linked_command = []
 
-        if not command_record_id and isinstance(linked_command, list) and linked_command:
-            command_record_id = str(linked_command[0] or "").strip()
+        if not isinstance(linked_command, list):
+            linked_command = [linked_command]
 
-        if not command_record_id and isinstance(payload, dict):
-            command_record_id = str(
-                payload.get("command_id")
-                or payload.get("command_record_id")
-                or ""
-            ).strip()
+        command_record_id = _pick_first_text(
+            f.get("Command_Record_ID"),
+            f.get("Command_ID"),
+            linked_command,
+            payload.get("command_id") if isinstance(payload, dict) else "",
+            payload.get("command_record_id") if isinstance(payload, dict) else "",
+        )
 
-        workspace_id = str(f.get("Workspace_ID") or f.get("Workspace") or "").strip()
-        if not workspace_id and isinstance(payload, dict):
-            workspace_id = str(
-                payload.get("workspace_id")
-                or payload.get("workspaceId")
-                or ""
-            ).strip()
+        flow_id = _pick_first_text(
+            f.get("Flow_ID"),
+            f.get("Flow"),
+            payload.get("flow_id") if isinstance(payload, dict) else "",
+            payload.get("flowid") if isinstance(payload, dict) else "",
+        )
 
-        flow_id = str(f.get("Flow_ID") or "").strip()
-        if not flow_id and isinstance(payload, dict):
-            flow_id = str(
-                payload.get("flow_id")
-                or payload.get("flowid")
-                or payload.get("flowId")
-                or ""
-            ).strip()
+        root_event_id = _pick_first_text(
+            f.get("Root_Event_ID"),
+            f.get("Root_Event"),
+            payload.get("root_event_id") if isinstance(payload, dict) else "",
+            payload.get("rootEventId") if isinstance(payload, dict) else "",
+            payload.get("rooteventid") if isinstance(payload, dict) else "",
+            payload.get("event_id") if isinstance(payload, dict) else "",
+        )
 
-        root_event_id = str(f.get("Root_Event_ID") or "").strip()
-        if not root_event_id and isinstance(payload, dict):
-            root_event_id = str(
-                payload.get("root_event_id")
-                or payload.get("rootEventId")
-                or payload.get("rooteventid")
-                or ""
-            ).strip()
+        workspace_id = _pick_first_text(
+            f.get("Workspace_ID"),
+            f.get("Workspace"),
+            payload.get("workspace_id") if isinstance(payload, dict) else "",
+            payload.get("workspaceId") if isinstance(payload, dict) else "",
+            payload.get("workspace") if isinstance(payload, dict) else "",
+        )
 
-        created_at = str(
-            f.get("Created_At")
-            or f.get("created_at")
-            or ""
-        ).strip()
+        created_at = _pick_first_text(
+            f.get("Created_At"),
+            f.get("Created"),
+            f.get("created_at"),
+        )
 
-        updated_at = str(
-            f.get("Updated_At")
-            or f.get("updated_at")
-            or f.get("Processed_At")
-            or ""
-        ).strip()
+        updated_at = _pick_first_text(
+            f.get("Updated_At"),
+            f.get("Last_Updated_At"),
+            f.get("updated_at"),
+            f.get("Processed_At"),
+            created_at,
+        )
 
-        processed_at = str(f.get("Processed_At") or "").strip()
+        processed_at = _pick_first_text(
+            f.get("Processed_At"),
+            f.get("processed_at"),
+        )
 
-        event_type = str(
-            f.get("Event_Type")
-            or f.get("Type")
-            or ""
-        ).strip()
+        source_value = _pick_first_text(
+            f.get("Source"),
+            payload.get("source") if isinstance(payload, dict) else "",
+        )
 
-        if not event_type and isinstance(payload, dict):
-            event_type = str(
-                payload.get("event_type")
-                or payload.get("type")
-                or ""
-            ).strip()
+        run_id = _pick_first_text(
+            f.get("Run_ID"),
+            f.get("Run_Record_ID"),
+            payload.get("run_id") if isinstance(payload, dict) else "",
+            payload.get("runRecordId") if isinstance(payload, dict) else "",
+        )
 
-        mapped_capability = str(f.get("Mapped_Capability") or "").strip()
-        if not mapped_capability and isinstance(payload, dict):
-            mapped_capability = str(
-                payload.get("mapped_capability")
-                or payload.get("capability")
-                or ""
-            ).strip()
+        event_type = _pick_first_text(
+            f.get("Event_Type"),
+            f.get("Type"),
+            f.get("Name"),
+        )
+
+        mapped_capability = _pick_first_text(
+            f.get("Mapped_Capability"),
+            payload.get("mapped_capability") if isinstance(payload, dict) else "",
+        )
 
         events.append(
             {
                 "id": r.get("id"),
                 "event_type": event_type,
                 "status": status,
+                "command_created": _is_truthy(f.get("Command_Created")),
+                "linked_command": linked_command,
+                "mapped_capability": mapped_capability,
+                "processed_at": processed_at or None,
+                "created_at": created_at or None,
+                "updated_at": updated_at or None,
                 "workspace_id": workspace_id or None,
                 "flow_id": flow_id or None,
                 "root_event_id": root_event_id or None,
-                "command_created": _is_truthy(f.get("Command_Created")),
-                "linked_command": linked_command,
+                "source": source_value or None,
+                "run_id": run_id or None,
                 "command_id": command_record_id or None,
-                "mapped_capability": mapped_capability or None,
-                "created_at": created_at or None,
-                "updated_at": updated_at or None,
-                "processed_at": processed_at or None,
-                "source": payload.get("source") if isinstance(payload, dict) else None,
-                "run_id": payload.get("run_id") if isinstance(payload, dict) else None,
                 "payload": payload,
             }
         )
 
     return {
         "ok": bool(meta.get("ok")),
-        "source": {
-            **meta,
-            "selected_view": selected_view,
-            "tried_views": tried_views,
-        },
+        "source": meta,
         "count": len(events),
         "stats": stats,
         "events": events,
         "ts": utc_now_iso(),
     }
-
+    
 # ============================================================
 # Webhook Monitor
 # ============================================================
