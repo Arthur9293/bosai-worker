@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 import requests
 
-print("HTTP_EXEC_MODULE_LOADED_V3")
+print("HTTP_EXEC_MODULE_LOADED_V4")
 
 HTTP_EXEC_ENABLED = True
 DEFAULT_RETRY_MAX = 3
@@ -155,6 +155,23 @@ def _sanitize_headers_for_logs(headers: Dict[str, Any]) -> Dict[str, Any]:
 def _extract_retry_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
     flow_id = str(payload.get("flow_id", "") or "")
     root_event_id = str(payload.get("root_event_id", "") or "")
+
+    source_event_id = str(
+        payload.get("source_event_id")
+        or payload.get("sourceEventId")
+        or payload.get("event_id")
+        or payload.get("eventId")
+        or root_event_id
+        or ""
+    )
+
+    workspace_id = str(
+        payload.get("workspace_id")
+        or payload.get("workspaceId")
+        or payload.get("Workspace_ID")
+        or ""
+    )
+
     parent_command_id = str(
         payload.get("parent_command_id")
         or payload.get("parent_id")
@@ -173,6 +190,8 @@ def _extract_retry_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "flow_id": flow_id,
         "root_event_id": root_event_id,
+        "source_event_id": source_event_id,
+        "workspace_id": workspace_id,
         "parent_command_id": parent_command_id,
         "step_index": step_index,
         "retry_count": retry_count,
@@ -340,12 +359,18 @@ def _build_incident_router_command(
     http_status: Optional[int],
     request_summary: Dict[str, Any],
     response_summary: Optional[Dict[str, Any]],
+    run_record_id: str,
 ) -> Dict[str, Any]:
     next_depth = _increment_depth(original_payload)
 
     incident_input = {
         "flow_id": meta["flow_id"],
         "root_event_id": meta["root_event_id"],
+        "source_event_id": meta["source_event_id"],
+        "event_id": meta["source_event_id"],
+        "workspace_id": meta["workspace_id"],
+        "run_record_id": run_record_id,
+        "linked_run": run_record_id,
         "parent_command_id": meta["parent_command_id"],
         "step_index": meta["step_index"] + 1,
         "_depth": next_depth,
@@ -366,6 +391,7 @@ def _build_incident_router_command(
         "capability": "incident_router",
         "input": incident_input,
     }
+
 
 def _update_monitored_endpoint_best_effort(
     *,
@@ -431,9 +457,6 @@ def _update_monitored_endpoint_best_effort(
 
         print("[http_exec][endpoint_update] fields =", fields, flush=True)
 
-        # ------------------------------------------------------------
-        # PREFERRED PATH: direct update by Airtable record_id
-        # ------------------------------------------------------------
         if endpoint_record_id and callable(airtable_update):
             airtable_update(
                 table_name="Monitored_Endpoints",
@@ -447,9 +470,6 @@ def _update_monitored_endpoint_best_effort(
             )
             return
 
-        # ------------------------------------------------------------
-        # FALLBACK PATH: lookup by Name
-        # ------------------------------------------------------------
         if not endpoint_name:
             print(
                 "[http_exec] skip monitored endpoint update: missing endpoint_name and endpoint_record_id",
@@ -477,6 +497,7 @@ def _update_monitored_endpoint_best_effort(
     except Exception as e:
         print("[http_exec] endpoint update error =", repr(e), flush=True)
 
+
 def capability_http_exec(
     payload: Optional[Dict[str, Any]] = None,
     context: Optional[Dict[str, Any]] = None,
@@ -492,7 +513,7 @@ def capability_http_exec(
 
     if "airtable_update_by_field" not in runtime_context and kwargs.get("airtable_update_by_field"):
         runtime_context["airtable_update_by_field"] = kwargs.get("airtable_update_by_field")
-        
+
     if "airtable_update" not in runtime_context and kwargs.get("airtable_update"):
         runtime_context["airtable_update"] = kwargs.get("airtable_update")
 
@@ -504,19 +525,34 @@ def capability_http_exec(
     original_payload = deepcopy(payload or {})
     meta = _extract_retry_meta(original_payload)
 
+    run_record_id = str(
+        runtime_context.get("run_record_id")
+        or original_payload.get("run_record_id")
+        or original_payload.get("linked_run")
+        or ""
+    ).strip()
+
+    base_result_fields = {
+        "flow_id": meta["flow_id"],
+        "root_event_id": meta["root_event_id"],
+        "source_event_id": meta["source_event_id"],
+        "workspace_id": meta["workspace_id"],
+        "step_index": meta["step_index"],
+        "run_record_id": run_record_id,
+        "linked_run": run_record_id,
+    }
+
     if not HTTP_EXEC_ENABLED:
         result = {
             "ok": False,
             "status": "blocked",
             "error": "http_exec_disabled",
             "ts": _now_ts(),
-            "flow_id": meta["flow_id"],
-            "root_event_id": meta["root_event_id"],
-            "step_index": meta["step_index"],
             "retry_planned": False,
             "next_commands": [],
             "http_status": None,
             "status_code": None,
+            **base_result_fields,
         }
         print("[HTTP_EXEC CORE] error return =", result)
         return result
@@ -527,13 +563,11 @@ def capability_http_exec(
             "status": "blocked",
             "error": "max_depth_exceeded",
             "ts": _now_ts(),
-            "flow_id": meta["flow_id"],
-            "root_event_id": meta["root_event_id"],
-            "step_index": meta["step_index"],
             "retry_planned": False,
             "next_commands": [],
             "http_status": None,
             "status_code": None,
+            **base_result_fields,
         }
         print("[HTTP_EXEC CORE] error return =", result)
         return result
@@ -559,13 +593,11 @@ def capability_http_exec(
             "status": "error",
             "error": "missing_url",
             "ts": _now_ts(),
-            "flow_id": meta["flow_id"],
-            "root_event_id": meta["root_event_id"],
-            "step_index": meta["step_index"],
             "retry_planned": False,
             "next_commands": [],
             "http_status": None,
             "status_code": None,
+            **base_result_fields,
         }
         print("[HTTP_EXEC CORE] error return =", result)
         return result
@@ -591,14 +623,12 @@ def capability_http_exec(
             "error": allow_reason,
             "error_message": f"URL blocked: {allow_reason}",
             "ts": _now_ts(),
-            "flow_id": meta["flow_id"],
-            "root_event_id": meta["root_event_id"],
-            "step_index": meta["step_index"],
             "request": request_summary,
             "retry_planned": False,
             "next_commands": [],
             "http_status": None,
             "status_code": None,
+            **base_result_fields,
         }
         _update_monitored_endpoint_best_effort(
             original_payload=original_payload,
@@ -616,9 +646,6 @@ def capability_http_exec(
             "status": "done",
             "dry_run": True,
             "ts": _now_ts(),
-            "flow_id": meta["flow_id"],
-            "root_event_id": meta["root_event_id"],
-            "step_index": meta["step_index"],
             "request": request_summary,
             "response": {
                 "status_code": 0,
@@ -633,6 +660,7 @@ def capability_http_exec(
             "next_commands": [],
             "http_status": 0,
             "status_code": 0,
+            **base_result_fields,
         }
         _update_monitored_endpoint_best_effort(
             original_payload=original_payload,
@@ -676,15 +704,13 @@ def capability_http_exec(
                 "ok": True,
                 "status": "done",
                 "ts": _now_ts(),
-                "flow_id": meta["flow_id"],
-                "root_event_id": meta["root_event_id"],
-                "step_index": meta["step_index"],
                 "request": request_summary,
                 "response": response_payload,
                 "status_code": int(response.status_code),
                 "http_status": int(response.status_code),
                 "retry_planned": False,
                 "next_commands": [],
+                **base_result_fields,
             }
             _update_monitored_endpoint_best_effort(
                 original_payload=original_payload,
@@ -703,9 +729,6 @@ def capability_http_exec(
             "ok": False,
             "status": "error",
             "ts": _now_ts(),
-            "flow_id": meta["flow_id"],
-            "root_event_id": meta["root_event_id"],
-            "step_index": meta["step_index"],
             "request": request_summary,
             "response": response_payload,
             "status_code": int(response.status_code),
@@ -716,6 +739,7 @@ def capability_http_exec(
             "retry_max": meta["retry_max"],
             "retry_planned": False,
             "next_commands": [],
+            **base_result_fields,
         }
 
         _update_monitored_endpoint_best_effort(
@@ -734,6 +758,27 @@ def capability_http_exec(
             retry_input["retry_count"] = retry_count_after_failure
             retry_input["next_retry_at"] = next_retry_at
             retry_input["_depth"] = _increment_depth(original_payload)
+
+            if meta["flow_id"] and not str(retry_input.get("flow_id") or "").strip():
+                retry_input["flow_id"] = meta["flow_id"]
+
+            if meta["root_event_id"] and not str(retry_input.get("root_event_id") or "").strip():
+                retry_input["root_event_id"] = meta["root_event_id"]
+
+            if meta["source_event_id"] and not str(retry_input.get("source_event_id") or "").strip():
+                retry_input["source_event_id"] = meta["source_event_id"]
+
+            if meta["source_event_id"] and not str(retry_input.get("event_id") or "").strip():
+                retry_input["event_id"] = meta["source_event_id"]
+
+            if meta["workspace_id"] and not str(retry_input.get("workspace_id") or "").strip():
+                retry_input["workspace_id"] = meta["workspace_id"]
+
+            if run_record_id and not str(retry_input.get("run_record_id") or "").strip():
+                retry_input["run_record_id"] = run_record_id
+
+            if run_record_id and not str(retry_input.get("linked_run") or "").strip():
+                retry_input["linked_run"] = run_record_id
 
             result["retry_planned"] = True
             result["next_retry_at"] = next_retry_at
@@ -754,6 +799,7 @@ def capability_http_exec(
             http_status=int(response.status_code),
             request_summary=request_summary,
             response_summary=response_payload,
+            run_record_id=run_record_id,
         )
 
         result["next_commands"] = [incident_command]
@@ -769,9 +815,6 @@ def capability_http_exec(
             "ok": False,
             "status": "error",
             "ts": _now_ts(),
-            "flow_id": meta["flow_id"],
-            "root_event_id": meta["root_event_id"],
-            "step_index": meta["step_index"],
             "request": request_summary,
             "response": {
                 "status_code": None,
@@ -790,6 +833,7 @@ def capability_http_exec(
             "retry_max": meta["retry_max"],
             "retry_planned": False,
             "next_commands": [],
+            **base_result_fields,
         }
 
         _update_monitored_endpoint_best_effort(
@@ -808,6 +852,27 @@ def capability_http_exec(
             retry_input["retry_count"] = retry_count_after_failure
             retry_input["next_retry_at"] = next_retry_at
             retry_input["_depth"] = _increment_depth(original_payload)
+
+            if meta["flow_id"] and not str(retry_input.get("flow_id") or "").strip():
+                retry_input["flow_id"] = meta["flow_id"]
+
+            if meta["root_event_id"] and not str(retry_input.get("root_event_id") or "").strip():
+                retry_input["root_event_id"] = meta["root_event_id"]
+
+            if meta["source_event_id"] and not str(retry_input.get("source_event_id") or "").strip():
+                retry_input["source_event_id"] = meta["source_event_id"]
+
+            if meta["source_event_id"] and not str(retry_input.get("event_id") or "").strip():
+                retry_input["event_id"] = meta["source_event_id"]
+
+            if meta["workspace_id"] and not str(retry_input.get("workspace_id") or "").strip():
+                retry_input["workspace_id"] = meta["workspace_id"]
+
+            if run_record_id and not str(retry_input.get("run_record_id") or "").strip():
+                retry_input["run_record_id"] = run_record_id
+
+            if run_record_id and not str(retry_input.get("linked_run") or "").strip():
+                retry_input["linked_run"] = run_record_id
 
             result["retry_planned"] = True
             result["next_retry_at"] = next_retry_at
@@ -828,6 +893,7 @@ def capability_http_exec(
             http_status=None,
             request_summary=request_summary,
             response_summary=result["response"],
+            run_record_id=run_record_id,
         )
         result["next_commands"] = [incident_command]
         print("[HTTP_EXEC CORE] error return =", result)
@@ -842,9 +908,6 @@ def capability_http_exec(
             "ok": False,
             "status": "error",
             "ts": _now_ts(),
-            "flow_id": meta["flow_id"],
-            "root_event_id": meta["root_event_id"],
-            "step_index": meta["step_index"],
             "request": request_summary,
             "response": {
                 "status_code": None,
@@ -863,6 +926,7 @@ def capability_http_exec(
             "retry_max": meta["retry_max"],
             "retry_planned": False,
             "next_commands": [],
+            **base_result_fields,
         }
 
         _update_monitored_endpoint_best_effort(
@@ -881,6 +945,27 @@ def capability_http_exec(
             retry_input["retry_count"] = retry_count_after_failure
             retry_input["next_retry_at"] = next_retry_at
             retry_input["_depth"] = _increment_depth(original_payload)
+
+            if meta["flow_id"] and not str(retry_input.get("flow_id") or "").strip():
+                retry_input["flow_id"] = meta["flow_id"]
+
+            if meta["root_event_id"] and not str(retry_input.get("root_event_id") or "").strip():
+                retry_input["root_event_id"] = meta["root_event_id"]
+
+            if meta["source_event_id"] and not str(retry_input.get("source_event_id") or "").strip():
+                retry_input["source_event_id"] = meta["source_event_id"]
+
+            if meta["source_event_id"] and not str(retry_input.get("event_id") or "").strip():
+                retry_input["event_id"] = meta["source_event_id"]
+
+            if meta["workspace_id"] and not str(retry_input.get("workspace_id") or "").strip():
+                retry_input["workspace_id"] = meta["workspace_id"]
+
+            if run_record_id and not str(retry_input.get("run_record_id") or "").strip():
+                retry_input["run_record_id"] = run_record_id
+
+            if run_record_id and not str(retry_input.get("linked_run") or "").strip():
+                retry_input["linked_run"] = run_record_id
 
             result["retry_planned"] = True
             result["next_retry_at"] = next_retry_at
@@ -901,6 +986,7 @@ def capability_http_exec(
             http_status=None,
             request_summary=request_summary,
             response_summary=result["response"],
+            run_record_id=run_record_id,
         )
         result["next_commands"] = [incident_command]
         print("[HTTP_EXEC CORE] error return =", result)
@@ -915,9 +1001,6 @@ def capability_http_exec(
             "ok": False,
             "status": "error",
             "ts": _now_ts(),
-            "flow_id": meta["flow_id"],
-            "root_event_id": meta["root_event_id"],
-            "step_index": meta["step_index"],
             "request": request_summary,
             "response": {
                 "status_code": None,
@@ -936,6 +1019,7 @@ def capability_http_exec(
             "retry_max": meta["retry_max"],
             "retry_planned": False,
             "next_commands": [],
+            **base_result_fields,
         }
 
         _update_monitored_endpoint_best_effort(
@@ -954,6 +1038,27 @@ def capability_http_exec(
             retry_input["retry_count"] = retry_count_after_failure
             retry_input["next_retry_at"] = next_retry_at
             retry_input["_depth"] = _increment_depth(original_payload)
+
+            if meta["flow_id"] and not str(retry_input.get("flow_id") or "").strip():
+                retry_input["flow_id"] = meta["flow_id"]
+
+            if meta["root_event_id"] and not str(retry_input.get("root_event_id") or "").strip():
+                retry_input["root_event_id"] = meta["root_event_id"]
+
+            if meta["source_event_id"] and not str(retry_input.get("source_event_id") or "").strip():
+                retry_input["source_event_id"] = meta["source_event_id"]
+
+            if meta["source_event_id"] and not str(retry_input.get("event_id") or "").strip():
+                retry_input["event_id"] = meta["source_event_id"]
+
+            if meta["workspace_id"] and not str(retry_input.get("workspace_id") or "").strip():
+                retry_input["workspace_id"] = meta["workspace_id"]
+
+            if run_record_id and not str(retry_input.get("run_record_id") or "").strip():
+                retry_input["run_record_id"] = run_record_id
+
+            if run_record_id and not str(retry_input.get("linked_run") or "").strip():
+                retry_input["linked_run"] = run_record_id
 
             result["retry_planned"] = True
             result["next_retry_at"] = next_retry_at
@@ -974,6 +1079,7 @@ def capability_http_exec(
             http_status=None,
             request_summary=request_summary,
             response_summary=result["response"],
+            run_record_id=run_record_id,
         )
         result["next_commands"] = [incident_command]
         print("[HTTP_EXEC CORE] error return =", result)
