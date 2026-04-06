@@ -53,6 +53,10 @@ def _safe_json(value: Any) -> str:
         return "{}"
 
 
+def _escape_airtable_formula_value(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
 def _extract_input(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
@@ -68,6 +72,46 @@ def _extract_input(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
+    root_event_id = _to_str(
+        payload.get("root_event_id")
+        or payload.get("rooteventid")
+        or payload.get("rootEventId")
+        or payload.get("event_id")
+        or payload.get("eventid")
+        or payload.get("eventId")
+        or ""
+    ).strip()
+
+    source_event_id = _to_str(
+        payload.get("source_event_id")
+        or payload.get("sourceeventid")
+        or payload.get("sourceEventId")
+        or payload.get("event_id")
+        or payload.get("eventid")
+        or payload.get("eventId")
+        or root_event_id
+        or ""
+    ).strip()
+
+    workspace_id = _to_str(
+        payload.get("workspace_id")
+        or payload.get("workspaceid")
+        or payload.get("workspaceId")
+        or payload.get("Workspace_ID")
+        or payload.get("workspace")
+        or "production"
+    ).strip()
+
+    run_record_id = _to_str(
+        payload.get("run_record_id")
+        or payload.get("runrecordid")
+        or payload.get("runRecordId")
+        or payload.get("linked_run")
+        or payload.get("linkedrun")
+        or payload.get("Linked_Run")
+        or ""
+    ).strip()
+
     return {
         "flow_id": _to_str(
             payload.get("flow_id")
@@ -75,17 +119,11 @@ def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
             or payload.get("flowId")
             or ""
         ).strip(),
-        "root_event_id": _to_str(
-            payload.get("root_event_id")
-            or payload.get("rooteventid")
-            or payload.get("rootEventId")
-            or payload.get("event_id")
-            or payload.get("eventid")
-            or payload.get("eventId")
-            or ""
-        ).strip(),
+        "root_event_id": root_event_id,
+        "source_event_id": source_event_id,
         "parent_command_id": _to_str(
             payload.get("parent_command_id")
+            or payload.get("parentcommandid")
             or payload.get("parentcommand_id")
             or payload.get("parentCommandId")
             or ""
@@ -110,20 +148,9 @@ def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
             else payload.get("depth"),
             0,
         ),
-        "workspace_id": _to_str(
-            payload.get("workspace_id")
-            or payload.get("workspaceid")
-            or payload.get("workspaceId")
-            or "production"
-        ).strip(),
-        "run_record_id": _to_str(
-            payload.get("run_record_id")
-            or payload.get("runrecordid")
-            or payload.get("runRecordId")
-            or payload.get("linked_run")
-            or payload.get("Linked_Run")
-            or ""
-        ).strip(),
+        "workspace_id": workspace_id,
+        "run_record_id": run_record_id,
+        "linked_run": run_record_id,
     }
 
 
@@ -261,12 +288,146 @@ def _normalize_decision_block(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _canonical_incident_context(
+    data: Dict[str, Any],
+    meta: Dict[str, Any],
+    runtime_run_record_id: str,
+    next_step_index: int,
+    next_depth: int,
+    decision_block: Dict[str, Any],
+) -> Dict[str, Any]:
+    run_record_id = _to_str(meta.get("run_record_id") or runtime_run_record_id).strip()
+    linked_run = _to_str(meta.get("linked_run") or run_record_id).strip()
+
+    flow_id = _to_str(meta.get("flow_id") or "").strip()
+    root_event_id = _to_str(meta.get("root_event_id") or flow_id).strip()
+    source_event_id = _to_str(meta.get("source_event_id") or root_event_id).strip()
+
+    workspace_id = _to_str(meta.get("workspace_id") or "production").strip()
+
+    original_capability = _to_str(
+        data.get("original_capability")
+        or data.get("failed_capability")
+        or data.get("source_capability")
+        or "http_exec"
+    ).strip()
+
+    failed_capability = _to_str(
+        data.get("failed_capability")
+        or data.get("original_capability")
+        or data.get("source_capability")
+        or original_capability
+    ).strip()
+
+    method = _to_str(
+        data.get("failed_method")
+        or data.get("method")
+        or "GET"
+    ).upper().strip()
+
+    target_url = _to_str(
+        data.get("failed_url")
+        or data.get("target_url")
+        or data.get("targeturl")
+        or data.get("url")
+        or data.get("http_target")
+        or ""
+    ).strip()
+
+    http_status = (
+        data.get("http_status")
+        if data.get("http_status") is not None
+        else data.get("httpstatus")
+        if data.get("httpstatus") is not None
+        else data.get("status_code")
+    )
+
+    status_code = (
+        data.get("status_code")
+        if data.get("status_code") is not None
+        else data.get("http_status")
+        if data.get("http_status") is not None
+        else data.get("httpstatus")
+    )
+
+    request_obj = data.get("request") if isinstance(data.get("request"), dict) else {}
+    response_obj = data.get("response") if isinstance(data.get("response"), dict) else {}
+
+    return {
+        **data,
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "source_event_id": source_event_id,
+        "event_id": source_event_id,
+        "workspace_id": workspace_id,
+        "run_record_id": run_record_id,
+        "linked_run": linked_run,
+        "parent_command_id": _to_str(
+            meta.get("parent_command_id")
+            or data.get("parent_command_id")
+            or data.get("parentcommandid")
+            or ""
+        ).strip(),
+        "command_id": _to_str(
+            meta.get("command_id")
+            or data.get("command_id")
+            or data.get("commandid")
+            or ""
+        ).strip(),
+        "step_index": next_step_index,
+        "_depth": next_depth,
+        "decision_status": decision_block["decision_status"],
+        "decision_reason": decision_block["decision_reason"],
+        "next_action": decision_block["next_action"],
+        "auto_executable": decision_block["auto_executable"],
+        "priority_score": decision_block["priority_score"],
+        "category": _to_str(data.get("category") or "http_failure").strip(),
+        "reason": _to_str(
+            data.get("reason")
+            or data.get("incident_code")
+            or data.get("decision_reason")
+            or "incident"
+        ).strip(),
+        "severity": _to_str(data.get("severity") or "").strip(),
+        "final_failure": _to_bool(
+            data.get("final_failure")
+            if data.get("final_failure") is not None
+            else data.get("finalfailure"),
+            False,
+        ),
+        "original_capability": original_capability,
+        "failed_capability": failed_capability,
+        "failed_method": method,
+        "method": method,
+        "failed_url": target_url,
+        "target_url": target_url,
+        "url": target_url,
+        "http_target": target_url,
+        "http_status": http_status,
+        "status_code": status_code,
+        "incident_code": _to_str(
+            data.get("incident_code")
+            or data.get("incidentcode")
+            or data.get("reason")
+            or "http_status_error"
+        ).strip(),
+        "goal": _to_str(
+            data.get("goal")
+            or data.get("failed_goal")
+            or ""
+        ).strip(),
+        "request": request_obj,
+        "response": response_obj,
+    }
+
+
 def _build_incident_key(data: Dict[str, Any], meta: Dict[str, Any]) -> str:
     flow_id = _to_str(meta.get("flow_id") or "no_flow").strip()
     root_event_id = _to_str(meta.get("root_event_id") or "no_root").strip()
     capability = _to_str(
         data.get("original_capability")
         or data.get("failed_capability")
+        or data.get("source_capability")
         or "no_capability"
     ).strip()
     method = _to_str(
@@ -278,10 +439,15 @@ def _build_incident_key(data: Dict[str, Any], meta: Dict[str, Any]) -> str:
         data.get("failed_url")
         or data.get("target_url")
         or data.get("targeturl")
+        or data.get("url")
+        or data.get("http_target")
         or ""
     ).strip()
     http_status = _to_str(
-        data.get("http_status") or data.get("httpstatus") or "0"
+        data.get("http_status")
+        or data.get("httpstatus")
+        or data.get("status_code")
+        or "0"
     ).strip()
     incident_code = _to_str(
         data.get("incident_code")
@@ -302,14 +468,14 @@ def _build_incident_key(data: Dict[str, Any], meta: Dict[str, Any]) -> str:
 
     return "|".join(
         [
-            flow_id,
-            root_event_id,
-            capability,
-            method,
+            flow_id or "no_flow",
+            root_event_id or "no_root",
+            capability or "no_capability",
+            method or "GET",
             target_url,
-            http_status,
-            incident_code,
-            reason,
+            http_status or "0",
+            incident_code or "no_incident_code",
+            reason or "no_reason",
             final_flag,
         ]
     )
@@ -321,9 +487,10 @@ def _find_existing_incident(
     airtable_list_filtered,
 ) -> Optional[Dict[str, Any]]:
     try:
+        safe_key = _escape_airtable_formula_value(incident_key)
         recs = airtable_list_filtered(
             incidents_table_name,
-            formula=f"{{Incident_Key}}='{incident_key}'",
+            formula=f"{{Incident_Key}}='{safe_key}'",
             max_records=1,
         )
         if isinstance(recs, list) and recs:
@@ -366,6 +533,7 @@ def _update_existing_incident_best_effort(
             "Linked_Command": linked_command,
             "Flow_ID": _to_str(meta.get("flow_id") or "").strip(),
             "Root_Event_ID": _to_str(meta.get("root_event_id") or "").strip(),
+            "Source_Event_ID": _to_str(meta.get("source_event_id") or "").strip(),
             "Payload_JSON": _safe_json(data),
         },
         {
@@ -375,6 +543,7 @@ def _update_existing_incident_best_effort(
             "Command_ID": parent_command_id,
             "Flow_ID": _to_str(meta.get("flow_id") or "").strip(),
             "Root_Event_ID": _to_str(meta.get("root_event_id") or "").strip(),
+            "Source_Event_ID": _to_str(meta.get("source_event_id") or "").strip(),
         },
         {
             "Last_Seen_At": now_ts,
@@ -438,7 +607,24 @@ def run(
         }
 
     decision_block = _normalize_decision_block(data)
-    incident_key = _to_str(data.get("incident_key")).strip() or _build_incident_key(data, meta)
+
+    canonical_for_key = _canonical_incident_context(
+        data=data,
+        meta=meta,
+        runtime_run_record_id=run_record_id,
+        next_step_index=_to_int(meta.get("step_index"), 0) + 1,
+        next_depth=depth + 1,
+        decision_block=decision_block,
+    )
+
+    incident_key = _to_str(data.get("incident_key")).strip() or _build_incident_key(
+        canonical_for_key,
+        {
+            **meta,
+            "flow_id": canonical_for_key.get("flow_id", ""),
+            "root_event_id": canonical_for_key.get("root_event_id", ""),
+        },
+    )
 
     existing = _find_existing_incident(
         incidents_table_name,
@@ -454,27 +640,14 @@ def run(
             incidents_table_name=incidents_table_name,
             existing_id=existing_id,
             meta=meta,
-            data=data,
+            data=canonical_for_key,
         )
 
         next_input = {
-            **data,
+            **canonical_for_key,
             "incident_record_id": existing_id,
             "incident_key": incident_key,
             "deduplicate_action": "existing_found",
-            "step_index": _to_int(meta.get("step_index"), 0) + 1,
-            "_depth": depth + 1,
-            "run_record_id": _to_str(meta.get("run_record_id") or run_record_id).strip(),
-            "parent_command_id": _to_str(
-                meta.get("parent_command_id")
-                or data.get("parent_command_id")
-                or ""
-            ).strip(),
-            "decision_status": decision_block["decision_status"],
-            "decision_reason": decision_block["decision_reason"],
-            "next_action": decision_block["next_action"],
-            "auto_executable": decision_block["auto_executable"],
-            "priority_score": decision_block["priority_score"],
         }
 
         next_commands: List[Dict[str, Any]] = []
@@ -508,6 +681,12 @@ def run(
             "ok": True,
             "capability": "incident_deduplicate",
             "status": "done",
+            "flow_id": canonical_for_key.get("flow_id", ""),
+            "root_event_id": canonical_for_key.get("root_event_id", ""),
+            "source_event_id": canonical_for_key.get("source_event_id", ""),
+            "workspace_id": canonical_for_key.get("workspace_id", ""),
+            "run_record_id": canonical_for_key.get("run_record_id", ""),
+            "linked_run": canonical_for_key.get("linked_run", ""),
             "incident_exists": True,
             "incident_record_id": existing_id,
             "incident_key": incident_key,
@@ -530,22 +709,9 @@ def run(
         }
 
     create_input = {
-        **data,
+        **canonical_for_key,
         "incident_key": incident_key,
         "deduplicate_action": "create_new",
-        "_depth": depth + 1,
-        "step_index": _to_int(meta.get("step_index"), 0) + 1,
-        "run_record_id": _to_str(meta.get("run_record_id") or run_record_id).strip(),
-        "parent_command_id": _to_str(
-            meta.get("parent_command_id")
-            or data.get("parent_command_id")
-            or ""
-        ).strip(),
-        "decision_status": decision_block["decision_status"],
-        "decision_reason": decision_block["decision_reason"],
-        "next_action": decision_block["next_action"],
-        "auto_executable": decision_block["auto_executable"],
-        "priority_score": decision_block["priority_score"],
     }
 
     next_commands: List[Dict[str, Any]] = [
@@ -560,6 +726,12 @@ def run(
         "ok": True,
         "capability": "incident_deduplicate",
         "status": "done",
+        "flow_id": canonical_for_key.get("flow_id", ""),
+        "root_event_id": canonical_for_key.get("root_event_id", ""),
+        "source_event_id": canonical_for_key.get("source_event_id", ""),
+        "workspace_id": canonical_for_key.get("workspace_id", ""),
+        "run_record_id": canonical_for_key.get("run_record_id", ""),
+        "linked_run": canonical_for_key.get("linked_run", ""),
         "incident_exists": False,
         "incident_record_id": "",
         "incident_key": incident_key,
