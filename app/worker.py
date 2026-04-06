@@ -7172,9 +7172,37 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         else:
             print("[worker.wrapper] no next_commands from incident_result", flush=True)
 
-        result["flow_id"] = flow_id
-        result["root_event_id"] = root_event_id
-        result["source_event_id"] = source_event_id
+        final_flow_id = str(
+            incident_result.get("flow_id")
+            or result.get("flow_id")
+            or flow_id
+            or ""
+        ).strip()
+
+        final_root_event_id = str(
+            incident_result.get("root_event_id")
+            or result.get("root_event_id")
+            or root_event_id
+            or final_flow_id
+            or ""
+        ).strip()
+
+        final_source_event_id = str(
+            result.get("source_event_id")
+            or payload.get("source_event_id")
+            or payload.get("sourceEventId")
+            or payload.get("event_id")
+            or payload.get("eventId")
+            or source_event_id
+            or final_root_event_id
+            or ""
+        ).strip()
+
+        result["flow_id"] = final_flow_id
+        result["root_event_id"] = final_root_event_id
+        result["source_event_id"] = final_source_event_id
+        result["workspace_id"] = workspace_id
+        result["run_record_id"] = run_record_id
         result["linked_run"] = run_record_id
         result["next_commands"] = incident_result.get("next_commands", [])
         result["terminal"] = bool(incident_result.get("terminal", False))
