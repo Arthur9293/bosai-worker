@@ -67,21 +67,118 @@ def _extract_input(payload: Dict[str, Any]) -> Dict[str, Any]:
     return dict(payload)
 
 
+def _first_non_empty(data: Dict[str, Any], *keys: str, default: str = "") -> str:
+    for key in keys:
+        value = data.get(key)
+        text = _to_str(value).strip()
+        if text:
+            return text
+    return default
+
+
+def _first_int(data: Dict[str, Any], *keys: str, default: int = 0) -> int:
+    for key in keys:
+        value = data.get(key)
+        if value is None or value == "":
+            continue
+        parsed = _to_int(value, default)
+        return parsed
+    return default
+
+
 def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
+    flow_id = _first_non_empty(
+        payload,
+        "flow_id",
+        "flowId",
+        "flowid",
+    )
+
+    root_event_id = _first_non_empty(
+        payload,
+        "root_event_id",
+        "rootEventId",
+        "rooteventid",
+        "event_id",
+        "eventId",
+        "source_event_id",
+        "sourceEventId",
+        "sourceeventid",
+        default=flow_id,
+    )
+
+    source_event_id = _first_non_empty(
+        payload,
+        "source_event_id",
+        "sourceEventId",
+        "sourceeventid",
+        "event_id",
+        "eventId",
+        default=root_event_id,
+    )
+
+    workspace_id = _first_non_empty(
+        payload,
+        "workspace_id",
+        "workspaceId",
+        "workspaceid",
+        "Workspace_ID",
+        "workspace",
+        default="production",
+    )
+
+    run_record_id = _first_non_empty(
+        payload,
+        "run_record_id",
+        "runRecordId",
+        "runrecordid",
+        "linked_run",
+        "linkedRun",
+        "linkedrun",
+    )
+
+    command_id = _first_non_empty(
+        payload,
+        "command_id",
+        "commandId",
+        "commandid",
+    )
+
+    parent_command_id = _first_non_empty(
+        payload,
+        "parent_command_id",
+        "parentCommandId",
+        "parentcommandid",
+        default=command_id,
+    )
+
     return {
-        "flow_id": _to_str(payload.get("flow_id") or "").strip(),
-        "root_event_id": _to_str(payload.get("root_event_id") or "").strip(),
-        "workspace_id": _to_str(payload.get("workspace_id") or "production").strip(),
-        "run_record_id": _to_str(payload.get("run_record_id") or "").strip(),
-        "command_id": _to_str(payload.get("command_id") or "").strip(),
-        "step_index": _to_int(payload.get("step_index"), 0),
-        "depth": _to_int(payload.get("_depth"), 0),
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "source_event_id": source_event_id,
+        "workspace_id": workspace_id,
+        "run_record_id": run_record_id,
+        "command_id": command_id,
+        "parent_command_id": parent_command_id,
+        "step_index": _first_int(
+            payload,
+            "step_index",
+            "stepIndex",
+            "stepindex",
+            default=0,
+        ),
+        "depth": _first_int(
+            payload,
+            "_depth",
+            "depth",
+            default=0,
+        ),
     }
 
 
 def _build_incident_name(data: Dict[str, Any]) -> str:
     category = _to_str(data.get("category")).strip()
-    failed_url = _to_str(data.get("failed_url")).strip()
+    failed_url = _to_str(data.get("failed_url") or data.get("url") or data.get("http_target")).strip()
 
     if category and failed_url:
         return f"{category.upper()} | {failed_url[:80]}"
@@ -146,6 +243,7 @@ def run(
     print("[incident_create] payload type =", type(payload).__name__, flush=True)
     print("[incident_create] data type =", type(data).__name__, flush=True)
     print("[incident_create] payload repr =", repr(payload), flush=True)
+    print("[incident_create] meta =", meta, flush=True)
 
     depth = _to_int(meta.get("depth"), 0)
     if depth >= DEFAULT_MAX_DEPTH:
@@ -156,9 +254,14 @@ def run(
             "terminal": True,
         }
 
-    flow_id = meta.get("flow_id")
-    root_event_id = meta.get("root_event_id") or flow_id
-    workspace_id = meta.get("workspace_id")
+    flow_id = _to_str(meta.get("flow_id")).strip()
+    root_event_id = _to_str(meta.get("root_event_id")).strip() or flow_id
+    source_event_id = _to_str(meta.get("source_event_id")).strip() or root_event_id
+    workspace_id = _to_str(meta.get("workspace_id")).strip() or "production"
+
+    effective_run_record_id = _to_str(run_record_id).strip() or _to_str(meta.get("run_record_id")).strip()
+    parent_command_id = _to_str(meta.get("parent_command_id")).strip()
+    current_step_index = _to_int(meta.get("step_index"), 0)
 
     now_ts = _now_ts()
 
@@ -174,7 +277,7 @@ def run(
         "Flow_ID": flow_id,
         "Root_Event_ID": root_event_id,
         "Workspace_ID": workspace_id,
-        "Run_Record_ID": run_record_id,
+        "Run_Record_ID": effective_run_record_id,
         "Created_By_Capability": "incident_create",
         "Opened_At": now_ts,
         "Updated_At": now_ts,
@@ -190,7 +293,8 @@ def run(
             "error": f"incident_create_failed:{repr(e)}",
             "flow_id": flow_id,
             "root_event_id": root_event_id,
-            "run_record_id": run_record_id,
+            "source_event_id": source_event_id,
+            "run_record_id": effective_run_record_id,
             "terminal": True,
         }
 
@@ -251,14 +355,29 @@ def run(
     next_input = {
         "flow_id": flow_id,
         "root_event_id": root_event_id,
+        "source_event_id": source_event_id,
+        "event_id": source_event_id,
         "workspace_id": workspace_id,
+        "run_record_id": effective_run_record_id,
+        "linked_run": effective_run_record_id,
         "incident_record_id": incident_record_id,
+        "parent_command_id": parent_command_id,
+        "step_index": current_step_index + 1,
         "decision_status": decision_block["decision_status"],
         "decision_reason": decision_block["decision_reason"],
         "next_action": decision_block["next_action"],
         "auto_executable": decision_block["auto_executable"],
         "priority_score": decision_block["priority_score"],
+        "category": _to_str(data.get("category")),
+        "reason": _to_str(data.get("reason")),
+        "severity": _to_str(data.get("severity")),
+        "method": _to_str(data.get("method")),
+        "failed_url": _to_str(data.get("failed_url") or data.get("url") or data.get("http_target")),
+        "url": _to_str(data.get("url") or data.get("failed_url") or data.get("http_target")),
+        "http_target": _to_str(data.get("http_target") or data.get("url") or data.get("failed_url")),
     }
+
+    print("[incident_create] next_input =", next_input, flush=True)
 
     return {
         "ok": True,
@@ -266,8 +385,10 @@ def run(
         "status": "done",
         "flow_id": flow_id,
         "root_event_id": root_event_id,
+        "source_event_id": source_event_id,
         "incident_record_id": incident_record_id,
-        "run_record_id": run_record_id,
+        "run_record_id": effective_run_record_id,
+        "linked_run": effective_run_record_id,
         "decision_status": decision_block["decision_status"],
         "decision_reason": decision_block["decision_reason"],
         "next_action": decision_block["next_action"],
