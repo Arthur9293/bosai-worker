@@ -6663,7 +6663,7 @@ def capability_planner_monitoring(req: RunRequest, run_record_id: str) -> Dict[s
         "terminal": False,
         "run_record_id": run_record_id,
     }
-    
+
 def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     print("HTTP_EXEC_WRAPPER_V5_ENTERED", flush=True)
 
@@ -6680,13 +6680,22 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
     flow_id, root_event_id = _resolve_flow_ids(payload)
     step_index = _resolve_flow_step_index(payload, 0)
 
+    source_event_id = str(
+        payload.get("source_event_id")
+        or payload.get("sourceEventId")
+        or payload.get("event_id")
+        or payload.get("eventId")
+        or root_event_id
+        or ""
+    ).strip()
+
     try:
         result = capability_http_exec(
-        input_data=payload,
-        run_record_id=run_record_id,
-        airtable_update_by_field=airtable_update_by_field,
-        airtable_update=airtable_update,  
-    )
+            input_data=payload,
+            run_record_id=run_record_id,
+            airtable_update_by_field=airtable_update_by_field,
+            airtable_update=airtable_update,
+        )
         print("[HTTP_EXEC_WRAPPED] raw result =", repr(result), flush=True)
     except Exception as e:
         print("[HTTP_EXEC_WRAPPED] EXCEPTION =", str(e), flush=True)
@@ -6727,7 +6736,9 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
     result.setdefault("workspace_id", workspace_id)
     result.setdefault("flow_id", flow_id)
     result.setdefault("root_event_id", root_event_id)
+    result.setdefault("source_event_id", source_event_id)
     result.setdefault("step_index", step_index)
+    result.setdefault("linked_run", run_record_id)
     result["run_record_id"] = run_record_id
     result["goal"] = goal or result.get("goal") or ""
 
@@ -6820,6 +6831,18 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             if workspace_id and not str(next_input.get("workspace_id") or "").strip():
                 next_input["workspace_id"] = workspace_id
 
+            if run_record_id and not str(next_input.get("run_record_id") or "").strip():
+                next_input["run_record_id"] = run_record_id
+
+            if run_record_id and not str(next_input.get("linked_run") or "").strip():
+                next_input["linked_run"] = run_record_id
+
+            if source_event_id and not str(next_input.get("source_event_id") or "").strip():
+                next_input["source_event_id"] = source_event_id
+
+            if source_event_id and not str(next_input.get("event_id") or "").strip():
+                next_input["event_id"] = source_event_id
+
             if "step_index" in next_input:
                 try:
                     next_input["step_index"] = int(next_input["step_index"])
@@ -6882,6 +6905,8 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         incident_input = {
             "flow_id": flow_id,
             "root_event_id": root_event_id,
+            "source_event_id": source_event_id,
+            "event_id": source_event_id,
             "step_index": step_index + 1,
             "_depth": _to_int(payload.get("_depth"), 0) + 1,
             "workspace_id": workspace_id,
@@ -6915,6 +6940,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             ),
             "original_input": payload,
             "run_record_id": run_record_id,
+            "linked_run": run_record_id,
             "parent_command_id": payload.get("parent_command_id") or "",
         }
 
@@ -7003,6 +7029,8 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
         result["flow_id"] = flow_id
         result["root_event_id"] = root_event_id
+        result["source_event_id"] = source_event_id
+        result["linked_run"] = run_record_id
         result["next_commands"] = incident_result.get("next_commands", [])
         result["terminal"] = bool(incident_result.get("terminal", False))
         result["incident_result"] = incident_result
@@ -7054,7 +7082,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
     print("[worker.wrapper] returning success result =", result, flush=True)
     return result
-    
+
 def capability_retry_router_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
     workspace_id = _resolve_workspace_id(req=req)
