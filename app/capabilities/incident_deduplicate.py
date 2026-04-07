@@ -22,7 +22,21 @@ ORCHESTRATION_CAPABILITIES = {
     "complete_flow",
     "complete_flow_demo",
 }
+def _pick_capability(*values: Any, fallback: str = "") -> str:
+    first_non_empty = ""
 
+    for value in values:
+        text = _pick_text(value)
+        if not text:
+            continue
+
+        if not first_non_empty:
+            first_non_empty = text
+
+        if text not in ORCHESTRATION_CAPABILITIES:
+            return text
+
+    return fallback or first_non_empty
 
 def _now_ts() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
