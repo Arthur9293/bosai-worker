@@ -498,21 +498,32 @@ def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
         payload.get("Linked_Run"),
     )
 
+    linked_run = _pick_text(
+        payload.get("linked_run"),
+        payload.get("linkedrun"),
+        run_record_id,
+    )
+
+    command_id = _pick_text(
+        payload.get("command_id"),
+        payload.get("commandid"),
+        payload.get("commandId"),
+    )
+
+    parent_command_id = _pick_text(
+        payload.get("parent_command_id"),
+        payload.get("parentcommandid"),
+        payload.get("parentcommand_id"),
+        payload.get("parentCommandId"),
+        command_id,
+    )
+
     return {
         "flow_id": flow_id or root_event_id or source_event_id,
         "root_event_id": root_event_id or source_event_id or flow_id,
         "source_event_id": source_event_id or root_event_id or flow_id,
-        "parent_command_id": _pick_text(
-            payload.get("parent_command_id"),
-            payload.get("parentcommandid"),
-            payload.get("parentcommand_id"),
-            payload.get("parentCommandId"),
-        ),
-        "command_id": _pick_text(
-            payload.get("command_id"),
-            payload.get("commandid"),
-            payload.get("commandId"),
-        ),
+        "parent_command_id": parent_command_id,
+        "command_id": command_id,
         "step_index": _to_int(
             payload.get("step_index")
             if payload.get("step_index") is not None
@@ -529,7 +540,7 @@ def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
         ),
         "workspace_id": workspace_id or "production",
         "run_record_id": run_record_id,
-        "linked_run": run_record_id,
+        "linked_run": linked_run or run_record_id,
     }
 
 
@@ -565,15 +576,24 @@ def _normalize_decision_block(data: Dict[str, Any]) -> Dict[str, Any]:
 
     severity = _pick_text(data.get("severity")).lower()
     category = _pick_text(data.get("category")).lower()
-    reason = _pick_text(data.get("reason"), data.get("retry_reason"), data.get("incident_code")).lower()
+
+    # PATCH: on préfère retry_reason / incident_code avant un reason trop générique
+    reason = _pick_text(
+        data.get("retry_reason"),
+        data.get("incident_code"),
+        data.get("reason"),
+    ).lower()
+
     sla_status = _pick_text(data.get("sla_status")).lower()
+
+    response_obj = data.get("response") if isinstance(data.get("response"), dict) else {}
 
     http_status = _pick_int(
         data.get("http_status"),
         data.get("httpstatus"),
         data.get("status_code"),
         data.get("statuscode"),
-        (data.get("response") or {}).get("status_code") if isinstance(data.get("response"), dict) else None,
+        response_obj.get("status_code"),
     )
 
     input_final_failure = _to_bool(
@@ -585,7 +605,13 @@ def _normalize_decision_block(data: Dict[str, Any]) -> Dict[str, Any]:
 
     severe_http_failure = (
         category == "http_failure"
-        or reason in {"http_5xx_exhausted", "http_status_error", "forbidden_host", "retry_exhausted", "retry_limit_reached"}
+        or reason in {
+            "http_5xx_exhausted",
+            "http_status_error",
+            "forbidden_host",
+            "retry_exhausted",
+            "retry_limit_reached",
+        }
         or (http_status is not None and http_status >= 500)
         or severity in {"high", "critical"}
         or sla_status == "breached"
@@ -705,21 +731,29 @@ def _canonical_incident_context(
     next_depth: int,
     decision_block: Dict[str, Any],
 ) -> Dict[str, Any]:
-    request_obj = data.get("request") if isinstance(data.get("request"), dict) else {}
-    response_obj = data.get("response") if isinstance(data.get("response"), dict) else {}
     original_input = data.get("original_input") if isinstance(data.get("original_input"), dict) else {}
-
     original_input = _normalize_keys_deep(original_input)
     original_input = _unwrap_command_payload(original_input)
     original_input = _normalize_flow_keys(original_input)
+
+    # PATCH: on récupère request/response aussi depuis original_input si absents en top-level
+    request_obj = data.get("request") if isinstance(data.get("request"), dict) else {}
+    if not request_obj:
+        request_obj = original_input.get("request") if isinstance(original_input.get("request"), dict) else {}
+
+    response_obj = data.get("response") if isinstance(data.get("response"), dict) else {}
+    if not response_obj:
+        response_obj = original_input.get("response") if isinstance(original_input.get("response"), dict) else {}
 
     flow_id = _pick_text(
         meta.get("flow_id"),
         data.get("flow_id"),
         data.get("flowid"),
         data.get("flowId"),
+        original_input.get("flow_id"),
         meta.get("root_event_id"),
         meta.get("source_event_id"),
+        runtime_run_record_id and f"flow_run_{runtime_run_record_id}",
     )
 
     root_event_id = _pick_text(
@@ -730,6 +764,8 @@ def _canonical_incident_context(
         data.get("event_id"),
         data.get("eventid"),
         data.get("eventId"),
+        original_input.get("root_event_id"),
+        original_input.get("event_id"),
         meta.get("source_event_id"),
         flow_id,
     )
@@ -742,6 +778,8 @@ def _canonical_incident_context(
         data.get("event_id"),
         data.get("eventid"),
         data.get("eventId"),
+        original_input.get("source_event_id"),
+        original_input.get("event_id"),
         root_event_id,
         flow_id,
     )
@@ -762,6 +800,8 @@ def _canonical_incident_context(
         data.get("runrecordid"),
         data.get("linked_run"),
         data.get("linkedrun"),
+        original_input.get("run_record_id"),
+        original_input.get("linked_run"),
         runtime_run_record_id,
     )
 
@@ -769,6 +809,7 @@ def _canonical_incident_context(
         meta.get("linked_run"),
         data.get("linked_run"),
         data.get("linkedrun"),
+        original_input.get("linked_run"),
         run_record_id,
     )
 
@@ -821,11 +862,14 @@ def _canonical_incident_context(
         "GET",
     ).upper()
 
+    # PATCH: on préfère aussi original_input et response_obj pour ne pas perdre le 503
     http_status = _pick_int(
         data.get("http_status"),
         data.get("httpstatus"),
         data.get("status_code"),
         data.get("statuscode"),
+        original_input.get("http_status"),
+        original_input.get("status_code"),
         response_obj.get("status_code"),
     )
 
@@ -834,13 +878,10 @@ def _canonical_incident_context(
         data.get("statuscode"),
         data.get("http_status"),
         data.get("httpstatus"),
+        original_input.get("status_code"),
+        original_input.get("http_status"),
         response_obj.get("status_code"),
-    )
-
-    severity = _pick_text(
-        data.get("severity"),
-        original_input.get("severity"),
-        "high" if http_status is not None and http_status >= 500 else "",
+        http_status,
     )
 
     category = _pick_text(
@@ -849,15 +890,23 @@ def _canonical_incident_context(
         "http_failure" if target_url else "",
     )
 
+    # PATCH: ordre changé pour éviter "incident" si un signal plus précis existe déjà
     reason = _pick_text(
-        data.get("reason"),
         data.get("retry_reason"),
-        data.get("incident_code"),
-        original_input.get("reason"),
         original_input.get("retry_reason"),
+        data.get("incident_code"),
         original_input.get("incident_code"),
+        data.get("reason"),
+        original_input.get("reason"),
         data.get("error"),
+        original_input.get("error"),
         "incident",
+    )
+
+    severity = _pick_text(
+        data.get("severity"),
+        original_input.get("severity"),
+        "high" if http_status is not None and http_status >= 500 else "",
     )
 
     incident_code = _pick_text(
@@ -865,6 +914,8 @@ def _canonical_incident_context(
         data.get("incidentcode"),
         original_input.get("incident_code"),
         original_input.get("incidentcode"),
+        data.get("retry_reason"),
+        original_input.get("retry_reason"),
         data.get("reason"),
         "http_status_error",
     )
@@ -886,9 +937,22 @@ def _canonical_incident_context(
     )
 
     normalized_final_failure = _to_bool(
-        decision_block.get("normalized_final_failure"),
+        data.get("final_failure")
+        if data.get("final_failure") is not None
+        else original_input.get("final_failure")
+        if original_input.get("final_failure") is not None
+        else decision_block.get("normalized_final_failure"),
         False,
     )
+
+    # PATCH: si toujours faux mais signaux HTTP forts présents, on force
+    if not normalized_final_failure:
+        if (
+            (http_status is not None and http_status >= 500)
+            or reason in {"http_status_error", "http_5xx_exhausted", "retry_exhausted", "retry_limit_reached"}
+            or category == "http_failure"
+        ):
+            normalized_final_failure = True
 
     base = _strip_runtime_keys(data)
 
@@ -906,11 +970,13 @@ def _canonical_incident_context(
             meta.get("parent_command_id"),
             data.get("parent_command_id"),
             data.get("parentcommandid"),
+            original_input.get("parent_command_id"),
         ),
         "command_id": _pick_text(
             meta.get("command_id"),
             data.get("command_id"),
             data.get("commandid"),
+            original_input.get("command_id"),
         ),
         "step_index": next_step_index,
         "_depth": next_depth,
@@ -1023,6 +1089,7 @@ def _build_incident_key(data: Dict[str, Any], meta: Dict[str, Any]) -> str:
     ).lower()
 
     reason = _pick_text(
+        data.get("retry_reason"),
         data.get("reason"),
         data.get("decision_reason"),
         "no_reason",
@@ -1202,7 +1269,6 @@ def run(
         decision_block=decision_block,
     )
 
-    # Toujours reconstruire la clé à partir du contexte canonique.
     incident_key = _build_incident_key(
         canonical_for_key,
         {
@@ -1267,12 +1333,12 @@ def run(
             "ok": True,
             "capability": "incident_deduplicate",
             "status": "done",
-            "flow_id": canonical_for_key.get("flow_id", ""),
-            "root_event_id": canonical_for_key.get("root_event_id", ""),
-            "source_event_id": canonical_for_key.get("source_event_id", ""),
-            "workspace_id": canonical_for_key.get("workspace_id", ""),
-            "run_record_id": canonical_for_key.get("run_record_id", ""),
-            "linked_run": canonical_for_key.get("linked_run", ""),
+            "flow_id": next_input.get("flow_id", ""),
+            "root_event_id": next_input.get("root_event_id", ""),
+            "source_event_id": next_input.get("source_event_id", ""),
+            "workspace_id": next_input.get("workspace_id", ""),
+            "run_record_id": next_input.get("run_record_id", ""),
+            "linked_run": next_input.get("linked_run", ""),
             "incident_exists": True,
             "incident_record_id": existing_id,
             "incident_key": incident_key,
@@ -1312,12 +1378,12 @@ def run(
         "ok": True,
         "capability": "incident_deduplicate",
         "status": "done",
-        "flow_id": canonical_for_key.get("flow_id", ""),
-        "root_event_id": canonical_for_key.get("root_event_id", ""),
-        "source_event_id": canonical_for_key.get("source_event_id", ""),
-        "workspace_id": canonical_for_key.get("workspace_id", ""),
-        "run_record_id": canonical_for_key.get("run_record_id", ""),
-        "linked_run": canonical_for_key.get("linked_run", ""),
+        "flow_id": create_input.get("flow_id", ""),
+        "root_event_id": create_input.get("root_event_id", ""),
+        "source_event_id": create_input.get("source_event_id", ""),
+        "workspace_id": create_input.get("workspace_id", ""),
+        "run_record_id": create_input.get("run_record_id", ""),
+        "linked_run": create_input.get("linked_run", ""),
         "incident_exists": False,
         "incident_record_id": "",
         "incident_key": incident_key,
