@@ -218,7 +218,11 @@ def run(
 
     incoming_run_record_id = _pick_text(payload.get("run_record_id"))
     linked_run = _pick_text(payload.get("linked_run"), incoming_run_record_id, run_record_id)
-    effective_run_record_id = _pick_text(run_record_id, incoming_run_record_id, linked_run)
+
+    # IMPORTANT:
+    # on garde le run hérité du flow en priorité,
+    # puis seulement en fallback le run local du capability courant
+    effective_run_record_id = _pick_text(incoming_run_record_id, linked_run, run_record_id)
 
     command_id = _pick_text(payload.get("command_id"))
     parent_command_id = _pick_text(payload.get("parent_command_id"), command_id)
