@@ -1644,7 +1644,34 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     if url_value and not _pick(base.get("failed_url")):
         base["failed_url"] = url_value
 
-    # nettoyage des alias compacts / legacy
+    field_alias_map = {
+        "goal": ("goal", "Goal", "failed_goal", "failedgoal", "Failed_Goal"),
+        "reason": ("reason", "Reason", "retry_reason", "retryreason"),
+        "retry_reason": ("retry_reason", "retryreason", "reason", "Reason"),
+        "retry_count": ("retry_count", "retrycount", "Retry_Count"),
+        "retry_max": ("retry_max", "retrymax", "Retry_Max"),
+        "failed_goal": ("failed_goal", "failedgoal", "Failed_Goal", "goal", "Goal"),
+        "failed_url": ("failed_url", "failedurl", "Failed_URL", "url", "URL", "http_target"),
+        "failed_method": ("failed_method", "failedmethod", "Failed_Method", "method", "HTTP_Method"),
+        "http_status": ("http_status", "httpstatus", "status_code", "statuscode", "HTTP_Status"),
+        "status_code": ("status_code", "statuscode", "http_status", "httpstatus", "HTTP_Status"),
+        "error": ("error", "Error", "last_error", "Last_Error", "Error_Message"),
+        "error_message": ("error_message", "Error_Message", "Last_Error", "error"),
+        "original_capability": ("original_capability", "originalcapability", "source_capability", "Capability"),
+        "target_capability": ("target_capability", "targetcapability", "Mapped_Capability"),
+        "incident_record_id": ("incident_record_id", "incidentrecordid", "Incident_Record_ID"),
+    }
+
+    for target_key, aliases in field_alias_map.items():
+        if target_key in base and base.get(target_key) not in (None, "", {}, []):
+            continue
+
+        for alias in aliases:
+            value = fields.get(alias)
+            if value is not None and str(value).strip() != "":
+                base[target_key] = value
+                break
+
     for legacy_key in (
         "flowid",
         "flowId",
@@ -1683,6 +1710,8 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         "Http_Method",
     ):
         base.pop(legacy_key, None)
+
+    base = _sanitize_payload_for_airtable(base)
 
     if parse_errors:
         print(f"[compose_command_input] parse_errors={json.dumps(parse_errors, ensure_ascii=False)}")
