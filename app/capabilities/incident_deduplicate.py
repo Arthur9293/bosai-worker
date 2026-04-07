@@ -577,7 +577,7 @@ def _normalize_decision_block(data: Dict[str, Any]) -> Dict[str, Any]:
     severity = _pick_text(data.get("severity")).lower()
     category = _pick_text(data.get("category")).lower()
 
-    # PATCH: on préfère retry_reason / incident_code avant un reason trop générique
+    # on préfère retry_reason / incident_code avant un reason trop générique
     reason = _pick_text(
         data.get("retry_reason"),
         data.get("incident_code"),
@@ -699,6 +699,32 @@ def _normalize_decision_block(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _empty_decision_block() -> Dict[str, Any]:
+    return {
+        "decision_status": "",
+        "decision_reason": "",
+        "next_action": "",
+        "auto_executable": False,
+        "priority_score": 0,
+        "normalized_final_failure": False,
+    }
+
+
+def _recompute_decision_from_canonical(canonical: Dict[str, Any]) -> Dict[str, Any]:
+    decision_input = dict(canonical)
+
+    for key in (
+        "decision_status",
+        "decision_reason",
+        "next_action",
+        "auto_executable",
+        "priority_score",
+    ):
+        decision_input.pop(key, None)
+
+    return _normalize_decision_block(decision_input)
+
+
 def _strip_runtime_keys(value: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(value, dict):
         return {}
@@ -736,7 +762,7 @@ def _canonical_incident_context(
     original_input = _unwrap_command_payload(original_input)
     original_input = _normalize_flow_keys(original_input)
 
-    # PATCH: on récupère request/response aussi depuis original_input si absents en top-level
+    # on récupère request/response aussi depuis original_input si absents en top-level
     request_obj = data.get("request") if isinstance(data.get("request"), dict) else {}
     if not request_obj:
         request_obj = original_input.get("request") if isinstance(original_input.get("request"), dict) else {}
@@ -862,7 +888,7 @@ def _canonical_incident_context(
         "GET",
     ).upper()
 
-    # PATCH: on préfère aussi original_input et response_obj pour ne pas perdre le 503
+    # on préfère aussi original_input et response_obj pour ne pas perdre le 503
     http_status = _pick_int(
         data.get("http_status"),
         data.get("httpstatus"),
@@ -890,7 +916,7 @@ def _canonical_incident_context(
         "http_failure" if target_url else "",
     )
 
-    # PATCH: ordre changé pour éviter "incident" si un signal plus précis existe déjà
+    # ordre changé pour éviter "incident" si un signal plus précis existe déjà
     reason = _pick_text(
         data.get("retry_reason"),
         original_input.get("retry_reason"),
@@ -945,7 +971,7 @@ def _canonical_incident_context(
         False,
     )
 
-    # PATCH: si toujours faux mais signaux HTTP forts présents, on force
+    # si toujours faux mais signaux HTTP forts présents, on force
     if not normalized_final_failure:
         if (
             (http_status is not None and http_status >= 500)
@@ -1258,7 +1284,8 @@ def run(
             "terminal": True,
         }
 
-    decision_block = _normalize_decision_block(data)
+    # 1) on construit d’abord un contexte canonique SANS figer une mauvaise décision
+    seed_decision_block = _empty_decision_block()
 
     canonical_for_key = _canonical_incident_context(
         data=data,
@@ -1266,8 +1293,27 @@ def run(
         runtime_run_record_id=run_record_id,
         next_step_index=_to_int(meta.get("step_index"), 0) + 1,
         next_depth=depth + 1,
-        decision_block=decision_block,
+        decision_block=seed_decision_block,
     )
+
+    # 2) on recalcule la décision sur le contexte canonique enrichi
+    decision_block = _recompute_decision_from_canonical(canonical_for_key)
+
+    # 3) on réinjecte la vraie décision dans le payload canonique
+    canonical_for_key = dict(canonical_for_key)
+    canonical_for_key["decision_status"] = decision_block["decision_status"]
+    canonical_for_key["decision_reason"] = decision_block["decision_reason"]
+    canonical_for_key["next_action"] = decision_block["next_action"]
+    canonical_for_key["auto_executable"] = decision_block["auto_executable"]
+    canonical_for_key["priority_score"] = decision_block["priority_score"]
+    canonical_for_key["final_failure"] = (
+        _to_bool(canonical_for_key.get("final_failure"), False)
+        or _to_bool(decision_block.get("normalized_final_failure"), False)
+    )
+
+    canonical_for_key = _normalize_keys_deep(canonical_for_key)
+    canonical_for_key = _unwrap_command_payload(canonical_for_key)
+    canonical_for_key = _normalize_flow_keys(canonical_for_key)
 
     incident_key = _build_incident_key(
         canonical_for_key,
