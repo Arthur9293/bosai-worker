@@ -4039,6 +4039,7 @@ def _spawn_next_commands_from_result(
         "root_event_id": resolved_root_event_id,
         "max_depth": CHAIN_MAX_DEPTH,
     }
+
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     max_cmds = int(req.max_commands or 0) or 5
     if POLICY_MAX_TOOL_CALLS > 0:
@@ -4150,92 +4151,125 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         cmd_input = _compose_command_input(fields)
 
         # ------------------------------------------------------------
-        # SAFE CONTEXT REHYDRATION FROM COMMAND RECORD -> cmd_input
+        # SAFE REHYDRATION OF CONTEXT FROM COMMAND FIELDS
         # ------------------------------------------------------------
         if not isinstance(cmd_input, dict):
             cmd_input = {}
 
-        record_flow_id = str(
+        field_flow_id = str(
             fields.get("Flow_ID")
             or fields.get("flow_id")
-            or cmd_input.get("flow_id")
+            or ""
+        ).strip()
+
+        field_root_event_id = str(
+            fields.get("Root_Event_ID")
+            or fields.get("root_event_id")
+            or ""
+        ).strip()
+
+        field_source_event_id = str(
+            fields.get("Source_Event_ID")
+            or fields.get("source_event_id")
+            or field_root_event_id
+            or ""
+        ).strip()
+
+        field_workspace_id = str(
+            fields.get("Workspace_ID")
+            or fields.get("workspace_id")
+            or ""
+        ).strip() or "production"
+
+        field_parent_command_id = str(
+            fields.get("Parent_Command_ID")
+            or fields.get("parent_command_id")
+            or ""
+        ).strip()
+
+        if not field_root_event_id and field_flow_id:
+            field_root_event_id = field_flow_id
+
+        if field_flow_id and not str(
+            cmd_input.get("flow_id")
             or cmd_input.get("flowid")
             or cmd_input.get("flowId")
             or ""
-        ).strip()
+        ).strip():
+            cmd_input["flow_id"] = field_flow_id
+            cmd_input["flowid"] = field_flow_id
 
-        record_root_event_id = str(
-            fields.get("Root_Event_ID")
-            or fields.get("root_event_id")
-            or cmd_input.get("root_event_id")
+        if field_root_event_id and not str(
+            cmd_input.get("root_event_id")
             or cmd_input.get("rooteventid")
             or cmd_input.get("rootEventId")
             or ""
-        ).strip()
+        ).strip():
+            cmd_input["root_event_id"] = field_root_event_id
+            cmd_input["rooteventid"] = field_root_event_id
 
-        if not record_flow_id and record_root_event_id:
-            record_flow_id = record_root_event_id
-
-        if not record_root_event_id and record_flow_id:
-            record_root_event_id = record_flow_id
-
-        record_source_event_id = str(
-            fields.get("Source_Event_ID")
-            or fields.get("source_event_id")
-            or cmd_input.get("source_event_id")
+        if field_source_event_id and not str(
+            cmd_input.get("source_event_id")
             or cmd_input.get("sourceeventid")
             or cmd_input.get("sourceEventId")
-            or cmd_input.get("event_id")
+            or ""
+        ).strip():
+            cmd_input["source_event_id"] = field_source_event_id
+            cmd_input["sourceeventid"] = field_source_event_id
+
+        if field_source_event_id and not str(
+            cmd_input.get("event_id")
             or cmd_input.get("eventid")
             or cmd_input.get("eventId")
-            or record_root_event_id
-            or record_flow_id
             or ""
-        ).strip()
+        ).strip():
+            cmd_input["event_id"] = field_source_event_id
+            cmd_input["eventid"] = field_source_event_id
 
-        record_workspace_id = str(
-            fields.get("Workspace_ID")
-            or fields.get("workspace_id")
-            or cmd_input.get("workspace_id")
+        if field_workspace_id and not str(
+            cmd_input.get("workspace_id")
             or cmd_input.get("workspaceid")
             or cmd_input.get("workspaceId")
-            or "production"
-        ).strip() or "production"
+            or ""
+        ).strip():
+            cmd_input["workspace_id"] = field_workspace_id
+            cmd_input["workspaceid"] = field_workspace_id
 
-        parent_command_id_from_fields = str(
-            fields.get("Parent_Command_ID")
-            or fields.get("parent_command_id")
-            or cmd_input.get("parent_command_id")
+        if run_record_id and not str(
+            cmd_input.get("run_record_id")
+            or cmd_input.get("runrecordid")
+            or cmd_input.get("runRecordId")
+            or ""
+        ).strip():
+            cmd_input["run_record_id"] = run_record_id
+            cmd_input["runrecordid"] = run_record_id
+
+        if run_record_id and not str(
+            cmd_input.get("linked_run")
+            or cmd_input.get("linkedrun")
+            or cmd_input.get("Linked_Run")
+            or ""
+        ).strip():
+            cmd_input["linked_run"] = run_record_id
+            cmd_input["linkedrun"] = run_record_id
+
+        if cid and not str(
+            cmd_input.get("command_id")
+            or cmd_input.get("commandid")
+            or cmd_input.get("commandId")
+            or ""
+        ).strip():
+            cmd_input["command_id"] = cid
+            cmd_input["commandid"] = cid
+
+        if field_parent_command_id and not str(
+            cmd_input.get("parent_command_id")
             or cmd_input.get("parentcommandid")
             or cmd_input.get("parentCommandId")
             or ""
-        ).strip()
-
-        # force normalized execution context
-        cmd_input["workspace_id"] = record_workspace_id
-
-        if record_flow_id:
-            cmd_input["flow_id"] = record_flow_id
-
-        if record_root_event_id:
-            cmd_input["root_event_id"] = record_root_event_id
-
-        if record_source_event_id:
-            cmd_input["source_event_id"] = record_source_event_id
-            if not str(cmd_input.get("event_id") or "").strip():
-                cmd_input["event_id"] = record_source_event_id
-
-        if run_record_id and not str(cmd_input.get("run_record_id") or "").strip():
-            cmd_input["run_record_id"] = run_record_id
-
-        if run_record_id and not str(cmd_input.get("linked_run") or "").strip():
-            cmd_input["linked_run"] = run_record_id
-
-        if cid and not str(cmd_input.get("command_id") or "").strip():
-            cmd_input["command_id"] = cid
-
-        if parent_command_id_from_fields and not str(cmd_input.get("parent_command_id") or "").strip():
-            cmd_input["parent_command_id"] = parent_command_id_from_fields
+        ).strip():
+            cmd_input["parent_command_id"] = field_parent_command_id
+            cmd_input["parentcommandid"] = field_parent_command_id
 
         dup_done = find_done_command_by_idem(idem, exclude_record_id=cid)
         if dup_done:
@@ -4291,48 +4325,206 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
 
             _command_lock_heartbeat(cid, lock_token)
 
-            print("DISPATCH CAPABILITY:", capability)
-            print("DISPATCH FN:", fn)
+            print("DISPATCH CAPABILITY:", capability, flush=True)
+            print("DISPATCH FN:", fn, flush=True)
 
             result_obj = fn(cmd_req, run_record_id)
 
-            # ------------------------------------------------------------
-            # SAFE RESULT CONTEXT REHYDRATION
-            # ------------------------------------------------------------
-            if isinstance(result_obj, dict):
-                result_obj.setdefault("workspace_id", record_workspace_id)
-                result_obj.setdefault("flow_id", record_flow_id)
-                result_obj.setdefault("root_event_id", record_root_event_id)
-                result_obj.setdefault("source_event_id", record_source_event_id)
-                result_obj.setdefault("run_record_id", run_record_id)
-                result_obj.setdefault("linked_run", run_record_id)
-                result_obj.setdefault("command_id", cid)
+            if not isinstance(result_obj, dict):
+                result_obj = {
+                    "ok": False,
+                    "error": "capability_returned_non_dict",
+                    "capability": capability,
+                    "run_record_id": run_record_id,
+                }
 
-            if isinstance(result_obj, dict):
-                current_flow_id = (
-                    result_obj.get("flow_id")
-                    or cmd_input.get("flow_id")
+            # ------------------------------------------------------------
+            # SAFE REHYDRATION OF RESULT CONTEXT
+            # ------------------------------------------------------------
+            if not str(result_obj.get("flow_id") or "").strip():
+                result_obj["flow_id"] = (
+                    cmd_input.get("flow_id")
                     or cmd_input.get("flowid")
-                    or fields.get("Flow_ID")
-                    or fields.get("flow_id")
+                    or field_flow_id
+                    or ""
                 )
 
-                current_root_event_id = (
-                    result_obj.get("root_event_id")
-                    or cmd_input.get("root_event_id")
+            if not str(result_obj.get("root_event_id") or "").strip():
+                result_obj["root_event_id"] = (
+                    cmd_input.get("root_event_id")
                     or cmd_input.get("rooteventid")
-                    or fields.get("Root_Event_ID")
-                    or fields.get("root_event_id")
+                    or field_root_event_id
+                    or ""
                 )
 
-                if not current_flow_id and current_root_event_id:
-                    current_flow_id = current_root_event_id
+            if not str(result_obj.get("source_event_id") or "").strip():
+                result_obj["source_event_id"] = (
+                    cmd_input.get("source_event_id")
+                    or cmd_input.get("sourceeventid")
+                    or field_source_event_id
+                    or ""
+                )
 
-                if not current_root_event_id and current_flow_id:
-                    current_root_event_id = current_flow_id
+            if not str(result_obj.get("workspace_id") or "").strip():
+                result_obj["workspace_id"] = (
+                    cmd_input.get("workspace_id")
+                    or cmd_input.get("workspaceid")
+                    or field_workspace_id
+                    or "production"
+                )
 
-                result_obj["flow_id"] = current_flow_id or ""
-                result_obj["root_event_id"] = current_root_event_id or ""
+            if not str(result_obj.get("run_record_id") or "").strip():
+                result_obj["run_record_id"] = run_record_id
+
+            if not str(result_obj.get("linked_run") or "").strip():
+                result_obj["linked_run"] = run_record_id
+
+            if not str(result_obj.get("command_id") or "").strip():
+                result_obj["command_id"] = cid
+
+            current_flow_id = str(
+                result_obj.get("flow_id")
+                or cmd_input.get("flow_id")
+                or cmd_input.get("flowid")
+                or field_flow_id
+                or ""
+            ).strip()
+
+            current_root_event_id = str(
+                result_obj.get("root_event_id")
+                or cmd_input.get("root_event_id")
+                or cmd_input.get("rooteventid")
+                or field_root_event_id
+                or ""
+            ).strip()
+
+            current_source_event_id = str(
+                result_obj.get("source_event_id")
+                or cmd_input.get("source_event_id")
+                or cmd_input.get("sourceeventid")
+                or field_source_event_id
+                or ""
+            ).strip()
+
+            current_workspace_id = str(
+                result_obj.get("workspace_id")
+                or cmd_input.get("workspace_id")
+                or cmd_input.get("workspaceid")
+                or field_workspace_id
+                or "production"
+            ).strip() or "production"
+
+            if not current_flow_id and current_root_event_id:
+                current_flow_id = current_root_event_id
+
+            if not current_root_event_id and current_flow_id:
+                current_root_event_id = current_flow_id
+
+            if not current_source_event_id and current_root_event_id:
+                current_source_event_id = current_root_event_id
+
+            result_obj["flow_id"] = current_flow_id or ""
+            result_obj["root_event_id"] = current_root_event_id or ""
+            result_obj["source_event_id"] = current_source_event_id or ""
+            result_obj["workspace_id"] = current_workspace_id
+            result_obj["run_record_id"] = run_record_id
+            result_obj["linked_run"] = run_record_id
+            result_obj["command_id"] = cid
+
+            if isinstance(result_obj.get("next_commands"), list):
+                for child in result_obj["next_commands"]:
+                    if not isinstance(child, dict):
+                        continue
+
+                    child_input = child.get("input") or {}
+                    if not isinstance(child_input, dict):
+                        child_input = {}
+
+                    if current_flow_id and not str(
+                        child_input.get("flow_id")
+                        or child_input.get("flowid")
+                        or child_input.get("flowId")
+                        or ""
+                    ).strip():
+                        child_input["flow_id"] = current_flow_id
+                        child_input["flowid"] = current_flow_id
+
+                    if current_root_event_id and not str(
+                        child_input.get("root_event_id")
+                        or child_input.get("rooteventid")
+                        or child_input.get("rootEventId")
+                        or ""
+                    ).strip():
+                        child_input["root_event_id"] = current_root_event_id
+                        child_input["rooteventid"] = current_root_event_id
+
+                    if current_source_event_id and not str(
+                        child_input.get("source_event_id")
+                        or child_input.get("sourceeventid")
+                        or child_input.get("sourceEventId")
+                        or ""
+                    ).strip():
+                        child_input["source_event_id"] = current_source_event_id
+                        child_input["sourceeventid"] = current_source_event_id
+
+                    if current_source_event_id and not str(
+                        child_input.get("event_id")
+                        or child_input.get("eventid")
+                        or child_input.get("eventId")
+                        or ""
+                    ).strip():
+                        child_input["event_id"] = current_source_event_id
+                        child_input["eventid"] = current_source_event_id
+
+                    if current_workspace_id and not str(
+                        child_input.get("workspace_id")
+                        or child_input.get("workspaceid")
+                        or child_input.get("workspaceId")
+                        or ""
+                    ).strip():
+                        child_input["workspace_id"] = current_workspace_id
+                        child_input["workspaceid"] = current_workspace_id
+
+                    if run_record_id and not str(
+                        child_input.get("run_record_id")
+                        or child_input.get("runrecordid")
+                        or child_input.get("runRecordId")
+                        or ""
+                    ).strip():
+                        child_input["run_record_id"] = run_record_id
+                        child_input["runrecordid"] = run_record_id
+
+                    if run_record_id and not str(
+                        child_input.get("linked_run")
+                        or child_input.get("linkedrun")
+                        or child_input.get("Linked_Run")
+                        or ""
+                    ).strip():
+                        child_input["linked_run"] = run_record_id
+                        child_input["linkedrun"] = run_record_id
+
+                    if cid and not str(
+                        child_input.get("parent_command_id")
+                        or child_input.get("parentcommandid")
+                        or child_input.get("parentCommandId")
+                        or ""
+                    ).strip():
+                        child_input["parent_command_id"] = cid
+                        child_input["parentcommandid"] = cid
+
+                    if cid and not str(
+                        child_input.get("command_id")
+                        or child_input.get("commandid")
+                        or child_input.get("commandId")
+                        or ""
+                    ).strip():
+                        child_input["command_id"] = cid
+                        child_input["commandid"] = cid
+
+                    child["input"] = child_input
+
+                    if not str(child.get("parent_command_id") or "").strip():
+                        child["parent_command_id"] = cid
 
             if not _worker_still_owns_lock(cid, req.worker, lock_token):
                 blocked += 1
@@ -4349,55 +4541,8 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                 errors.append(f"{cid}: lock_lost_before_finalize")
                 continue
 
-            workspace_id = str(fields.get("Workspace_ID") or record_workspace_id or "production").strip() or "production"
-            root_event_id = (
-                _infer_root_event_id(fields, idem)
-                or record_root_event_id
-                or record_flow_id
-            )
-
-            if isinstance(result_obj, dict):
-                next_commands = result_obj.get("next_commands")
-                if isinstance(next_commands, list):
-                    for child in next_commands:
-                        if not isinstance(child, dict):
-                            continue
-
-                        child_input = child.get("input") or {}
-                        if not isinstance(child_input, dict):
-                            child_input = {}
-
-                        if not str(child_input.get("parent_command_id") or "").strip():
-                            child_input["parent_command_id"] = cid
-
-                        if record_workspace_id and not str(child_input.get("workspace_id") or "").strip():
-                            child_input["workspace_id"] = record_workspace_id
-
-                        if record_flow_id and not str(child_input.get("flow_id") or "").strip():
-                            child_input["flow_id"] = record_flow_id
-
-                        if record_root_event_id and not str(child_input.get("root_event_id") or "").strip():
-                            child_input["root_event_id"] = record_root_event_id
-
-                        if record_source_event_id and not str(child_input.get("source_event_id") or "").strip():
-                            child_input["source_event_id"] = record_source_event_id
-
-                        if record_source_event_id and not str(child_input.get("event_id") or "").strip():
-                            child_input["event_id"] = record_source_event_id
-
-                        if run_record_id and not str(child_input.get("run_record_id") or "").strip():
-                            child_input["run_record_id"] = run_record_id
-
-                        if run_record_id and not str(child_input.get("linked_run") or "").strip():
-                            child_input["linked_run"] = run_record_id
-
-                        if cid and not str(child_input.get("command_id") or "").strip():
-                            child_input["command_id"] = cid
-
-                        child["input"] = child_input
-
-                        if not str(child.get("parent_command_id") or "").strip():
-                            child["parent_command_id"] = cid
+            workspace_id = current_workspace_id
+            root_event_id = current_root_event_id or _infer_root_event_id(fields, idem)
 
             spawn_res = _spawn_next_commands_from_result(
                 parent_command_id=cid,
@@ -4407,37 +4552,37 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                 root_event_id=root_event_id,
             )
 
-            if isinstance(result_obj, dict):
-                result_obj["spawn_summary"] = spawn_res
+            result_obj["spawn_summary"] = spawn_res
 
-                if not result_obj.get("flow_id"):
-                    result_obj["flow_id"] = (
-                        spawn_res.get("flow_id")
-                        or cmd_input.get("flow_id")
-                        or cmd_input.get("flowid")
-                        or root_event_id
-                    )
+            if not result_obj.get("flow_id"):
+                result_obj["flow_id"] = (
+                    spawn_res.get("flow_id")
+                    or current_flow_id
+                    or root_event_id
+                    or ""
+                )
 
-                if not result_obj.get("root_event_id"):
-                    result_obj["root_event_id"] = (
-                        spawn_res.get("root_event_id")
-                        or cmd_input.get("root_event_id")
-                        or cmd_input.get("rooteventid")
-                        or root_event_id
-                    )
+            if not result_obj.get("root_event_id"):
+                result_obj["root_event_id"] = (
+                    spawn_res.get("root_event_id")
+                    or current_root_event_id
+                    or root_event_id
+                    or ""
+                )
 
-                if not result_obj.get("source_event_id"):
-                    result_obj["source_event_id"] = (
-                        record_source_event_id
-                        or result_obj.get("root_event_id")
-                        or result_obj.get("flow_id")
-                        or ""
-                    )
+            if not result_obj.get("source_event_id"):
+                result_obj["source_event_id"] = (
+                    current_source_event_id
+                    or result_obj.get("root_event_id")
+                    or ""
+                )
 
-                result_obj.setdefault("workspace_id", workspace_id)
-                result_obj.setdefault("run_record_id", run_record_id)
-                result_obj.setdefault("linked_run", run_record_id)
-                result_obj.setdefault("command_id", cid)
+            if not result_obj.get("workspace_id"):
+                result_obj["workspace_id"] = workspace_id
+
+            result_obj["run_record_id"] = run_record_id
+            result_obj["linked_run"] = run_record_id
+            result_obj["command_id"] = cid
 
             _command_mark_done_best_effort(cid, run_record_id, result_obj)
             succeeded += 1
@@ -4502,7 +4647,6 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         result["post_ops"] = post_ops
 
     return result
-
 
 def capability_escalation_engine(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     def _lock_acquire_adapter(lock_key: str, owner: str = "", holder: str = "", *args, **kwargs):
