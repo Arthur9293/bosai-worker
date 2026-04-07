@@ -72,6 +72,13 @@ def _extract_input(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
+    flow_id = _to_str(
+        payload.get("flow_id")
+        or payload.get("flowid")
+        or payload.get("flowId")
+        or ""
+    ).strip()
+
     root_event_id = _to_str(
         payload.get("root_event_id")
         or payload.get("rooteventid")
@@ -82,6 +89,12 @@ def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
         or ""
     ).strip()
 
+    if not flow_id and root_event_id:
+        flow_id = root_event_id
+
+    if not root_event_id and flow_id:
+        root_event_id = flow_id
+
     source_event_id = _to_str(
         payload.get("source_event_id")
         or payload.get("sourceeventid")
@@ -90,6 +103,7 @@ def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
         or payload.get("eventid")
         or payload.get("eventId")
         or root_event_id
+        or flow_id
         or ""
     ).strip()
 
@@ -113,12 +127,7 @@ def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
     ).strip()
 
     return {
-        "flow_id": _to_str(
-            payload.get("flow_id")
-            or payload.get("flowid")
-            or payload.get("flowId")
-            or ""
-        ).strip(),
+        "flow_id": flow_id,
         "root_event_id": root_event_id,
         "source_event_id": source_event_id,
         "parent_command_id": _to_str(
@@ -300,8 +309,15 @@ def _canonical_incident_context(
     linked_run = _to_str(meta.get("linked_run") or run_record_id).strip()
 
     flow_id = _to_str(meta.get("flow_id") or "").strip()
-    root_event_id = _to_str(meta.get("root_event_id") or flow_id).strip()
-    source_event_id = _to_str(meta.get("source_event_id") or root_event_id).strip()
+    root_event_id = _to_str(meta.get("root_event_id") or "").strip()
+    source_event_id = _to_str(meta.get("source_event_id") or "").strip()
+
+    if not flow_id and root_event_id:
+        flow_id = root_event_id
+    if not root_event_id and flow_id:
+        root_event_id = flow_id
+    if not source_event_id:
+        source_event_id = root_event_id or flow_id
 
     workspace_id = _to_str(meta.get("workspace_id") or "production").strip()
 
@@ -352,14 +368,15 @@ def _canonical_incident_context(
 
     request_obj = data.get("request") if isinstance(data.get("request"), dict) else {}
     response_obj = data.get("response") if isinstance(data.get("response"), dict) else {}
+    original_input = data.get("original_input") if isinstance(data.get("original_input"), dict) else {}
 
     return {
-        **data,
         "flow_id": flow_id,
         "root_event_id": root_event_id,
         "source_event_id": source_event_id,
         "event_id": source_event_id,
         "workspace_id": workspace_id,
+        "workspace": workspace_id,
         "run_record_id": run_record_id,
         "linked_run": linked_run,
         "parent_command_id": _to_str(
@@ -397,6 +414,7 @@ def _canonical_incident_context(
         ),
         "original_capability": original_capability,
         "failed_capability": failed_capability,
+        "source_capability": _to_str(data.get("source_capability") or original_capability).strip(),
         "failed_method": method,
         "method": method,
         "failed_url": target_url,
@@ -416,8 +434,24 @@ def _canonical_incident_context(
             or data.get("failed_goal")
             or ""
         ).strip(),
+        "retry_reason": _to_str(data.get("retry_reason") or data.get("reason") or "").strip(),
+        "retry_count": _to_int(data.get("retry_count"), 0),
+        "retry_max": _to_int(data.get("retry_max"), 0),
+        "error": _to_str(data.get("error") or "").strip(),
+        "error_message": _to_str(data.get("error_message") or "").strip(),
+        "incident_message": _to_str(
+            data.get("incident_message")
+            or data.get("error_message")
+            or data.get("error")
+            or ""
+        ).strip(),
+        "source": _to_str(data.get("source") or "").strip(),
+        "tenant_id": _to_str(data.get("tenant_id") or "").strip(),
+        "app_name": _to_str(data.get("app_name") or "").strip(),
+        "endpoint_name": _to_str(data.get("endpoint_name") or "").strip(),
         "request": request_obj,
         "response": response_obj,
+        "original_input": original_input,
     }
 
 
