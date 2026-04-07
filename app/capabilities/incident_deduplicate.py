@@ -433,23 +433,6 @@ def _pick_int(*values: Any) -> Optional[int]:
     return None
 
 
-def _pick_capability(*values: Any, fallback: str = "") -> str:
-    first_non_empty = ""
-
-    for value in values:
-        text = _pick_text(value)
-        if not text:
-            continue
-
-        if not first_non_empty:
-            first_non_empty = text
-
-        if text not in ORCHESTRATION_CAPABILITIES:
-            return text
-
-    return first_non_empty or fallback
-
-
 def _extract_input(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
