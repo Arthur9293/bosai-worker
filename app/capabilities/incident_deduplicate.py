@@ -7,6 +7,22 @@ from typing import Any, Dict, List, Optional
 
 DEFAULT_MAX_DEPTH = 8
 
+# Capabilities d’orchestration qu’on ne veut PAS utiliser comme origine métier
+# si une vraie capability source existe déjà (ex: http_exec).
+ORCHESTRATION_CAPABILITIES = {
+    "incident_deduplicate",
+    "incident_create",
+    "complete_flow_incident",
+    "resolve_incident",
+    "internal_escalate",
+    "incident_router_v2",
+    "incident_router",
+    "decision_router",
+    "retry_router",
+    "complete_flow",
+    "complete_flow_demo",
+}
+
 
 def _now_ts() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -57,6 +73,311 @@ def _escape_airtable_formula_value(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
+def _json_load_maybe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, list):
+        return value
+    if value is None:
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    candidates = [text]
+
+    try:
+        candidates.append(bytes(text, "utf-8").decode("unicode_escape"))
+    except Exception:
+        pass
+
+    candidates.append(text.replace('\\"', '"'))
+    candidates.append(text.replace("\\_", "_"))
+    candidates.append(text.replace('\\"', '"').replace("\\_", "_"))
+
+    seen = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            continue
+
+        if isinstance(parsed, str):
+            inner = parsed.strip()
+            if not inner:
+                continue
+            try:
+                parsed2 = json.loads(inner)
+                return parsed2
+            except Exception:
+                return parsed
+
+        return parsed
+
+    return None
+
+
+def _normalize_keys_deep(value: Any) -> Any:
+    mapping = {
+        "commandinput": "command_input",
+        "targetcapability": "target_capability",
+        "originalinput": "original_input",
+        "retrycount": "retry_count",
+        "retrymax": "retry_max",
+        "stepindex": "step_index",
+        "maxdepth": "max_depth",
+        "workspaceid": "workspace_id",
+        "rooteventid": "root_event_id",
+        "sourceeventid": "source_event_id",
+        "eventid": "event_id",
+        "flowid": "flow_id",
+        "incidentrecordid": "incident_record_id",
+        "requesterror": "request_error",
+        "httptarget": "http_target",
+        "httpstatus": "http_status",
+        "retryreason": "retry_reason",
+        "errortype": "error_type",
+        "parentcommandid": "parent_command_id",
+        "statuscode": "status_code",
+        "failedurl": "failed_url",
+        "failedmethod": "failed_method",
+        "failedgoal": "failed_goal",
+        "originalcapability": "original_capability",
+        "failedcapability": "failed_capability",
+        "sourcecapability": "source_capability",
+        "runrecordid": "run_record_id",
+        "linkedrun": "linked_run",
+        "commandid": "command_id",
+        "incidentcode": "incident_code",
+        "decisionstatus": "decision_status",
+        "decisionreason": "decision_reason",
+        "nextaction": "next_action",
+        "priorityscore": "priority_score",
+        "autoexecutable": "auto_executable",
+        "finalfailure": "final_failure",
+        "targeturl": "target_url",
+        "endpointname": "endpoint_name",
+        "errormessage": "error_message",
+        "incidentmessage": "incident_message",
+        "tenantid": "tenant_id",
+        "appname": "app_name",
+    }
+
+    if isinstance(value, dict):
+        normalized: Dict[str, Any] = {}
+        for k, v in value.items():
+            key = mapping.get(str(k), str(k))
+            normalized[key] = _normalize_keys_deep(v)
+        return normalized
+
+    if isinstance(value, list):
+        return [_normalize_keys_deep(item) for item in value]
+
+    return value
+
+
+def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+
+    normalized = dict(payload)
+
+    flow_id = str(
+        normalized.get("flow_id")
+        or normalized.get("flowid")
+        or normalized.get("flowId")
+        or normalized.get("Flow_ID")
+        or normalized.get("FlowId")
+        or ""
+    ).strip()
+
+    event_id = str(
+        normalized.get("event_id")
+        or normalized.get("eventid")
+        or normalized.get("eventId")
+        or normalized.get("Event_ID")
+        or ""
+    ).strip()
+
+    root_event_id = str(
+        normalized.get("root_event_id")
+        or normalized.get("rooteventid")
+        or normalized.get("rootEventId")
+        or normalized.get("root_eventid")
+        or normalized.get("Root_Event_ID")
+        or normalized.get("RootEventId")
+        or ""
+    ).strip()
+
+    source_event_id = str(
+        normalized.get("source_event_id")
+        or normalized.get("sourceeventid")
+        or normalized.get("sourceEventId")
+        or normalized.get("Source_Event_ID")
+        or event_id
+        or root_event_id
+        or flow_id
+        or ""
+    ).strip()
+
+    workspace_id = str(
+        normalized.get("workspace_id")
+        or normalized.get("workspaceid")
+        or normalized.get("workspaceId")
+        or normalized.get("Workspace_ID")
+        or normalized.get("workspace")
+        or ""
+    ).strip()
+
+    run_record_id = str(
+        normalized.get("run_record_id")
+        or normalized.get("runrecordid")
+        or normalized.get("runRecordId")
+        or normalized.get("linked_run")
+        or normalized.get("linkedrun")
+        or normalized.get("Linked_Run")
+        or ""
+    ).strip()
+
+    linked_run = str(
+        normalized.get("linked_run")
+        or normalized.get("linkedrun")
+        or normalized.get("run_record_id")
+        or normalized.get("runrecordid")
+        or normalized.get("runRecordId")
+        or ""
+    ).strip()
+
+    parent_command_id = str(
+        normalized.get("parent_command_id")
+        or normalized.get("parentcommandid")
+        or normalized.get("parentCommandId")
+        or normalized.get("Parent_Command_ID")
+        or ""
+    ).strip()
+
+    command_id = str(
+        normalized.get("command_id")
+        or normalized.get("commandid")
+        or normalized.get("commandId")
+        or normalized.get("Command_ID")
+        or ""
+    ).strip()
+
+    raw_step_index = (
+        normalized.get("step_index")
+        if normalized.get("step_index") is not None
+        else normalized.get("stepindex")
+        if normalized.get("stepindex") is not None
+        else normalized.get("stepIndex")
+        if normalized.get("stepIndex") is not None
+        else normalized.get("Step_Index")
+        if normalized.get("Step_Index") is not None
+        else normalized.get("StepIndex")
+    )
+
+    step_index = 0
+    try:
+        if raw_step_index is not None and str(raw_step_index).strip() != "":
+            step_index = int(raw_step_index)
+    except Exception:
+        step_index = 0
+
+    raw_depth = normalized.get("_depth") if normalized.get("_depth") is not None else normalized.get("depth")
+    depth = _to_int(raw_depth, 0)
+
+    if flow_id:
+        normalized["flow_id"] = flow_id
+    if event_id:
+        normalized["event_id"] = event_id
+    if root_event_id:
+        normalized["root_event_id"] = root_event_id
+    elif event_id:
+        normalized["root_event_id"] = event_id
+    if source_event_id:
+        normalized["source_event_id"] = source_event_id
+    elif event_id:
+        normalized["source_event_id"] = event_id
+    if workspace_id:
+        normalized["workspace_id"] = workspace_id
+        normalized["workspace"] = workspace_id
+    if run_record_id:
+        normalized["run_record_id"] = run_record_id
+    if linked_run:
+        normalized["linked_run"] = linked_run
+    elif run_record_id:
+        normalized["linked_run"] = run_record_id
+    if parent_command_id:
+        normalized["parent_command_id"] = parent_command_id
+    if command_id:
+        normalized["command_id"] = command_id
+
+    normalized["step_index"] = step_index
+    normalized["_depth"] = depth
+
+    for legacy_key in (
+        "flowid",
+        "flowId",
+        "Flow_ID",
+        "FlowId",
+        "eventid",
+        "eventId",
+        "Event_ID",
+        "rooteventid",
+        "rootEventId",
+        "root_eventid",
+        "Root_Event_ID",
+        "RootEventId",
+        "sourceeventid",
+        "sourceEventId",
+        "Source_Event_ID",
+        "workspaceid",
+        "workspaceId",
+        "Workspace_ID",
+        "runrecordid",
+        "runRecordId",
+        "Run_Record_ID",
+        "linkedrun",
+        "Linked_Run",
+        "parentcommandid",
+        "parentCommandId",
+        "Parent_Command_ID",
+        "commandid",
+        "commandId",
+        "Command_ID",
+        "stepindex",
+        "stepIndex",
+        "Step_Index",
+        "StepIndex",
+        "depth",
+    ):
+        normalized.pop(legacy_key, None)
+
+    return normalized
+
+
+def _unwrap_command_payload(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+
+    current = dict(value)
+
+    for key in ("input", "command_input"):
+        nested = current.get(key)
+        if isinstance(nested, dict):
+            merged = dict(current)
+            merged.pop(key, None)
+            merged.update(nested)
+            current = merged
+
+    return current
+
+
 def _pick_text(*values: Any) -> str:
     for value in values:
         if value is None:
@@ -96,6 +417,23 @@ def _pick_int(*values: Any) -> Optional[int]:
             except Exception:
                 continue
     return None
+
+
+def _pick_capability(*values: Any, fallback: str = "") -> str:
+    first_non_empty = ""
+
+    for value in values:
+        text = _pick_text(value)
+        if not text:
+            continue
+
+        if not first_non_empty:
+            first_non_empty = text
+
+        if text not in ORCHESTRATION_CAPABILITIES:
+            return text
+
+    return first_non_empty or fallback
 
 
 def _extract_input(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -335,6 +673,30 @@ def _normalize_decision_block(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _strip_runtime_keys(value: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+
+    cleaned = dict(value)
+
+    for noisy_key in (
+        "next_commands",
+        "spawn_summary",
+        "terminal",
+        "ok",
+        "status",
+        "route",
+        "ts",
+        "update_res",
+        "incident_exists",
+        "deduplicate_action",
+        "action",
+    ):
+        cleaned.pop(noisy_key, None)
+
+    return cleaned
+
+
 def _canonical_incident_context(
     data: Dict[str, Any],
     meta: Dict[str, Any],
@@ -346,6 +708,10 @@ def _canonical_incident_context(
     request_obj = data.get("request") if isinstance(data.get("request"), dict) else {}
     response_obj = data.get("response") if isinstance(data.get("response"), dict) else {}
     original_input = data.get("original_input") if isinstance(data.get("original_input"), dict) else {}
+
+    original_input = _normalize_keys_deep(original_input)
+    original_input = _unwrap_command_payload(original_input)
+    original_input = _normalize_flow_keys(original_input)
 
     flow_id = _pick_text(
         meta.get("flow_id"),
@@ -386,6 +752,7 @@ def _canonical_incident_context(
         data.get("workspaceid"),
         data.get("workspaceId"),
         data.get("workspace"),
+        original_input.get("workspace_id"),
         "production",
     )
 
@@ -405,44 +772,54 @@ def _canonical_incident_context(
         run_record_id,
     )
 
-    original_capability = _pick_text(
-        data.get("original_capability"),
-        data.get("failed_capability"),
-        data.get("source_capability"),
-        "http_exec",
-    )
-
-    failed_capability = _pick_text(
-        data.get("failed_capability"),
-        data.get("original_capability"),
-        data.get("source_capability"),
-        original_capability,
-    )
-
-    source_capability = _pick_text(
-        data.get("source_capability"),
-        original_capability,
-        failed_capability,
-    )
-
-    method = _pick_text(
-        data.get("failed_method"),
-        data.get("method"),
-        request_obj.get("method"),
-        original_input.get("method"),
-        "GET",
-    ).upper()
-
     target_url = _pick_text(
         data.get("failed_url"),
         data.get("target_url"),
         data.get("targeturl"),
         data.get("url"),
         data.get("http_target"),
+        original_input.get("failed_url"),
+        original_input.get("target_url"),
         original_input.get("url"),
         original_input.get("http_target"),
         request_obj.get("url"),
     )
+
+    original_capability = _pick_capability(
+        data.get("original_capability"),
+        original_input.get("original_capability"),
+        data.get("failed_capability"),
+        original_input.get("failed_capability"),
+        data.get("source_capability"),
+        original_input.get("source_capability"),
+        fallback="http_exec" if target_url else "",
+    )
+
+    failed_capability = _pick_capability(
+        data.get("failed_capability"),
+        original_input.get("failed_capability"),
+        original_capability,
+        data.get("source_capability"),
+        original_input.get("source_capability"),
+        fallback=original_capability,
+    )
+
+    source_capability = _pick_capability(
+        data.get("source_capability"),
+        original_input.get("source_capability"),
+        original_capability,
+        failed_capability,
+        fallback=original_capability,
+    )
+
+    method = _pick_text(
+        data.get("failed_method"),
+        data.get("method"),
+        original_input.get("failed_method"),
+        original_input.get("method"),
+        request_obj.get("method"),
+        "GET",
+    ).upper()
 
     http_status = _pick_int(
         data.get("http_status"),
@@ -462,11 +839,13 @@ def _canonical_incident_context(
 
     severity = _pick_text(
         data.get("severity"),
+        original_input.get("severity"),
         "high" if http_status is not None and http_status >= 500 else "",
     )
 
     category = _pick_text(
         data.get("category"),
+        original_input.get("category"),
         "http_failure" if target_url else "",
     )
 
@@ -474,7 +853,9 @@ def _canonical_incident_context(
         data.get("reason"),
         data.get("retry_reason"),
         data.get("incident_code"),
-        data.get("incidentcode"),
+        original_input.get("reason"),
+        original_input.get("retry_reason"),
+        original_input.get("incident_code"),
         data.get("error"),
         "incident",
     )
@@ -482,6 +863,8 @@ def _canonical_incident_context(
     incident_code = _pick_text(
         data.get("incident_code"),
         data.get("incidentcode"),
+        original_input.get("incident_code"),
+        original_input.get("incidentcode"),
         data.get("reason"),
         "http_status_error",
     )
@@ -489,12 +872,17 @@ def _canonical_incident_context(
     error = _pick_text(
         data.get("error"),
         data.get("error_message"),
+        original_input.get("error"),
+        original_input.get("error_message"),
     )
 
     error_message = _pick_text(
         data.get("error_message"),
         data.get("incident_message"),
+        original_input.get("error_message"),
+        original_input.get("incident_message"),
         data.get("error"),
+        original_input.get("error"),
     )
 
     normalized_final_failure = _to_bool(
@@ -502,8 +890,10 @@ def _canonical_incident_context(
         False,
     )
 
-    return {
-        **data,
+    base = _strip_runtime_keys(data)
+
+    canonical = {
+        **base,
         "flow_id": flow_id,
         "root_event_id": root_event_id,
         "source_event_id": source_event_id,
@@ -549,65 +939,95 @@ def _canonical_incident_context(
             data.get("goal"),
             data.get("failed_goal"),
             original_input.get("goal"),
+            original_input.get("failed_goal"),
         ),
         "error": error,
         "error_message": error_message,
         "incident_message": _pick_text(
             data.get("incident_message"),
+            original_input.get("incident_message"),
             error_message,
             error,
         ),
         "request": request_obj,
         "response": response_obj,
         "original_input": original_input,
-        "retry_reason": _pick_text(data.get("retry_reason"), reason),
-        "retry_count": _to_int(data.get("retry_count"), 0),
-        "retry_max": _to_int(data.get("retry_max"), 0),
-        "tenant_id": _pick_text(data.get("tenant_id")),
-        "app_name": _pick_text(data.get("app_name")),
-        "source": _pick_text(data.get("source")),
+        "retry_reason": _pick_text(
+            data.get("retry_reason"),
+            original_input.get("retry_reason"),
+            reason,
+        ),
+        "retry_count": _to_int(
+            data.get("retry_count")
+            if data.get("retry_count") is not None
+            else original_input.get("retry_count"),
+            0,
+        ),
+        "retry_max": _to_int(
+            data.get("retry_max")
+            if data.get("retry_max") is not None
+            else original_input.get("retry_max"),
+            0,
+        ),
+        "tenant_id": _pick_text(data.get("tenant_id"), original_input.get("tenant_id")),
+        "app_name": _pick_text(data.get("app_name"), original_input.get("app_name")),
+        "source": _pick_text(data.get("source"), original_input.get("source")),
         "incident_record_id": _pick_text(data.get("incident_record_id")),
         "log_record_id": _pick_text(data.get("log_record_id")),
         "endpoint_name": _pick_text(data.get("endpoint_name"), original_input.get("endpoint_name")),
     }
 
+    canonical = _normalize_keys_deep(canonical)
+    canonical = _unwrap_command_payload(canonical)
+    canonical = _normalize_flow_keys(canonical)
+
+    return canonical
+
 
 def _build_incident_key(data: Dict[str, Any], meta: Dict[str, Any]) -> str:
-    flow_id = _pick_text(meta.get("flow_id"), "no_flow")
-    root_event_id = _pick_text(meta.get("root_event_id"), "no_root")
-    capability = _pick_text(
+    flow_id = _pick_text(data.get("flow_id"), meta.get("flow_id"), "no_flow")
+    root_event_id = _pick_text(data.get("root_event_id"), meta.get("root_event_id"), "no_root")
+
+    capability = _pick_capability(
         data.get("original_capability"),
         data.get("failed_capability"),
         data.get("source_capability"),
-        "no_capability",
+        data.get("original_input", {}).get("original_capability") if isinstance(data.get("original_input"), dict) else "",
+        fallback="no_capability",
     )
+
     method = _pick_text(
         data.get("failed_method"),
         data.get("method"),
         "GET",
     ).upper()
+
     target_url = _pick_text(
         data.get("failed_url"),
         data.get("target_url"),
         data.get("url"),
         data.get("http_target"),
     )
+
     http_status = _pick_text(
         data.get("http_status"),
         data.get("httpstatus"),
         data.get("status_code"),
         "0",
     )
+
     incident_code = _pick_text(
         data.get("incident_code"),
         data.get("incidentcode"),
         "no_incident_code",
     ).lower()
+
     reason = _pick_text(
         data.get("reason"),
         data.get("decision_reason"),
         "no_reason",
     ).lower()
+
     final_flag = "final" if _to_bool(
         data.get("final_failure")
         if data.get("final_failure") is not None
@@ -732,6 +1152,15 @@ def _update_existing_incident_best_effort(
     }
 
 
+def _build_next_input(base: Dict[str, Any], **extra: Any) -> Dict[str, Any]:
+    payload = _strip_runtime_keys(base)
+    payload.update(extra)
+    payload = _normalize_keys_deep(payload)
+    payload = _unwrap_command_payload(payload)
+    payload = _normalize_flow_keys(payload)
+    return payload
+
+
 def run(
     req: Optional[Any] = None,
     run_record_id: str = "",
@@ -742,7 +1171,15 @@ def run(
     **kwargs: Any,
 ) -> Dict[str, Any]:
     payload = getattr(req, "input", {}) if hasattr(req, "input") else req or {}
+    payload = _normalize_keys_deep(payload if isinstance(payload, dict) else {})
+    payload = _unwrap_command_payload(payload)
+    payload = _normalize_flow_keys(payload)
+
     data = _extract_input(payload)
+    data = _normalize_keys_deep(data)
+    data = _unwrap_command_payload(data)
+    data = _normalize_flow_keys(data)
+
     meta = _extract_meta(data)
 
     depth = _to_int(meta.get("depth"), 0)
@@ -765,7 +1202,8 @@ def run(
         decision_block=decision_block,
     )
 
-    incident_key = _pick_text(data.get("incident_key")) or _build_incident_key(
+    # Toujours reconstruire la clé à partir du contexte canonique.
+    incident_key = _build_incident_key(
         canonical_for_key,
         {
             **meta,
@@ -791,12 +1229,12 @@ def run(
             data=canonical_for_key,
         )
 
-        next_input = {
-            **canonical_for_key,
-            "incident_record_id": existing_id,
-            "incident_key": incident_key,
-            "deduplicate_action": "existing_found",
-        }
+        next_input = _build_next_input(
+            canonical_for_key,
+            incident_record_id=existing_id,
+            incident_key=incident_key,
+            deduplicate_action="existing_found",
+        )
 
         next_commands: List[Dict[str, Any]] = []
 
@@ -856,11 +1294,11 @@ def run(
             },
         }
 
-    create_input = {
-        **canonical_for_key,
-        "incident_key": incident_key,
-        "deduplicate_action": "create_new",
-    }
+    create_input = _build_next_input(
+        canonical_for_key,
+        incident_key=incident_key,
+        deduplicate_action="create_new",
+    )
 
     next_commands: List[Dict[str, Any]] = [
         {
