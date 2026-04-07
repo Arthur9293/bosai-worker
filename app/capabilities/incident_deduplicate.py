@@ -57,6 +57,47 @@ def _escape_airtable_formula_value(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
+def _pick_text(*values: Any) -> str:
+    for value in values:
+        if value is None:
+            continue
+
+        if isinstance(value, list):
+            for item in value:
+                text = _pick_text(item)
+                if text:
+                    return text
+            continue
+
+        if isinstance(value, dict):
+            for key in ("id", "name", "value", "text", "url", "method", "status_code"):
+                if key in value:
+                    text = _pick_text(value.get(key))
+                    if text:
+                        return text
+            continue
+
+        text = _to_str(value).strip()
+        if text:
+            return text
+
+    return ""
+
+
+def _pick_int(*values: Any) -> Optional[int]:
+    for value in values:
+        if value is None or value == "":
+            continue
+        try:
+            return int(value)
+        except Exception:
+            try:
+                return int(str(value).strip())
+            except Exception:
+                continue
+    return None
+
+
 def _extract_input(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
@@ -72,77 +113,68 @@ def _extract_input(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
-    flow_id = _to_str(
-        payload.get("flow_id")
-        or payload.get("flowid")
-        or payload.get("flowId")
-        or ""
-    ).strip()
+    flow_id = _pick_text(
+        payload.get("flow_id"),
+        payload.get("flowid"),
+        payload.get("flowId"),
+    )
 
-    root_event_id = _to_str(
-        payload.get("root_event_id")
-        or payload.get("rooteventid")
-        or payload.get("rootEventId")
-        or payload.get("event_id")
-        or payload.get("eventid")
-        or payload.get("eventId")
-        or ""
-    ).strip()
+    event_id = _pick_text(
+        payload.get("event_id"),
+        payload.get("eventid"),
+        payload.get("eventId"),
+    )
 
-    if not flow_id and root_event_id:
-        flow_id = root_event_id
+    root_event_id = _pick_text(
+        payload.get("root_event_id"),
+        payload.get("rooteventid"),
+        payload.get("rootEventId"),
+        event_id,
+        flow_id,
+    )
 
-    if not root_event_id and flow_id:
-        root_event_id = flow_id
+    source_event_id = _pick_text(
+        payload.get("source_event_id"),
+        payload.get("sourceeventid"),
+        payload.get("sourceEventId"),
+        event_id,
+        root_event_id,
+        flow_id,
+    )
 
-    source_event_id = _to_str(
-        payload.get("source_event_id")
-        or payload.get("sourceeventid")
-        or payload.get("sourceEventId")
-        or payload.get("event_id")
-        or payload.get("eventid")
-        or payload.get("eventId")
-        or root_event_id
-        or flow_id
-        or ""
-    ).strip()
+    workspace_id = _pick_text(
+        payload.get("workspace_id"),
+        payload.get("workspaceid"),
+        payload.get("workspaceId"),
+        payload.get("Workspace_ID"),
+        payload.get("workspace"),
+        "production",
+    )
 
-    workspace_id = _to_str(
-        payload.get("workspace_id")
-        or payload.get("workspaceid")
-        or payload.get("workspaceId")
-        or payload.get("Workspace_ID")
-        or payload.get("workspace")
-        or "production"
-    ).strip()
-
-    run_record_id = _to_str(
-        payload.get("run_record_id")
-        or payload.get("runrecordid")
-        or payload.get("runRecordId")
-        or payload.get("linked_run")
-        or payload.get("linkedrun")
-        or payload.get("Linked_Run")
-        or ""
-    ).strip()
+    run_record_id = _pick_text(
+        payload.get("run_record_id"),
+        payload.get("runrecordid"),
+        payload.get("runRecordId"),
+        payload.get("linked_run"),
+        payload.get("linkedrun"),
+        payload.get("Linked_Run"),
+    )
 
     return {
-        "flow_id": flow_id,
-        "root_event_id": root_event_id,
-        "source_event_id": source_event_id,
-        "parent_command_id": _to_str(
-            payload.get("parent_command_id")
-            or payload.get("parentcommandid")
-            or payload.get("parentcommand_id")
-            or payload.get("parentCommandId")
-            or ""
-        ).strip(),
-        "command_id": _to_str(
-            payload.get("command_id")
-            or payload.get("commandid")
-            or payload.get("commandId")
-            or ""
-        ).strip(),
+        "flow_id": flow_id or root_event_id or source_event_id,
+        "root_event_id": root_event_id or source_event_id or flow_id,
+        "source_event_id": source_event_id or root_event_id or flow_id,
+        "parent_command_id": _pick_text(
+            payload.get("parent_command_id"),
+            payload.get("parentcommandid"),
+            payload.get("parentcommand_id"),
+            payload.get("parentCommandId"),
+        ),
+        "command_id": _pick_text(
+            payload.get("command_id"),
+            payload.get("commandid"),
+            payload.get("commandId"),
+        ),
         "step_index": _to_int(
             payload.get("step_index")
             if payload.get("step_index") is not None
@@ -157,30 +189,27 @@ def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
             else payload.get("depth"),
             0,
         ),
-        "workspace_id": workspace_id,
+        "workspace_id": workspace_id or "production",
         "run_record_id": run_record_id,
         "linked_run": run_record_id,
     }
 
 
 def _normalize_decision_block(data: Dict[str, Any]) -> Dict[str, Any]:
-    decision_status = _to_str(
-        data.get("decision_status")
-        or data.get("decisionstatus")
-        or ""
-    ).strip()
+    decision_status = _pick_text(
+        data.get("decision_status"),
+        data.get("decisionstatus"),
+    )
 
-    decision_reason = _to_str(
-        data.get("decision_reason")
-        or data.get("decisionreason")
-        or ""
-    ).strip()
+    decision_reason = _pick_text(
+        data.get("decision_reason"),
+        data.get("decisionreason"),
+    )
 
-    next_action = _to_str(
-        data.get("next_action")
-        or data.get("nextaction")
-        or ""
-    ).strip()
+    next_action = _pick_text(
+        data.get("next_action"),
+        data.get("nextaction"),
+    )
 
     auto_executable = _to_bool(
         data.get("auto_executable")
@@ -196,22 +225,35 @@ def _normalize_decision_block(data: Dict[str, Any]) -> Dict[str, Any]:
         0,
     )
 
-    severity = _to_str(data.get("severity") or "").strip().lower()
-    category = _to_str(data.get("category") or "").strip().lower()
-    reason = _to_str(data.get("reason") or "").strip().lower()
-    sla_status = _to_str(data.get("sla_status") or "").strip().lower()
-    final_failure = _to_bool(
+    severity = _pick_text(data.get("severity")).lower()
+    category = _pick_text(data.get("category")).lower()
+    reason = _pick_text(data.get("reason"), data.get("retry_reason"), data.get("incident_code")).lower()
+    sla_status = _pick_text(data.get("sla_status")).lower()
+
+    http_status = _pick_int(
+        data.get("http_status"),
+        data.get("httpstatus"),
+        data.get("status_code"),
+        data.get("statuscode"),
+        (data.get("response") or {}).get("status_code") if isinstance(data.get("response"), dict) else None,
+    )
+
+    input_final_failure = _to_bool(
         data.get("final_failure")
         if data.get("final_failure") is not None
         else data.get("finalfailure"),
         False,
     )
-    http_status = _to_int(
-        data.get("http_status")
-        if data.get("http_status") is not None
-        else data.get("httpstatus"),
-        0,
+
+    severe_http_failure = (
+        category == "http_failure"
+        or reason in {"http_5xx_exhausted", "http_status_error", "forbidden_host", "retry_exhausted", "retry_limit_reached"}
+        or (http_status is not None and http_status >= 500)
+        or severity in {"high", "critical"}
+        or sla_status == "breached"
     )
+
+    normalized_final_failure = input_final_failure or severe_http_failure
 
     if not decision_status:
         if next_action == "internal_escalate":
@@ -224,29 +266,24 @@ def _normalize_decision_block(data: Dict[str, Any]) -> Dict[str, Any]:
             if not decision_reason:
                 decision_reason = "explicit_resolve_incident"
 
+        elif severe_http_failure:
+            decision_status = "Escalate"
+            next_action = "internal_escalate"
+            auto_executable = True
+            if not decision_reason:
+                decision_reason = "escalate_failure_or_severe_signal"
+
         elif (
-            not final_failure
+            not normalized_final_failure
             and severity in {"low", "medium"}
             and sla_status != "breached"
+            and (http_status is None or http_status < 500)
         ):
             decision_status = "Resolved"
             next_action = "resolve_incident"
             auto_executable = True
             if not decision_reason:
                 decision_reason = "auto_resolve_non_final_low_or_medium"
-
-        elif final_failure and (
-            category == "http_failure"
-            or reason in {"http_5xx_exhausted", "http_status_error", "forbidden_host"}
-            or http_status >= 500
-            or severity in {"high", "critical"}
-            or sla_status == "breached"
-        ):
-            decision_status = "Escalate"
-            next_action = "internal_escalate"
-            auto_executable = True
-            if not decision_reason:
-                decision_reason = "escalate_final_failure_or_severe"
 
         elif severity == "low":
             decision_status = "No_Action"
@@ -279,7 +316,7 @@ def _normalize_decision_block(data: Dict[str, Any]) -> Dict[str, Any]:
         if next_action == "internal_escalate":
             if severity == "critical" or sla_status == "breached":
                 priority_score = 95
-            elif severity == "high":
+            elif severity == "high" or (http_status is not None and http_status >= 500):
                 priority_score = 80
             else:
                 priority_score = 70
@@ -294,6 +331,7 @@ def _normalize_decision_block(data: Dict[str, Any]) -> Dict[str, Any]:
         "next_action": next_action,
         "auto_executable": auto_executable,
         "priority_score": priority_score,
+        "normalized_final_failure": normalized_final_failure,
     }
 
 
@@ -305,72 +343,167 @@ def _canonical_incident_context(
     next_depth: int,
     decision_block: Dict[str, Any],
 ) -> Dict[str, Any]:
-    run_record_id = _to_str(meta.get("run_record_id") or runtime_run_record_id).strip()
-    linked_run = _to_str(meta.get("linked_run") or run_record_id).strip()
-
-    flow_id = _to_str(meta.get("flow_id") or "").strip()
-    root_event_id = _to_str(meta.get("root_event_id") or "").strip()
-    source_event_id = _to_str(meta.get("source_event_id") or "").strip()
-
-    if not flow_id and root_event_id:
-        flow_id = root_event_id
-    if not root_event_id and flow_id:
-        root_event_id = flow_id
-    if not source_event_id:
-        source_event_id = root_event_id or flow_id
-
-    workspace_id = _to_str(meta.get("workspace_id") or "production").strip()
-
-    original_capability = _to_str(
-        data.get("original_capability")
-        or data.get("failed_capability")
-        or data.get("source_capability")
-        or "http_exec"
-    ).strip()
-
-    failed_capability = _to_str(
-        data.get("failed_capability")
-        or data.get("original_capability")
-        or data.get("source_capability")
-        or original_capability
-    ).strip()
-
-    method = _to_str(
-        data.get("failed_method")
-        or data.get("method")
-        or "GET"
-    ).upper().strip()
-
-    target_url = _to_str(
-        data.get("failed_url")
-        or data.get("target_url")
-        or data.get("targeturl")
-        or data.get("url")
-        or data.get("http_target")
-        or ""
-    ).strip()
-
-    http_status = (
-        data.get("http_status")
-        if data.get("http_status") is not None
-        else data.get("httpstatus")
-        if data.get("httpstatus") is not None
-        else data.get("status_code")
-    )
-
-    status_code = (
-        data.get("status_code")
-        if data.get("status_code") is not None
-        else data.get("http_status")
-        if data.get("http_status") is not None
-        else data.get("httpstatus")
-    )
-
     request_obj = data.get("request") if isinstance(data.get("request"), dict) else {}
     response_obj = data.get("response") if isinstance(data.get("response"), dict) else {}
     original_input = data.get("original_input") if isinstance(data.get("original_input"), dict) else {}
 
+    flow_id = _pick_text(
+        meta.get("flow_id"),
+        data.get("flow_id"),
+        data.get("flowid"),
+        data.get("flowId"),
+        meta.get("root_event_id"),
+        meta.get("source_event_id"),
+    )
+
+    root_event_id = _pick_text(
+        meta.get("root_event_id"),
+        data.get("root_event_id"),
+        data.get("rooteventid"),
+        data.get("rootEventId"),
+        data.get("event_id"),
+        data.get("eventid"),
+        data.get("eventId"),
+        meta.get("source_event_id"),
+        flow_id,
+    )
+
+    source_event_id = _pick_text(
+        meta.get("source_event_id"),
+        data.get("source_event_id"),
+        data.get("sourceeventid"),
+        data.get("sourceEventId"),
+        data.get("event_id"),
+        data.get("eventid"),
+        data.get("eventId"),
+        root_event_id,
+        flow_id,
+    )
+
+    workspace_id = _pick_text(
+        meta.get("workspace_id"),
+        data.get("workspace_id"),
+        data.get("workspaceid"),
+        data.get("workspaceId"),
+        data.get("workspace"),
+        "production",
+    )
+
+    run_record_id = _pick_text(
+        meta.get("run_record_id"),
+        data.get("run_record_id"),
+        data.get("runrecordid"),
+        data.get("linked_run"),
+        data.get("linkedrun"),
+        runtime_run_record_id,
+    )
+
+    linked_run = _pick_text(
+        meta.get("linked_run"),
+        data.get("linked_run"),
+        data.get("linkedrun"),
+        run_record_id,
+    )
+
+    original_capability = _pick_text(
+        data.get("original_capability"),
+        data.get("failed_capability"),
+        data.get("source_capability"),
+        "http_exec",
+    )
+
+    failed_capability = _pick_text(
+        data.get("failed_capability"),
+        data.get("original_capability"),
+        data.get("source_capability"),
+        original_capability,
+    )
+
+    source_capability = _pick_text(
+        data.get("source_capability"),
+        original_capability,
+        failed_capability,
+    )
+
+    method = _pick_text(
+        data.get("failed_method"),
+        data.get("method"),
+        request_obj.get("method"),
+        original_input.get("method"),
+        "GET",
+    ).upper()
+
+    target_url = _pick_text(
+        data.get("failed_url"),
+        data.get("target_url"),
+        data.get("targeturl"),
+        data.get("url"),
+        data.get("http_target"),
+        original_input.get("url"),
+        original_input.get("http_target"),
+        request_obj.get("url"),
+    )
+
+    http_status = _pick_int(
+        data.get("http_status"),
+        data.get("httpstatus"),
+        data.get("status_code"),
+        data.get("statuscode"),
+        response_obj.get("status_code"),
+    )
+
+    status_code = _pick_int(
+        data.get("status_code"),
+        data.get("statuscode"),
+        data.get("http_status"),
+        data.get("httpstatus"),
+        response_obj.get("status_code"),
+    )
+
+    severity = _pick_text(
+        data.get("severity"),
+        "high" if http_status is not None and http_status >= 500 else "",
+    )
+
+    category = _pick_text(
+        data.get("category"),
+        "http_failure" if target_url else "",
+    )
+
+    reason = _pick_text(
+        data.get("reason"),
+        data.get("retry_reason"),
+        data.get("incident_code"),
+        data.get("incidentcode"),
+        data.get("error"),
+        "incident",
+    )
+
+    incident_code = _pick_text(
+        data.get("incident_code"),
+        data.get("incidentcode"),
+        data.get("reason"),
+        "http_status_error",
+    )
+
+    error = _pick_text(
+        data.get("error"),
+        data.get("error_message"),
+    )
+
+    error_message = _pick_text(
+        data.get("error_message"),
+        data.get("incident_message"),
+        data.get("error"),
+    )
+
+    normalized_final_failure = _to_bool(
+        decision_block.get("normalized_final_failure"),
+        False,
+    )
+
     return {
+        **data,
         "flow_id": flow_id,
         "root_event_id": root_event_id,
         "source_event_id": source_event_id,
@@ -379,18 +512,16 @@ def _canonical_incident_context(
         "workspace": workspace_id,
         "run_record_id": run_record_id,
         "linked_run": linked_run,
-        "parent_command_id": _to_str(
-            meta.get("parent_command_id")
-            or data.get("parent_command_id")
-            or data.get("parentcommandid")
-            or ""
-        ).strip(),
-        "command_id": _to_str(
-            meta.get("command_id")
-            or data.get("command_id")
-            or data.get("commandid")
-            or ""
-        ).strip(),
+        "parent_command_id": _pick_text(
+            meta.get("parent_command_id"),
+            data.get("parent_command_id"),
+            data.get("parentcommandid"),
+        ),
+        "command_id": _pick_text(
+            meta.get("command_id"),
+            data.get("command_id"),
+            data.get("commandid"),
+        ),
         "step_index": next_step_index,
         "_depth": next_depth,
         "decision_status": decision_block["decision_status"],
@@ -398,23 +529,13 @@ def _canonical_incident_context(
         "next_action": decision_block["next_action"],
         "auto_executable": decision_block["auto_executable"],
         "priority_score": decision_block["priority_score"],
-        "category": _to_str(data.get("category") or "http_failure").strip(),
-        "reason": _to_str(
-            data.get("reason")
-            or data.get("incident_code")
-            or data.get("decision_reason")
-            or "incident"
-        ).strip(),
-        "severity": _to_str(data.get("severity") or "").strip(),
-        "final_failure": _to_bool(
-            data.get("final_failure")
-            if data.get("final_failure") is not None
-            else data.get("finalfailure"),
-            False,
-        ),
+        "category": category,
+        "reason": reason,
+        "severity": severity,
+        "final_failure": normalized_final_failure,
         "original_capability": original_capability,
         "failed_capability": failed_capability,
-        "source_capability": _to_str(data.get("source_capability") or original_capability).strip(),
+        "source_capability": source_capability,
         "failed_method": method,
         "method": method,
         "failed_url": target_url,
@@ -423,76 +544,70 @@ def _canonical_incident_context(
         "http_target": target_url,
         "http_status": http_status,
         "status_code": status_code,
-        "incident_code": _to_str(
-            data.get("incident_code")
-            or data.get("incidentcode")
-            or data.get("reason")
-            or "http_status_error"
-        ).strip(),
-        "goal": _to_str(
-            data.get("goal")
-            or data.get("failed_goal")
-            or ""
-        ).strip(),
-        "retry_reason": _to_str(data.get("retry_reason") or data.get("reason") or "").strip(),
-        "retry_count": _to_int(data.get("retry_count"), 0),
-        "retry_max": _to_int(data.get("retry_max"), 0),
-        "error": _to_str(data.get("error") or "").strip(),
-        "error_message": _to_str(data.get("error_message") or "").strip(),
-        "incident_message": _to_str(
-            data.get("incident_message")
-            or data.get("error_message")
-            or data.get("error")
-            or ""
-        ).strip(),
-        "source": _to_str(data.get("source") or "").strip(),
-        "tenant_id": _to_str(data.get("tenant_id") or "").strip(),
-        "app_name": _to_str(data.get("app_name") or "").strip(),
-        "endpoint_name": _to_str(data.get("endpoint_name") or "").strip(),
+        "incident_code": incident_code,
+        "goal": _pick_text(
+            data.get("goal"),
+            data.get("failed_goal"),
+            original_input.get("goal"),
+        ),
+        "error": error,
+        "error_message": error_message,
+        "incident_message": _pick_text(
+            data.get("incident_message"),
+            error_message,
+            error,
+        ),
         "request": request_obj,
         "response": response_obj,
         "original_input": original_input,
+        "retry_reason": _pick_text(data.get("retry_reason"), reason),
+        "retry_count": _to_int(data.get("retry_count"), 0),
+        "retry_max": _to_int(data.get("retry_max"), 0),
+        "tenant_id": _pick_text(data.get("tenant_id")),
+        "app_name": _pick_text(data.get("app_name")),
+        "source": _pick_text(data.get("source")),
+        "incident_record_id": _pick_text(data.get("incident_record_id")),
+        "log_record_id": _pick_text(data.get("log_record_id")),
+        "endpoint_name": _pick_text(data.get("endpoint_name"), original_input.get("endpoint_name")),
     }
 
 
 def _build_incident_key(data: Dict[str, Any], meta: Dict[str, Any]) -> str:
-    flow_id = _to_str(meta.get("flow_id") or "no_flow").strip()
-    root_event_id = _to_str(meta.get("root_event_id") or "no_root").strip()
-    capability = _to_str(
-        data.get("original_capability")
-        or data.get("failed_capability")
-        or data.get("source_capability")
-        or "no_capability"
-    ).strip()
-    method = _to_str(
-        data.get("failed_method")
-        or data.get("method")
-        or "GET"
-    ).upper().strip()
-    target_url = _to_str(
-        data.get("failed_url")
-        or data.get("target_url")
-        or data.get("targeturl")
-        or data.get("url")
-        or data.get("http_target")
-        or ""
-    ).strip()
-    http_status = _to_str(
-        data.get("http_status")
-        or data.get("httpstatus")
-        or data.get("status_code")
-        or "0"
-    ).strip()
-    incident_code = _to_str(
-        data.get("incident_code")
-        or data.get("incidentcode")
-        or "no_incident_code"
-    ).strip().lower()
-    reason = _to_str(
-        data.get("reason")
-        or data.get("decision_reason")
-        or "no_reason"
-    ).strip().lower()
+    flow_id = _pick_text(meta.get("flow_id"), "no_flow")
+    root_event_id = _pick_text(meta.get("root_event_id"), "no_root")
+    capability = _pick_text(
+        data.get("original_capability"),
+        data.get("failed_capability"),
+        data.get("source_capability"),
+        "no_capability",
+    )
+    method = _pick_text(
+        data.get("failed_method"),
+        data.get("method"),
+        "GET",
+    ).upper()
+    target_url = _pick_text(
+        data.get("failed_url"),
+        data.get("target_url"),
+        data.get("url"),
+        data.get("http_target"),
+    )
+    http_status = _pick_text(
+        data.get("http_status"),
+        data.get("httpstatus"),
+        data.get("status_code"),
+        "0",
+    )
+    incident_code = _pick_text(
+        data.get("incident_code"),
+        data.get("incidentcode"),
+        "no_incident_code",
+    ).lower()
+    reason = _pick_text(
+        data.get("reason"),
+        data.get("decision_reason"),
+        "no_reason",
+    ).lower()
     final_flag = "final" if _to_bool(
         data.get("final_failure")
         if data.get("final_failure") is not None
@@ -545,13 +660,12 @@ def _update_existing_incident_best_effort(
 ) -> Dict[str, Any]:
     now_ts = _now_ts()
 
-    run_record_id = _to_str(meta.get("run_record_id") or "").strip()
-    parent_command_id = _to_str(
-        meta.get("parent_command_id")
-        or data.get("parent_command_id")
-        or data.get("parentcommandid")
-        or ""
-    ).strip()
+    run_record_id = _pick_text(meta.get("run_record_id"))
+    parent_command_id = _pick_text(
+        meta.get("parent_command_id"),
+        data.get("parent_command_id"),
+        data.get("parentcommandid"),
+    )
 
     linked_run = [run_record_id] if run_record_id.startswith("rec") else []
     linked_command = [parent_command_id] if parent_command_id.startswith("rec") else []
@@ -565,9 +679,9 @@ def _update_existing_incident_best_effort(
             "Linked_Run": linked_run,
             "Command_ID": parent_command_id,
             "Linked_Command": linked_command,
-            "Flow_ID": _to_str(meta.get("flow_id") or "").strip(),
-            "Root_Event_ID": _to_str(meta.get("root_event_id") or "").strip(),
-            "Source_Event_ID": _to_str(meta.get("source_event_id") or "").strip(),
+            "Flow_ID": _pick_text(data.get("flow_id")),
+            "Root_Event_ID": _pick_text(data.get("root_event_id")),
+            "Source_Event_ID": _pick_text(data.get("source_event_id")),
             "Payload_JSON": _safe_json(data),
         },
         {
@@ -575,9 +689,9 @@ def _update_existing_incident_best_effort(
             "Updated_At": now_ts,
             "Run_Record_ID": run_record_id,
             "Command_ID": parent_command_id,
-            "Flow_ID": _to_str(meta.get("flow_id") or "").strip(),
-            "Root_Event_ID": _to_str(meta.get("root_event_id") or "").strip(),
-            "Source_Event_ID": _to_str(meta.get("source_event_id") or "").strip(),
+            "Flow_ID": _pick_text(data.get("flow_id")),
+            "Root_Event_ID": _pick_text(data.get("root_event_id")),
+            "Source_Event_ID": _pick_text(data.get("source_event_id")),
         },
         {
             "Last_Seen_At": now_ts,
@@ -651,7 +765,7 @@ def run(
         decision_block=decision_block,
     )
 
-    incident_key = _to_str(data.get("incident_key")).strip() or _build_incident_key(
+    incident_key = _pick_text(data.get("incident_key")) or _build_incident_key(
         canonical_for_key,
         {
             **meta,
@@ -667,7 +781,7 @@ def run(
     )
 
     if existing:
-        existing_id = _to_str(existing.get("id")).strip()
+        existing_id = _pick_text(existing.get("id"))
 
         update_res = _update_existing_incident_best_effort(
             airtable_update=airtable_update,
