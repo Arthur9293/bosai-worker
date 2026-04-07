@@ -5793,13 +5793,8 @@ def _event_build_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     command_input = _unwrap_command_payload(command_input)
     command_input = _normalize_flow_keys(command_input)
 
-    # ------------------------------------------------------------
-    # Event / Root / Flow stabilization
-    # ------------------------------------------------------------
     event_id = str(
         command_input.get("event_id")
-        or command_input.get("eventid")
-        or command_input.get("eventId")
         or fields.get("event_id")
         or fields.get("eventid")
         or fields.get("eventId")
@@ -5809,8 +5804,6 @@ def _event_build_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
 
     root_event_id = str(
         command_input.get("root_event_id")
-        or command_input.get("rooteventid")
-        or command_input.get("rootEventId")
         or fields.get("root_event_id")
         or fields.get("rooteventid")
         or fields.get("rootEventId")
@@ -5820,8 +5813,6 @@ def _event_build_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
 
     flow_id = str(
         command_input.get("flow_id")
-        or command_input.get("flowid")
-        or command_input.get("flowId")
         or fields.get("flow_id")
         or fields.get("flowid")
         or fields.get("flowId")
@@ -5831,8 +5822,6 @@ def _event_build_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
 
     workspace_id = str(
         command_input.get("workspace_id")
-        or command_input.get("workspaceid")
-        or command_input.get("workspaceId")
         or fields.get("workspace_id")
         or fields.get("workspaceid")
         or fields.get("workspaceId")
@@ -5840,14 +5829,14 @@ def _event_build_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         or ""
     ).strip()
 
-    if event_id and not str(command_input.get("event_id") or "").strip():
-        command_input["event_id"] = event_id
-
-    # priorité métier : si event_id existe, root_event_id doit s’aligner dessus
-    if event_id:
-        command_input["root_event_id"] = event_id
-    elif root_event_id and not str(command_input.get("root_event_id") or "").strip():
-        command_input["root_event_id"] = root_event_id
+    source_event_id = str(
+        command_input.get("source_event_id")
+        or command_input.get("event_id")
+        or event_id
+        or root_event_id
+        or flow_id
+        or ""
+    ).strip()
 
     if flow_id and not str(command_input.get("flow_id") or "").strip():
         command_input["flow_id"] = flow_id
@@ -5855,15 +5844,23 @@ def _event_build_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     if workspace_id and not str(command_input.get("workspace_id") or "").strip():
         command_input["workspace_id"] = workspace_id
 
-    # ------------------------------------------------------------
-    # HTTP normalization
-    # ------------------------------------------------------------
+    if source_event_id and not str(command_input.get("source_event_id") or "").strip():
+        command_input["source_event_id"] = source_event_id
+
+    if event_id and not str(command_input.get("event_id") or "").strip():
+        command_input["event_id"] = event_id
+
+    # IMPORTANT:
+    # on ne force plus root_event_id = event_id
+    # on ne remplit root_event_id QUE s’il est absent
+    if not str(command_input.get("root_event_id") or "").strip():
+        command_input["root_event_id"] = root_event_id or event_id or flow_id or ""
+
     http_target = str(
         fields.get("http_target")
         or fields.get("URL")
         or fields.get("Http_Target")
         or command_input.get("http_target")
-        or command_input.get("httptarget")
         or command_input.get("url")
         or ""
     ).strip()
@@ -5880,14 +5877,14 @@ def _event_build_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         or fields.get("method")
         or command_input.get("method")
         or ""
-    ).strip()
+    ).strip().upper()
 
     if http_method and not str(command_input.get("method") or "").strip():
         command_input["method"] = http_method
 
     print("[event_build_command_input] final_input=", json.dumps(command_input, ensure_ascii=False))
     return command_input
-
+    
 def _event_mark_ignored(event_record_id: str, message: str) -> Dict[str, Any]:
     return _airtable_update_best_effort(
         EVENTS_TABLE_NAME,
