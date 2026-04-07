@@ -5721,6 +5721,71 @@ def _build_command_fields_candidates(
         or f"evt:{str(event_record_id or '').strip()}:{capability}"
     ).strip()
 
+    flow_id = str(
+        command_input.get("flow_id")
+        or command_input.get("flowId")
+        or command_input.get("flowid")
+        or ""
+    ).strip()
+
+    root_event_id = str(
+        command_input.get("root_event_id")
+        or command_input.get("rootEventId")
+        or command_input.get("rooteventid")
+        or command_input.get("event_id")
+        or command_input.get("eventId")
+        or command_input.get("eventid")
+        or flow_id
+        or str(event_record_id or "").strip()
+        or ""
+    ).strip()
+
+    source_event_id = str(
+        command_input.get("source_event_id")
+        or command_input.get("sourceEventId")
+        or command_input.get("sourceeventid")
+        or command_input.get("event_id")
+        or command_input.get("eventId")
+        or command_input.get("eventid")
+        or root_event_id
+        or flow_id
+        or ""
+    ).strip()
+
+    workspace_value = str(
+        workspace_id
+        or command_input.get("workspace_id")
+        or command_input.get("workspaceId")
+        or command_input.get("workspaceid")
+        or command_input.get("workspace")
+        or ""
+    ).strip()
+
+    parent_command_id = str(
+        command_input.get("parent_command_id")
+        or command_input.get("parentCommandId")
+        or command_input.get("parentcommandid")
+        or ""
+    ).strip()
+
+    linked_run = str(
+        command_input.get("linked_run")
+        or command_input.get("linkedrun")
+        or command_input.get("run_record_id")
+        or command_input.get("runRecordId")
+        or command_input.get("runrecordid")
+        or ""
+    ).strip()
+
+    step_index = _to_int(
+        command_input.get("step_index")
+        if command_input.get("step_index") is not None
+        else command_input.get("stepIndex")
+        if command_input.get("stepIndex") is not None
+        else command_input.get("stepindex"),
+        0,
+    )
+
     url_value = str(
         command_input.get("url")
         or command_input.get("http_target")
@@ -5732,18 +5797,35 @@ def _build_command_fields_candidates(
         command_input.get("method")
         or command_input.get("HTTP_Method")
         or "GET"
-    ).strip().upper()
+    ).strip().upper() or "GET"
+
+    if flow_id:
+        command_input["flow_id"] = flow_id
+    if root_event_id:
+        command_input["root_event_id"] = root_event_id
+    if source_event_id:
+        command_input["source_event_id"] = source_event_id
+        if not str(command_input.get("event_id") or "").strip():
+            command_input["event_id"] = source_event_id
+    if workspace_value:
+        command_input["workspace_id"] = workspace_value
+    if parent_command_id:
+        command_input["parent_command_id"] = parent_command_id
+    if linked_run:
+        command_input["linked_run"] = linked_run
+        if not str(command_input.get("run_record_id") or "").strip():
+            command_input["run_record_id"] = linked_run
 
     if url_value:
-        command_input.setdefault("url", url_value)
-        command_input.setdefault("http_target", url_value)
-        command_input.setdefault("URL", url_value)
+        command_input["url"] = url_value
+        if not str(command_input.get("http_target") or "").strip():
+            command_input["http_target"] = url_value
+        if not str(command_input.get("URL") or "").strip():
+            command_input["URL"] = url_value
 
-    command_input.setdefault("method", method_value)
-    command_input.setdefault("HTTP_Method", method_value)
-
-    if workspace_id:
-        command_input.setdefault("workspace_id", str(workspace_id).strip())
+    command_input["method"] = method_value
+    if not str(command_input.get("HTTP_Method") or "").strip():
+        command_input["HTTP_Method"] = method_value
 
     input_json = json.dumps(command_input, ensure_ascii=False)
 
@@ -5755,45 +5837,74 @@ def _build_command_fields_candidates(
         "Idempotency_Key": idem,
     }
 
-    base_fields: Dict[str, Any] = {
+    rich_fields: Dict[str, Any] = {
         **minimal_fields,
         "http_target": url_value,
         "URL": url_value,
         "HTTP_Method": method_value,
     }
 
+    if workspace_value:
+        rich_fields["Workspace_ID"] = workspace_value
+    if flow_id:
+        rich_fields["Flow_ID"] = flow_id
+    if root_event_id:
+        rich_fields["Root_Event_ID"] = root_event_id
+    if parent_command_id:
+        rich_fields["Parent_Command_ID"] = parent_command_id
+    if step_index is not None:
+        rich_fields["Step_Index"] = step_index
+    if linked_run and linked_run.startswith("rec"):
+        rich_fields["Linked_Run"] = [linked_run]
+
     candidates: List[Dict[str, Any]] = []
 
-    candidates.append(minimal_fields)
+    # richest first
+    candidates.append(dict(rich_fields))
 
-    if workspace_id:
+    if "Linked_Run" in rich_fields:
+        no_linked_run = dict(rich_fields)
+        no_linked_run.pop("Linked_Run", None)
+        candidates.append(no_linked_run)
+
+    if "Parent_Command_ID" in rich_fields or "Step_Index" in rich_fields:
+        no_parent_step = dict(rich_fields)
+        no_parent_step.pop("Parent_Command_ID", None)
+        no_parent_step.pop("Step_Index", None)
+        candidates.append(no_parent_step)
+
+    if workspace_value or flow_id or root_event_id:
+        mid_fields = dict(minimal_fields)
+        if workspace_value:
+            mid_fields["Workspace_ID"] = workspace_value
+        if flow_id:
+            mid_fields["Flow_ID"] = flow_id
+        if root_event_id:
+            mid_fields["Root_Event_ID"] = root_event_id
+        candidates.append(mid_fields)
+
+    if workspace_value:
         candidates.append(
             {
                 **minimal_fields,
-                "Workspace_ID": str(workspace_id).strip(),
+                "Workspace_ID": workspace_value,
             }
         )
 
-    candidates.append(base_fields)
+    candidates.append(dict(minimal_fields))
 
-    if workspace_id:
-        candidates.append(
-            {
-                **base_fields,
-                "Workspace_ID": str(workspace_id).strip(),
-            }
-        )
+    # dedupe exact duplicates while preserving order
+    unique_candidates: List[Dict[str, Any]] = []
+    seen = set()
 
-    if workspace_id and event_record_id:
-        candidates.append(
-            {
-                **base_fields,
-                "Workspace_ID": str(workspace_id).strip(),
-                "Source_Event": [str(event_record_id).strip()],
-            }
-        )
+    for candidate in candidates:
+        signature = json.dumps(candidate, sort_keys=True, ensure_ascii=False)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        unique_candidates.append(candidate)
 
-    return candidates
+    return unique_candidates
     
 def _event_mark_processed(
     event_record_id: str,
