@@ -6558,7 +6558,6 @@ def _command_context_from_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
         "payload_obj": payload_obj if isinstance(payload_obj, dict) else {},
     }
     
-
 def _create_command_from_next_command(
     next_cmd: Dict[str, Any],
     parent_run_id: str,
@@ -6575,16 +6574,14 @@ def _create_command_from_next_command(
         or ""
     ).strip()
 
-    if capability == "httpexec":
-        capability = "http_exec"
-    elif capability == "retryrouter":
-        capability = "retry_router"
-    elif capability == "incidentrouter":
-        capability = "incident_router"
-    elif capability == "decisionrouter":
-        capability = "decision_router"
-    elif capability == "incidentcreate":
-        capability = "incident_create"
+    capability_aliases = {
+        "httpexec": "http_exec",
+        "retryrouter": "retry_router",
+        "incidentrouter": "incident_router",
+        "decisionrouter": "decision_router",
+        "incidentcreate": "incident_create",
+    }
+    capability = capability_aliases.get(capability, capability)
 
     if not capability:
         return {"ok": False, "error": "missing_capability"}
@@ -6610,7 +6607,7 @@ def _create_command_from_next_command(
     command_input = _unwrap_command_payload(command_input)
     command_input = _normalize_flow_keys(command_input)
 
-    priority = int(next_cmd.get("priority") or 1)
+    priority = _to_int(next_cmd.get("priority"), 1)
 
     flow_id, root_event_id = _resolve_flow_context_from_command_input(
         command_input,
@@ -6629,8 +6626,8 @@ def _create_command_from_next_command(
         or ""
     ).strip()
 
-    retry_count = int(command_input.get("retry_count") or 0)
-    step_index = int(command_input.get("step_index") or 0)
+    retry_count = _to_int(command_input.get("retry_count"), 0)
+    step_index = _to_int(command_input.get("step_index"), 0)
 
     effective_workspace_id = str(
         workspace_id
@@ -6650,27 +6647,33 @@ def _create_command_from_next_command(
     if not source_event_id:
         source_event_id = root_event_id or flow_id or parent_run_id
 
+    # ------------------------------------------------------------
+    # Canonical context propagation
+    # ------------------------------------------------------------
     command_input["flow_id"] = flow_id
     command_input["root_event_id"] = root_event_id
     command_input["source_event_id"] = source_event_id
     command_input["event_id"] = source_event_id
 
-    command_input.pop("flowid", None)
-    command_input.pop("rooteventid", None)
-    command_input.pop("eventid", None)
-    command_input.pop("sourceeventid", None)
-
     if parent_command_id:
         command_input["parent_command_id"] = parent_command_id
 
-    if effective_workspace_id and not str(command_input.get("workspace_id") or "").strip():
+    if effective_workspace_id:
         command_input["workspace_id"] = effective_workspace_id
+        command_input["workspace"] = effective_workspace_id
 
     if not str(command_input.get("run_record_id") or "").strip():
         command_input["run_record_id"] = parent_run_id
 
     if not str(command_input.get("linked_run") or "").strip():
         command_input["linked_run"] = parent_run_id
+
+    # remove legacy compact aliases to keep Input_JSON clean
+    command_input.pop("flowid", None)
+    command_input.pop("rooteventid", None)
+    command_input.pop("eventid", None)
+    command_input.pop("sourceeventid", None)
+    command_input.pop("workspaceid", None)
 
     if capability == "http_exec":
         command_input = _normalize_http_exec_input(command_input)
@@ -6685,6 +6688,7 @@ def _create_command_from_next_command(
                 "command_input": command_input,
             }
 
+    # re-assert after capability-specific normalization
     if not str(command_input.get("flow_id") or "").strip():
         command_input["flow_id"] = flow_id or parent_run_id
 
@@ -6724,16 +6728,19 @@ def _create_command_from_next_command(
             "step_index": step_index,
             "workspace_id": effective_workspace_id,
         },
+        flush=True,
     )
 
     existing = find_command_by_idem(effective_idempotency_key)
     if existing:
+        existing_record_id = str(existing.get("id") or "").strip()
+
         print(
             "[worker.spawn] existing_command hit",
             {
                 "capability": capability,
                 "effective_idempotency_key": effective_idempotency_key,
-                "existing_record_id": str(existing.get("id") or "").strip(),
+                "existing_record_id": existing_record_id,
                 "flow_id": flow_id,
                 "root_event_id": root_event_id,
                 "source_event_id": source_event_id,
@@ -6742,11 +6749,13 @@ def _create_command_from_next_command(
                 "step_index": step_index,
                 "workspace_id": effective_workspace_id,
             },
+            flush=True,
         )
+
         return {
             "ok": True,
             "mode": "existing_command",
-            "command_record_id": str(existing.get("id") or "").strip(),
+            "command_record_id": existing_record_id,
             "capability": capability,
             "workspace_id": effective_workspace_id,
             "idempotency_key": effective_idempotency_key,
@@ -6771,6 +6780,7 @@ def _create_command_from_next_command(
             "step_index": step_index,
             "command_input": command_input,
         },
+        flush=True,
     )
 
     candidates = _build_command_fields_candidates(
@@ -6782,7 +6792,7 @@ def _create_command_from_next_command(
         priority=priority,
     )
 
-    print("[worker.spawn] candidates =", candidates)
+    print("[worker.spawn] candidates =", candidates, flush=True)
 
     create_res = _airtable_create_best_effort(COMMANDS_TABLE_NAME, candidates)
     if not create_res.get("ok"):
