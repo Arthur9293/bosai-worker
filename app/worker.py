@@ -2729,40 +2729,40 @@ def _resolve_flow_context_from_event(event_record_id, fields, payload_obj):
         root_event_id = event_record_id
 
     return flow_id, root_event_id
-
 def _resolve_flow_ids(payload: Dict[str, Any]) -> Tuple[str, str]:
     if not isinstance(payload, dict):
         payload = {}
 
     flow_id = str(
         payload.get("flow_id")
-        or payload.get("flowid")
+        or payload.get("source_flow_id")
         or payload.get("flowId")
+        or payload.get("flowid")
         or payload.get("Flow_ID")
         or ""
     ).strip()
 
     root_event_id = str(
         payload.get("root_event_id")
-        or payload.get("rooteventid")
         or payload.get("rootEventId")
+        or payload.get("rooteventid")
         or payload.get("Root_Event_ID")
-        or ""
-    ).strip()
-
-    event_id = str(
-        payload.get("event_id")
-        or payload.get("eventid")
+        or payload.get("event_id")
         or payload.get("eventId")
+        or payload.get("eventid")
         or payload.get("Event_ID")
+        or payload.get("source_event_id")
+        or payload.get("sourceEventId")
+        or payload.get("sourceeventid")
+        or payload.get("Source_Event_ID")
         or ""
     ).strip()
 
-    if not flow_id:
-        flow_id = root_event_id or event_id
+    if not flow_id and root_event_id:
+        flow_id = root_event_id
 
-    if not root_event_id:
-        root_event_id = event_id or flow_id
+    if not root_event_id and flow_id:
+        root_event_id = flow_id
 
     return flow_id, root_event_id
 
