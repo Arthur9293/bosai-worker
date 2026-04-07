@@ -1947,19 +1947,59 @@ def _normalize_keys_deep(value: Any) -> Any:
 
 
 def _sanitize_payload_for_airtable(value: Any) -> Any:
-    normalized = _normalize_keys_deep(value)
+    cleaned = _normalize_keys_deep(value)
 
-    if isinstance(normalized, dict):
-        return {
-            str(k): _sanitize_payload_for_airtable(v)
-            for k, v in normalized.items()
-        }
+    if isinstance(cleaned, dict):
+        cleaned = _unwrap_command_payload(cleaned)
+        cleaned = _normalize_flow_keys(cleaned)
 
-    if isinstance(normalized, list):
-        return [_sanitize_payload_for_airtable(item) for item in normalized]
+        for legacy_key in (
+            "flowid",
+            "flowId",
+            "Flow_ID",
+            "rooteventid",
+            "rootEventId",
+            "Root_Event_ID",
+            "sourceeventid",
+            "sourceEventId",
+            "Source_Event_ID",
+            "eventid",
+            "eventId",
+            "Event_ID",
+            "workspaceid",
+            "workspaceId",
+            "Workspace_ID",
+            "runrecordid",
+            "runRecordId",
+            "Run_Record_ID",
+            "linkedrun",
+            "Linked_Run",
+            "parentcommandid",
+            "parentCommandId",
+            "Parent_Command_ID",
+            "commandid",
+            "commandId",
+            "Command_ID",
+            "stepindex",
+            "stepIndex",
+            "Step_Index",
+            "httptarget",
+            "Http_Target",
+            "HTTP_Target",
+            "httpstatus",
+            "statuscode",
+            "retryreason",
+            "retrycount",
+            "retrymax",
+            "failedurl",
+            "failedmethod",
+            "failedgoal",
+            "originalcapability",
+            "originalinput",
+        ):
+            cleaned.pop(legacy_key, None)
 
-    return normalized
-
+    return cleaned
 
 def _unwrap_command_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
