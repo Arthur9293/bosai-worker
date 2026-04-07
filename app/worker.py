@@ -1999,7 +1999,28 @@ def _sanitize_payload_for_airtable(value: Any) -> Any:
         ):
             cleaned.pop(legacy_key, None)
 
-    return cleaned
+        return {
+            str(k): _sanitize_payload_for_airtable(v)
+            for k, v in cleaned.items()
+        }
+
+    if isinstance(cleaned, list):
+        return [_sanitize_payload_for_airtable(v) for v in cleaned]
+
+    if isinstance(cleaned, tuple):
+        return [_sanitize_payload_for_airtable(v) for v in cleaned]
+
+    if isinstance(cleaned, datetime):
+        return cleaned.isoformat()
+
+    if isinstance(cleaned, (str, int, float, bool)) or cleaned is None:
+        return cleaned
+
+    try:
+        json.dumps(cleaned, ensure_ascii=False)
+        return cleaned
+    except Exception:
+        return str(cleaned)
 
 def _unwrap_command_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
