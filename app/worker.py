@@ -1390,93 +1390,42 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     base: Dict[str, Any] = {}
     parse_errors: List[Dict[str, Any]] = []
 
-    def _try_parse_json_dict(raw_text: str) -> Optional[Dict[str, Any]]:
-        if not raw_text:
-            return None
-
-        candidates: List[str] = []
-
-        candidates.append(raw_text)
-        candidates.append(raw_text.replace('\\"', '"'))
-
-        try:
-            candidates.append(bytes(raw_text, "utf-8").decode("unicode_escape"))
-        except Exception:
-            pass
-
-        candidates.append(raw_text.replace("\\_", "_"))
-        candidates.append(raw_text.replace('\\"', '"').replace("\\_", "_"))
-
-        try:
-            decoded = bytes(raw_text, "utf-8").decode("unicode_escape")
-            candidates.append(decoded.replace("\\_", "_"))
-        except Exception:
-            pass
-
-        seen = set()
-        unique_candidates: List[str] = []
-        for c in candidates:
-            if c not in seen:
-                seen.add(c)
-                unique_candidates.append(c)
-
-        for candidate in unique_candidates:
-            try:
-                obj = json.loads(candidate)
-            except Exception:
+    def _pick(*values: Any) -> str:
+        for value in values:
+            if value is None:
                 continue
 
-            if isinstance(obj, dict):
-                return obj
+            if isinstance(value, list):
+                for item in value:
+                    text = str(item or "").strip()
+                    if text:
+                        return text
+                continue
 
-            if isinstance(obj, str):
-                inner = obj.strip()
-                if not inner:
-                    continue
+            text = str(value or "").strip()
+            if text:
+                return text
+        return ""
 
-                inner_candidates = [
-                    inner,
-                    inner.replace('\\"', '"'),
-                    inner.replace("\\_", "_"),
-                    inner.replace('\\"', '"').replace("\\_", "_"),
-                ]
+    def _merge_if_missing(target: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, Any]:
+        for k, v in source.items():
+            if k not in target or target.get(k) in ("", None, {}, []):
+                target[k] = v
+        return target
 
-                inner_seen = set()
-                for inner_candidate in inner_candidates:
-                    if inner_candidate in inner_seen:
-                        continue
-                    inner_seen.add(inner_candidate)
-
-                    try:
-                        obj2 = json.loads(inner_candidate)
-                    except Exception:
-                        continue
-
-                    if isinstance(obj2, dict):
-                        return obj2
-
-        return None
-
-    for source_key in ("Input_JSON", "Command_JSON", "Command_Input_JSON"):
-        raw_val = fields.get(source_key)
-
+    def _parse_candidate(raw_val: Any, source_key: str) -> Dict[str, Any]:
         if raw_val is None:
-            continue
-
-        parsed: Dict[str, Any] = {}
+            return {}
 
         if isinstance(raw_val, dict):
             parsed = raw_val
         else:
             raw_text = str(raw_val).strip()
             if not raw_text:
-                continue
+                return {}
 
-            parsed_obj = _try_parse_json_dict(raw_text)
-
-            if isinstance(parsed_obj, dict):
-                parsed = parsed_obj
-            else:
+            parsed = _json_load_maybe(raw_text)
+            if not isinstance(parsed, dict) or not parsed:
                 parse_errors.append(
                     {
                         "source": source_key,
@@ -1484,126 +1433,256 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
                         "raw_preview": raw_text[:500],
                     }
                 )
-                continue
-
-        if not isinstance(parsed, dict) or not parsed:
-            continue
+                return {}
 
         parsed = _normalize_keys_deep(parsed)
         parsed = _unwrap_command_payload(parsed)
 
         if isinstance(parsed.get("input"), dict) and parsed.get("input"):
-            base = parsed.get("input") or {}
-        else:
-            base = parsed
+            nested = dict(parsed.get("input") or {})
+            for k, v in parsed.items():
+                if k != "input" and k not in nested:
+                    nested[k] = v
+            parsed = nested
 
-        if isinstance(base, dict) and base:
-            break
+        parsed = _normalize_keys_deep(parsed)
+        parsed = _unwrap_command_payload(parsed)
+        parsed = _normalize_flow_keys(parsed)
+
+        return parsed if isinstance(parsed, dict) else {}
+
+    for source_key in ("Input_JSON", "Command_JSON", "Command_Input_JSON", "Payload_JSON"):
+        candidate = _parse_candidate(fields.get(source_key), source_key)
+        if not candidate:
+            continue
+
+        if not base:
+            base = dict(candidate)
+        else:
+            base = _merge_if_missing(base, candidate)
 
     if not isinstance(base, dict):
         base = {}
 
     base = _normalize_keys_deep(base)
     base = _unwrap_command_payload(base)
-
-    field_alias_map = {
-        "url": ("url", "URL", "http_target", "Http_Target", "httptarget"),
-        "http_target": ("http_target", "Http_Target", "httptarget", "URL", "url"),
-        "method": ("method", "HTTP_Method", "Http_Method", "HTTPMethod"),
-        "headers": ("headers", "HTTP_Headers_JSON"),
-        "body": ("body", "HTTP_Payload_JSON"),
-        "json": ("json", "JSON", "Payload_JSON"),
-        "timeout": ("timeout",),
-
-        "flow_id": ("flow_id", "flowid", "flowId", "Flow_ID"),
-        "event_id": ("event_id", "eventid", "eventId", "Event_ID"),
-        "root_event_id": ("root_event_id", "rooteventid", "rootEventId", "Root_Event_ID"),
-        "step_index": ("step_index", "stepindex", "stepIndex", "Step_Index"),
-        "goal": ("goal", "Goal", "failed_goal", "failedgoal", "Failed_Goal"),
-        "reason": ("reason", "retry_reason", "retryreason", "Reason"),
-        "retry_reason": ("retry_reason", "retryreason", "reason", "Reason"),
-        "retry_count": ("retry_count", "retrycount", "Retry_Count"),
-        "retry_max": ("retry_max", "retrymax", "Retry_Max"),
-        "failed_url": ("failed_url", "failedurl", "Failed_URL"),
-        "failed_method": ("failed_method", "failedmethod", "Failed_Method"),
-        "failed_goal": ("failed_goal", "failedgoal", "Failed_Goal", "goal", "Goal"),
-        "http_status": ("http_status", "httpstatus", "status_code", "statuscode", "HTTP_Status"),
-        "status_code": ("status_code", "statuscode", "http_status", "httpstatus", "HTTP_Status"),
-        "error": ("error", "last_error", "Error"),
-        "original_capability": ("original_capability", "originalcapability", "source_capability"),
-        "workspace_id": ("workspace_id", "workspaceid", "workspaceId", "Workspace_ID"),
-        "run_record_id": ("run_record_id", "runrecordid", "Run_Record_ID"),
-        "target_capability": ("target_capability", "targetcapability"),
-        "original_input": ("original_input", "originalinput"),
-        "request_error": ("request_error", "requesterror"),
-        "error_type": ("error_type", "errortype"),
-        "parent_command_id": ("parent_command_id", "parentcommandid"),
-    }
-
-    for target_key, aliases in field_alias_map.items():
-        if target_key in base and base.get(target_key) not in (None, ""):
-            continue
-
-        for alias in aliases:
-            value = fields.get(alias)
-            if value is not None and str(value).strip() != "":
-                base[target_key] = value
-                break
-
-    if "response" in base and isinstance(base.get("response"), str):
-        response_obj = None
-        try:
-            response_obj = json.loads(base["response"])
-        except Exception:
-            try:
-                response_obj = json.loads(base["response"].replace('\\"', '"'))
-            except Exception:
-                response_obj = None
-
-        if isinstance(response_obj, dict):
-            base["response"] = response_obj
-
-    base = _normalize_keys_deep(base)
-    base = _unwrap_command_payload(base)
     base = _normalize_flow_keys(base)
 
-    # Renfort HTTP
-    if not str(base.get("url") or "").strip():
-        fallback_url = str(
-            base.get("http_target")
-            or base.get("URL")
-            or fields.get("http_target")
-            or fields.get("URL")
-            or fields.get("httptarget")
-            or ""
-        ).strip()
-        if fallback_url:
-            base["url"] = fallback_url
+    flow_id = _pick(
+        base.get("flow_id"),
+        fields.get("Flow_ID"),
+        fields.get("flow_id"),
+        fields.get("flowid"),
+    )
 
-    if not str(base.get("http_target") or "").strip():
-        fallback_http_target = str(
-            base.get("url")
-            or base.get("URL")
-            or fields.get("http_target")
-            or fields.get("URL")
-            or fields.get("httptarget")
-            or ""
-        ).strip()
-        if fallback_http_target:
-            base["http_target"] = fallback_http_target
+    root_event_id = _pick(
+        base.get("root_event_id"),
+        base.get("event_id"),
+        fields.get("Root_Event_ID"),
+        fields.get("root_event_id"),
+        fields.get("rooteventid"),
+        fields.get("Event_ID"),
+        fields.get("event_id"),
+        flow_id,
+    )
 
-    if not str(base.get("method") or "").strip():
-        fallback_method = str(
-            base.get("HTTP_Method")
-            or base.get("HTTPMethod")
-            or fields.get("HTTP_Method")
-            or fields.get("HTTPMethod")
-            or "GET"
-        ).strip().upper()
-        base["method"] = fallback_method or "GET"
+    source_event_id = _pick(
+        base.get("source_event_id"),
+        base.get("event_id"),
+        fields.get("Source_Event_ID"),
+        fields.get("source_event_id"),
+        fields.get("sourceeventid"),
+        fields.get("Event_ID"),
+        fields.get("event_id"),
+        root_event_id,
+        flow_id,
+    )
 
-    if base.get("step_index") in (None, ""):
-        base["step_index"] = 0
+    workspace_id = _pick(
+        base.get("workspace_id"),
+        base.get("workspace"),
+        fields.get("Workspace_ID"),
+        fields.get("workspace_id"),
+        fields.get("workspaceid"),
+        "production",
+    )
+
+    run_record_id = _pick(
+        base.get("run_record_id"),
+        base.get("linked_run"),
+        fields.get("Run_Record_ID"),
+        fields.get("run_record_id"),
+        fields.get("Linked_Run"),
+    )
+
+    linked_run = _pick(
+        base.get("linked_run"),
+        base.get("run_record_id"),
+        fields.get("Linked_Run"),
+        fields.get("Run_Record_ID"),
+    )
+
+    parent_command_id = _pick(
+        base.get("parent_command_id"),
+        fields.get("Parent_Command_ID"),
+        fields.get("parent_command_id"),
+        fields.get("parentcommandid"),
+    )
+
+    command_id = _pick(
+        base.get("command_id"),
+        fields.get("Command_ID"),
+        fields.get("command_id"),
+        fields.get("commandid"),
+    )
+
+    step_index = _to_int(
+        base.get("step_index")
+        if base.get("step_index") is not None
+        else fields.get("Step_Index")
+        if fields.get("Step_Index") is not None
+        else fields.get("step_index")
+        if fields.get("step_index") is not None
+        else fields.get("stepindex"),
+        0,
+    )
+
+    depth = _to_int(
+        base.get("_depth")
+        if base.get("_depth") is not None
+        else base.get("depth")
+        if base.get("depth") is not None
+        else fields.get("_depth")
+        if fields.get("_depth") is not None
+        else fields.get("Depth"),
+        0,
+    )
+
+    url_value = _pick(
+        base.get("url"),
+        base.get("http_target"),
+        base.get("target_url"),
+        fields.get("http_target"),
+        fields.get("Http_Target"),
+        fields.get("URL"),
+        fields.get("url"),
+        base.get("failed_url"),
+    )
+
+    method_value = _pick(
+        base.get("method"),
+        fields.get("HTTP_Method"),
+        fields.get("Http_Method"),
+        fields.get("method"),
+        base.get("failed_method"),
+        "GET",
+    ).upper()
+
+    if not method_value:
+        method_value = "GET"
+
+    headers_obj = base.get("headers")
+    if not isinstance(headers_obj, dict):
+        headers_obj = _json_load_maybe(fields.get("HTTP_Headers_JSON"))
+
+    json_obj = base.get("json")
+    if not isinstance(json_obj, dict):
+        json_obj = _json_load_maybe(fields.get("JSON"))
+        if not json_obj:
+            json_obj = _json_load_maybe(fields.get("Payload_JSON"))
+
+    body_obj = base.get("body")
+    if not isinstance(body_obj, dict):
+        body_obj = _json_load_maybe(fields.get("HTTP_Payload_JSON"))
+
+    request_obj = base.get("request")
+    if not isinstance(request_obj, dict):
+        request_obj = _json_load_maybe(fields.get("Request_JSON"))
+
+    response_obj = base.get("response")
+    if not isinstance(response_obj, dict):
+        response_obj = _json_load_maybe(fields.get("Response_JSON"))
+
+    base["flow_id"] = flow_id
+    base["root_event_id"] = root_event_id
+    base["source_event_id"] = source_event_id
+    base["event_id"] = source_event_id or root_event_id or flow_id
+    base["workspace_id"] = workspace_id
+    base["workspace"] = workspace_id
+    base["run_record_id"] = run_record_id
+    base["linked_run"] = linked_run or run_record_id
+    base["parent_command_id"] = parent_command_id
+    base["command_id"] = command_id
+    base["step_index"] = step_index
+    base["_depth"] = depth
+    base["method"] = method_value
+
+    if url_value:
+        base["url"] = url_value
+        base["http_target"] = url_value
+        if not _pick(base.get("target_url")):
+            base["target_url"] = url_value
+
+    if headers_obj:
+        base["headers"] = headers_obj
+
+    if json_obj:
+        base["json"] = json_obj
+
+    if body_obj:
+        base["body"] = body_obj
+
+    if request_obj:
+        base["request"] = request_obj
+
+    if response_obj:
+        base["response"] = response_obj
+
+    if not _pick(base.get("failed_method")):
+        base["failed_method"] = method_value
+
+    if url_value and not _pick(base.get("failed_url")):
+        base["failed_url"] = url_value
+
+    # nettoyage des alias compacts / legacy
+    for legacy_key in (
+        "flowid",
+        "flowId",
+        "Flow_ID",
+        "rooteventid",
+        "rootEventId",
+        "Root_Event_ID",
+        "sourceeventid",
+        "sourceEventId",
+        "Source_Event_ID",
+        "eventid",
+        "eventId",
+        "Event_ID",
+        "workspaceid",
+        "workspaceId",
+        "Workspace_ID",
+        "runrecordid",
+        "runRecordId",
+        "Run_Record_ID",
+        "linkedrun",
+        "Linked_Run",
+        "parentcommandid",
+        "parentCommandId",
+        "Parent_Command_ID",
+        "commandid",
+        "commandId",
+        "Command_ID",
+        "stepindex",
+        "stepIndex",
+        "Step_Index",
+        "depth",
+        "httptarget",
+        "Http_Target",
+        "HTTP_Target",
+        "HTTPMethod",
+        "Http_Method",
+    ):
+        base.pop(legacy_key, None)
 
     if parse_errors:
         print(f"[compose_command_input] parse_errors={json.dumps(parse_errors, ensure_ascii=False)}")
