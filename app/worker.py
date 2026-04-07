@@ -1257,6 +1257,9 @@ def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
         or normalized.get("sourceeventid")
         or normalized.get("sourceEventId")
         or normalized.get("Source_Event_ID")
+        or normalized.get("SourceEventId")
+        or event_id
+        or root_event_id
         or ""
     ).strip()
 
@@ -1266,6 +1269,33 @@ def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
         or normalized.get("workspaceId")
         or normalized.get("Workspace_ID")
         or normalized.get("workspace")
+        or ""
+    ).strip()
+
+    run_record_id = str(
+        normalized.get("run_record_id")
+        or normalized.get("runrecordid")
+        or normalized.get("runRecordId")
+        or normalized.get("Run_Record_ID")
+        or normalized.get("linked_run")
+        or normalized.get("linkedrun")
+        or normalized.get("Linked_Run")
+        or ""
+    ).strip()
+
+    parent_command_id = str(
+        normalized.get("parent_command_id")
+        or normalized.get("parentcommandid")
+        or normalized.get("parentCommandId")
+        or normalized.get("Parent_Command_ID")
+        or ""
+    ).strip()
+
+    command_id = str(
+        normalized.get("command_id")
+        or normalized.get("commandid")
+        or normalized.get("commandId")
+        or normalized.get("Command_ID")
         or ""
     ).strip()
 
@@ -1294,24 +1324,23 @@ def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         step_index = 0
 
-    # flow_id: fallback root -> event
-    if not flow_id:
-        flow_id = root_event_id or event_id
+    # ---------------------------------
+    # canonical values
+    # ---------------------------------
+    if not root_event_id and event_id:
+        root_event_id = event_id
 
-    # root_event_id: fallback event -> flow
-    if not root_event_id:
-        root_event_id = event_id or flow_id
-
-    # source_event_id: fallback event -> root -> flow
     if not source_event_id:
-        source_event_id = event_id or root_event_id or flow_id
+        source_event_id = event_id or root_event_id
 
-    # event_id: keep explicit value; fallback only if absent
     if not event_id:
         event_id = source_event_id or root_event_id
 
     if flow_id:
         normalized["flow_id"] = flow_id
+
+    if event_id:
+        normalized["event_id"] = event_id
 
     if root_event_id:
         normalized["root_event_id"] = root_event_id
@@ -1319,46 +1348,66 @@ def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
     if source_event_id:
         normalized["source_event_id"] = source_event_id
 
-    if event_id:
-        normalized["event_id"] = event_id
-
     if workspace_id:
         normalized["workspace_id"] = workspace_id
         normalized["workspace"] = workspace_id
+
+    if run_record_id:
+        normalized["run_record_id"] = run_record_id
+        normalized["linked_run"] = run_record_id
+
+    if parent_command_id:
+        normalized["parent_command_id"] = parent_command_id
+
+    if command_id:
+        normalized["command_id"] = command_id
 
     if goal:
         normalized["goal"] = goal
 
     normalized["step_index"] = step_index
 
-    # remove legacy aliases
-    normalized.pop("flowid", None)
-    normalized.pop("flowId", None)
-    normalized.pop("Flow_ID", None)
-    normalized.pop("FlowId", None)
-
-    normalized.pop("eventid", None)
-    normalized.pop("eventId", None)
-    normalized.pop("Event_ID", None)
-
-    normalized.pop("rooteventid", None)
-    normalized.pop("rootEventId", None)
-    normalized.pop("root_eventid", None)
-    normalized.pop("Root_Event_ID", None)
-    normalized.pop("RootEventId", None)
-
-    normalized.pop("sourceeventid", None)
-    normalized.pop("sourceEventId", None)
-    normalized.pop("Source_Event_ID", None)
-
-    normalized.pop("workspaceid", None)
-    normalized.pop("workspaceId", None)
-    normalized.pop("Workspace_ID", None)
-
-    normalized.pop("stepindex", None)
-    normalized.pop("stepIndex", None)
-    normalized.pop("Step_Index", None)
-    normalized.pop("StepIndex", None)
+    # ---------------------------------
+    # cleanup legacy aliases
+    # ---------------------------------
+    for legacy_key in (
+        "flowid",
+        "flowId",
+        "Flow_ID",
+        "FlowId",
+        "eventid",
+        "eventId",
+        "Event_ID",
+        "rooteventid",
+        "rootEventId",
+        "root_eventid",
+        "Root_Event_ID",
+        "RootEventId",
+        "sourceeventid",
+        "sourceEventId",
+        "Source_Event_ID",
+        "SourceEventId",
+        "workspaceid",
+        "workspaceId",
+        "Workspace_ID",
+        "runrecordid",
+        "runRecordId",
+        "Run_Record_ID",
+        "linkedrun",
+        "Linked_Run",
+        "parentcommandid",
+        "parentCommandId",
+        "Parent_Command_ID",
+        "commandid",
+        "commandId",
+        "Command_ID",
+        "stepindex",
+        "stepIndex",
+        "Step_Index",
+        "StepIndex",
+        "Goal",
+    ):
+        normalized.pop(legacy_key, None)
 
     return normalized
 
