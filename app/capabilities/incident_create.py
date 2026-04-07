@@ -425,7 +425,7 @@ def _pick_capability(*values: Any, fallback: str = "") -> str:
         if text not in ORCHESTRATION_CAPABILITIES:
             return text
 
-    return first_non_empty or first_non_empty
+    return fallback or first_non_empty
 
 
 def _extract_input(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -556,15 +556,144 @@ def _build_incident_name(data: Dict[str, Any]) -> str:
 def _normalize_decision_block(data: Dict[str, Any]) -> Dict[str, Any]:
     decision_status = _pick_text(
         data.get("decision_status"),
-        "Monitor",
+        data.get("decisionstatus"),
     )
-    decision_reason = _pick_text(data.get("decision_reason"))
+
+    decision_reason = _pick_text(
+        data.get("decision_reason"),
+        data.get("decisionreason"),
+    )
+
     next_action = _pick_text(
         data.get("next_action"),
-        "complete_flow_incident",
+        data.get("nextaction"),
     )
-    auto_executable = _to_bool(data.get("auto_executable"), False)
-    priority_score = _to_int(data.get("priority_score"), 10)
+
+    auto_executable = _to_bool(
+        data.get("auto_executable")
+        if data.get("auto_executable") is not None
+        else data.get("autoexecutable"),
+        False,
+    )
+
+    priority_score = _to_int(
+        data.get("priority_score")
+        if data.get("priority_score") is not None
+        else data.get("priorityscore"),
+        0,
+    )
+
+    severity = _pick_text(data.get("severity")).lower()
+    category = _pick_text(data.get("category")).lower()
+    reason = _pick_text(
+        data.get("retry_reason"),
+        data.get("incident_code"),
+        data.get("reason"),
+    ).lower()
+    sla_status = _pick_text(data.get("sla_status")).lower()
+
+    response_obj = data.get("response") if isinstance(data.get("response"), dict) else {}
+
+    http_status = _pick_int(
+        data.get("http_status"),
+        data.get("httpstatus"),
+        data.get("status_code"),
+        data.get("statuscode"),
+        response_obj.get("status_code"),
+    )
+
+    input_final_failure = _to_bool(
+        data.get("final_failure")
+        if data.get("final_failure") is not None
+        else data.get("finalfailure"),
+        False,
+    )
+
+    severe_http_failure = (
+        category == "http_failure"
+        or reason in {
+            "http_5xx_exhausted",
+            "http_status_error",
+            "forbidden_host",
+            "retry_exhausted",
+            "retry_limit_reached",
+        }
+        or (http_status is not None and http_status >= 500)
+        or severity in {"high", "critical"}
+        or sla_status == "breached"
+    )
+
+    normalized_final_failure = input_final_failure or severe_http_failure
+
+    if not decision_status:
+        if next_action == "internal_escalate":
+            decision_status = "Escalate"
+            if not decision_reason:
+                decision_reason = "explicit_internal_escalate"
+
+        elif next_action == "resolve_incident":
+            decision_status = "Resolved"
+            if not decision_reason:
+                decision_reason = "explicit_resolve_incident"
+
+        elif severe_http_failure:
+            decision_status = "Escalate"
+            next_action = "internal_escalate"
+            auto_executable = True
+            if not decision_reason:
+                decision_reason = "escalate_failure_or_severe_signal"
+
+        elif (
+            not normalized_final_failure
+            and severity in {"low", "medium"}
+            and sla_status != "breached"
+            and (http_status is None or http_status < 500)
+        ):
+            decision_status = "Resolved"
+            next_action = "resolve_incident"
+            auto_executable = True
+            if not decision_reason:
+                decision_reason = "auto_resolve_non_final_low_or_medium"
+
+        elif severity == "low":
+            decision_status = "No_Action"
+            if not next_action:
+                next_action = "complete_flow_incident"
+            if not decision_reason:
+                decision_reason = "low_severity_no_action"
+
+        else:
+            decision_status = "Monitor"
+            if not next_action:
+                next_action = "complete_flow_incident"
+            if not decision_reason:
+                decision_reason = "default_monitor"
+
+    normalized_decision_status = decision_status.strip().lower()
+
+    if not next_action:
+        if normalized_decision_status in {"escalate", "escalated"}:
+            next_action = "internal_escalate"
+        elif normalized_decision_status in {"resolved", "resolve"}:
+            next_action = "resolve_incident"
+        else:
+            next_action = "complete_flow_incident"
+
+    if not auto_executable and next_action in {"internal_escalate", "resolve_incident"}:
+        auto_executable = True
+
+    if priority_score <= 0:
+        if next_action == "internal_escalate":
+            if severity == "critical" or sla_status == "breached":
+                priority_score = 95
+            elif severity == "high" or (http_status is not None and http_status >= 500):
+                priority_score = 80
+            else:
+                priority_score = 70
+        elif next_action == "resolve_incident":
+            priority_score = 20
+        else:
+            priority_score = 10
 
     return {
         "decision_status": decision_status,
@@ -572,6 +701,7 @@ def _normalize_decision_block(data: Dict[str, Any]) -> Dict[str, Any]:
         "next_action": next_action,
         "auto_executable": auto_executable,
         "priority_score": priority_score,
+        "normalized_final_failure": normalized_final_failure,
     }
 
 
@@ -606,33 +736,52 @@ def _canonical_incident_context(
     decision_block: Dict[str, Any],
     incident_record_id: str = "",
 ) -> Dict[str, Any]:
-    request_obj = data.get("request") if isinstance(data.get("request"), dict) else {}
-    response_obj = data.get("response") if isinstance(data.get("response"), dict) else {}
     original_input = data.get("original_input") if isinstance(data.get("original_input"), dict) else {}
-
     original_input = _normalize_keys_deep(original_input)
     original_input = _unwrap_command_payload(original_input)
     original_input = _normalize_flow_keys(original_input)
 
+    request_obj = data.get("request") if isinstance(data.get("request"), dict) else {}
+    if not request_obj:
+        request_obj = original_input.get("request") if isinstance(original_input.get("request"), dict) else {}
+
+    response_obj = data.get("response") if isinstance(data.get("response"), dict) else {}
+    if not response_obj:
+        response_obj = original_input.get("response") if isinstance(original_input.get("response"), dict) else {}
+
     flow_id = _pick_text(
         meta.get("flow_id"),
         data.get("flow_id"),
+        data.get("flowid"),
+        data.get("flowId"),
         original_input.get("flow_id"),
+        meta.get("root_event_id"),
+        meta.get("source_event_id"),
+        runtime_run_record_id and f"flow_run_{runtime_run_record_id}",
     )
 
     root_event_id = _pick_text(
         meta.get("root_event_id"),
         data.get("root_event_id"),
+        data.get("rooteventid"),
+        data.get("rootEventId"),
         data.get("event_id"),
+        data.get("eventid"),
+        data.get("eventId"),
         original_input.get("root_event_id"),
         original_input.get("event_id"),
+        meta.get("source_event_id"),
         flow_id,
     )
 
     source_event_id = _pick_text(
         meta.get("source_event_id"),
         data.get("source_event_id"),
+        data.get("sourceeventid"),
+        data.get("sourceEventId"),
         data.get("event_id"),
+        data.get("eventid"),
+        data.get("eventId"),
         original_input.get("source_event_id"),
         original_input.get("event_id"),
         root_event_id,
@@ -642,32 +791,37 @@ def _canonical_incident_context(
     workspace_id = _pick_text(
         meta.get("workspace_id"),
         data.get("workspace_id"),
+        data.get("workspaceid"),
+        data.get("workspaceId"),
         data.get("workspace"),
         original_input.get("workspace_id"),
         "production",
     )
 
-    # priorité au run hérité
     run_record_id = _pick_text(
         meta.get("run_record_id"),
         meta.get("linked_run"),
         data.get("run_record_id"),
+        data.get("runrecordid"),
         data.get("linked_run"),
+        data.get("linkedrun"),
         original_input.get("run_record_id"),
         original_input.get("linked_run"),
         runtime_run_record_id,
     )
 
     linked_run = _pick_text(
-        data.get("linked_run"),
-        original_input.get("linked_run"),
         meta.get("linked_run"),
+        data.get("linked_run"),
+        data.get("linkedrun"),
+        original_input.get("linked_run"),
         run_record_id,
     )
 
     target_url = _pick_text(
         data.get("failed_url"),
         data.get("target_url"),
+        data.get("targeturl"),
         data.get("url"),
         data.get("http_target"),
         original_input.get("failed_url"),
@@ -715,15 +869,92 @@ def _canonical_incident_context(
 
     http_status = _pick_int(
         data.get("http_status"),
+        data.get("httpstatus"),
         data.get("status_code"),
+        data.get("statuscode"),
+        original_input.get("http_status"),
+        original_input.get("status_code"),
         response_obj.get("status_code"),
     )
 
     status_code = _pick_int(
         data.get("status_code"),
+        data.get("statuscode"),
         data.get("http_status"),
+        data.get("httpstatus"),
+        original_input.get("status_code"),
+        original_input.get("http_status"),
         response_obj.get("status_code"),
+        http_status,
     )
+
+    category = _pick_text(
+        data.get("category"),
+        original_input.get("category"),
+        "http_failure" if target_url else "",
+    )
+
+    reason = _pick_text(
+        data.get("retry_reason"),
+        original_input.get("retry_reason"),
+        data.get("incident_code"),
+        original_input.get("incident_code"),
+        data.get("reason"),
+        original_input.get("reason"),
+        data.get("error"),
+        original_input.get("error"),
+        "incident",
+    )
+
+    severity = _pick_text(
+        data.get("severity"),
+        original_input.get("severity"),
+        "high" if http_status is not None and http_status >= 500 else "",
+    )
+
+    incident_code = _pick_text(
+        data.get("incident_code"),
+        data.get("incidentcode"),
+        original_input.get("incident_code"),
+        original_input.get("incidentcode"),
+        data.get("retry_reason"),
+        original_input.get("retry_reason"),
+        data.get("reason"),
+        "http_status_error",
+    )
+
+    error = _pick_text(
+        data.get("error"),
+        data.get("error_message"),
+        original_input.get("error"),
+        original_input.get("error_message"),
+    )
+
+    error_message = _pick_text(
+        data.get("error_message"),
+        data.get("incident_message"),
+        original_input.get("error_message"),
+        original_input.get("incident_message"),
+        data.get("error"),
+        original_input.get("error"),
+    )
+
+    normalized_final_failure = _to_bool(
+        data.get("final_failure")
+        if data.get("final_failure") is not None
+        else original_input.get("final_failure")
+        if original_input.get("final_failure") is not None
+        else decision_block.get("normalized_final_failure"),
+        False,
+    )
+
+    if not normalized_final_failure:
+        if (
+            (http_status is not None and http_status >= 500)
+            or reason in {"http_status_error", "http_5xx_exhausted", "retry_exhausted", "retry_limit_reached"}
+            or category == "http_failure"
+        ):
+            normalized_final_failure = True
 
     base = _strip_runtime_keys(data)
 
@@ -742,10 +973,14 @@ def _canonical_incident_context(
         "parent_command_id": _pick_text(
             meta.get("parent_command_id"),
             data.get("parent_command_id"),
+            data.get("parentcommandid"),
+            original_input.get("parent_command_id"),
         ),
         "command_id": _pick_text(
             meta.get("command_id"),
             data.get("command_id"),
+            data.get("commandid"),
+            original_input.get("command_id"),
         ),
         "step_index": next_step_index,
         "_depth": next_depth,
@@ -754,15 +989,10 @@ def _canonical_incident_context(
         "next_action": decision_block["next_action"],
         "auto_executable": decision_block["auto_executable"],
         "priority_score": decision_block["priority_score"],
-        "category": _pick_text(data.get("category"), original_input.get("category")),
-        "reason": _pick_text(data.get("reason"), original_input.get("reason")),
-        "severity": _pick_text(data.get("severity"), original_input.get("severity")),
-        "final_failure": _to_bool(
-            data.get("final_failure")
-            if data.get("final_failure") is not None
-            else original_input.get("final_failure"),
-            False,
-        ),
+        "category": category,
+        "reason": reason,
+        "severity": severity,
+        "final_failure": normalized_final_failure,
         "original_capability": original_capability,
         "failed_capability": failed_capability,
         "source_capability": source_capability,
@@ -774,23 +1004,29 @@ def _canonical_incident_context(
         "http_target": target_url,
         "http_status": http_status,
         "status_code": status_code,
-        "incident_code": _pick_text(
-            data.get("incident_code"),
-            original_input.get("incident_code"),
-        ),
+        "incident_code": incident_code,
         "goal": _pick_text(
             data.get("goal"),
             data.get("failed_goal"),
             original_input.get("goal"),
             original_input.get("failed_goal"),
         ),
-        "error": _pick_text(data.get("error"), original_input.get("error")),
-        "error_message": _pick_text(data.get("error_message"), original_input.get("error_message")),
-        "incident_message": _pick_text(data.get("incident_message"), original_input.get("incident_message")),
+        "error": error,
+        "error_message": error_message,
+        "incident_message": _pick_text(
+            data.get("incident_message"),
+            original_input.get("incident_message"),
+            error_message,
+            error,
+        ),
         "request": request_obj,
         "response": response_obj,
         "original_input": original_input,
-        "retry_reason": _pick_text(data.get("retry_reason"), original_input.get("retry_reason")),
+        "retry_reason": _pick_text(
+            data.get("retry_reason"),
+            original_input.get("retry_reason"),
+            reason,
+        ),
         "retry_count": _to_int(
             data.get("retry_count")
             if data.get("retry_count") is not None
@@ -1033,7 +1269,6 @@ def run(
     source_event_id = _pick_text(meta.get("source_event_id"), root_event_id)
     workspace_id = _pick_text(meta.get("workspace_id"), "production")
 
-    # PATCH: priorité au run hérité, pas au run local de la capability
     effective_run_record_id = _pick_text(
         meta.get("run_record_id"),
         meta.get("linked_run"),
@@ -1124,7 +1359,6 @@ def run(
     except Exception as e:
         print("[incident_create] endpoint link error =", repr(e), flush=True)
 
-    # le prochain parent doit être la commande courante si présente
     next_parent_command_id = _pick_text(current_command_id, parent_command_id)
 
     next_input = _build_next_input(
