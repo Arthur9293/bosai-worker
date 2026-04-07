@@ -425,7 +425,7 @@ def _pick_capability(*values: Any, fallback: str = "") -> str:
         if text not in ORCHESTRATION_CAPABILITIES:
             return text
 
-    return first_non_empty or fallback
+    return first_non_empty or first_non_empty
 
 
 def _extract_input(payload: Dict[str, Any]) -> Dict[str, Any]:
