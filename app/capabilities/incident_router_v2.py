@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from typing import Any, Dict, Optional
 
@@ -45,6 +46,50 @@ def _to_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def _pick_text(*values: Any) -> str:
+    for value in values:
+        if value is None:
+            continue
+
+        if isinstance(value, list):
+            for item in value:
+                text = _pick_text(item)
+                if text:
+                    return text
+            continue
+
+        if isinstance(value, dict):
+            for key in (
+                "id",
+                "name",
+                "value",
+                "text",
+                "url",
+                "method",
+                "status_code",
+                "flow_id",
+                "root_event_id",
+                "source_event_id",
+                "event_id",
+                "workspace_id",
+                "run_record_id",
+                "linked_run",
+                "command_id",
+                "parent_command_id",
+            ):
+                if key in value:
+                    text = _pick_text(value.get(key))
+                    if text:
+                        return text
+            continue
+
+        text = str(value).strip()
+        if text:
+            return text
+
+    return ""
+
+
 def _extract_input(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
@@ -60,89 +105,178 @@ def _extract_input(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        payload = {}
+
+    original_input = payload.get("original_input")
+    if not isinstance(original_input, dict):
+        original_input = {}
+
+    flow_id = _pick_text(
+        payload.get("flow_id"),
+        payload.get("flowid"),
+        payload.get("flowId"),
+        original_input.get("flow_id"),
+        original_input.get("flowid"),
+        original_input.get("flowId"),
+    )
+
+    root_event_id = _pick_text(
+        payload.get("root_event_id"),
+        payload.get("rooteventid"),
+        payload.get("rootEventId"),
+        original_input.get("root_event_id"),
+        original_input.get("rooteventid"),
+        original_input.get("rootEventId"),
+        payload.get("event_id"),
+        payload.get("eventid"),
+        payload.get("eventId"),
+        original_input.get("event_id"),
+        original_input.get("eventid"),
+        original_input.get("eventId"),
+        payload.get("id"),
+    )
+
+    source_event_id = _pick_text(
+        payload.get("source_event_id"),
+        payload.get("sourceeventid"),
+        payload.get("sourceEventId"),
+        original_input.get("source_event_id"),
+        original_input.get("sourceeventid"),
+        original_input.get("sourceEventId"),
+        payload.get("event_id"),
+        payload.get("eventid"),
+        payload.get("eventId"),
+        original_input.get("event_id"),
+        original_input.get("eventid"),
+        original_input.get("eventId"),
+        root_event_id,
+        flow_id,
+    )
+
+    run_record_id = _pick_text(
+        payload.get("run_record_id"),
+        payload.get("runrecordid"),
+        payload.get("runRecordId"),
+        payload.get("linked_run"),
+        payload.get("linkedrun"),
+        payload.get("Linked_Run"),
+        original_input.get("run_record_id"),
+        original_input.get("runrecordid"),
+        original_input.get("runRecordId"),
+        original_input.get("linked_run"),
+        original_input.get("linkedrun"),
+        original_input.get("Linked_Run"),
+        payload.get("run_id"),
+        payload.get("runid"),
+        payload.get("runId"),
+    )
+
+    linked_run = _pick_text(
+        payload.get("linked_run"),
+        payload.get("linkedrun"),
+        payload.get("Linked_Run"),
+        original_input.get("linked_run"),
+        original_input.get("linkedrun"),
+        original_input.get("Linked_Run"),
+        run_record_id,
+    )
+
+    command_id = _pick_text(
+        payload.get("command_id"),
+        payload.get("commandid"),
+        payload.get("commandId"),
+        original_input.get("command_id"),
+        original_input.get("commandid"),
+        original_input.get("commandId"),
+    )
+
+    parent_command_id = _pick_text(
+        payload.get("parent_command_id"),
+        payload.get("parentcommandid"),
+        payload.get("parentCommandId"),
+        original_input.get("parent_command_id"),
+        original_input.get("parentcommandid"),
+        original_input.get("parentCommandId"),
+        command_id,
+    )
+
+    workspace_id = _pick_text(
+        payload.get("workspace_id"),
+        payload.get("workspaceid"),
+        payload.get("workspaceId"),
+        payload.get("workspace"),
+        original_input.get("workspace_id"),
+        original_input.get("workspaceid"),
+        original_input.get("workspaceId"),
+        original_input.get("workspace"),
+        "production",
+    )
+
+    tenant_id = _pick_text(
+        payload.get("tenant_id"),
+        payload.get("tenantid"),
+        payload.get("tenantId"),
+        original_input.get("tenant_id"),
+        original_input.get("tenantid"),
+        original_input.get("tenantId"),
+    )
+
+    app_name = _pick_text(
+        payload.get("app_name"),
+        payload.get("appname"),
+        payload.get("appName"),
+        original_input.get("app_name"),
+        original_input.get("appname"),
+        original_input.get("appName"),
+        "bosai-worker",
+    )
+
+    step_index = _to_int(
+        payload.get("step_index")
+        if payload.get("step_index") is not None
+        else payload.get("stepindex")
+        if payload.get("stepindex") is not None
+        else payload.get("stepIndex")
+        if payload.get("stepIndex") is not None
+        else original_input.get("step_index")
+        if original_input.get("step_index") is not None
+        else original_input.get("stepindex")
+        if original_input.get("stepindex") is not None
+        else original_input.get("stepIndex"),
+        0,
+    )
+
+    depth = _to_int(
+        payload.get("_depth")
+        if payload.get("_depth") is not None
+        else payload.get("depth")
+        if payload.get("depth") is not None
+        else original_input.get("_depth")
+        if original_input.get("_depth") is not None
+        else original_input.get("depth"),
+        0,
+    )
+
     return {
-        "flow_id": _to_str(
-            payload.get("flow_id")
-            or payload.get("flowid")
-            or payload.get("flowId")
-            or ""
-        ).strip(),
-        "root_event_id": _to_str(
-            payload.get("root_event_id")
-            or payload.get("rooteventid")
-            or payload.get("rootEventId")
-            or payload.get("event_id")
-            or payload.get("eventid")
-            or payload.get("eventId")
-            or payload.get("id")
-            or ""
-        ).strip(),
-        "run_record_id": _to_str(
-            payload.get("run_record_id")
-            or payload.get("runrecordid")
-            or payload.get("runRecordId")
-            or payload.get("linked_run")
-            or payload.get("Linked_Run")
-            or payload.get("run_id")
-            or payload.get("runid")
-            or payload.get("runId")
-            or ""
-        ).strip(),
-        "command_id": _to_str(
-            payload.get("command_id")
-            or payload.get("commandid")
-            or payload.get("commandId")
-            or ""
-        ).strip(),
-        "parent_command_id": _to_str(
-            payload.get("parent_command_id")
-            or payload.get("parentcommandid")
-            or payload.get("parentCommandId")
-            or payload.get("command_id")
-            or payload.get("commandid")
-            or payload.get("commandId")
-            or ""
-        ).strip(),
-        "workspace_id": _to_str(
-            payload.get("workspace_id")
-            or payload.get("workspaceid")
-            or payload.get("workspaceId")
-            or payload.get("workspace")
-            or "production"
-        ).strip(),
-        "tenant_id": _to_str(
-            payload.get("tenant_id")
-            or payload.get("tenantid")
-            or payload.get("tenantId")
-            or ""
-        ).strip(),
-        "app_name": _to_str(
-            payload.get("app_name")
-            or payload.get("appname")
-            or payload.get("appName")
-            or "bosai-worker"
-        ).strip(),
-        "step_index": _to_int(
-            payload.get("step_index")
-            if payload.get("step_index") is not None
-            else payload.get("stepindex")
-            if payload.get("stepindex") is not None
-            else payload.get("stepIndex"),
-            0,
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "source_event_id": source_event_id,
+        "run_record_id": run_record_id,
+        "linked_run": linked_run or run_record_id,
+        "command_id": command_id,
+        "parent_command_id": parent_command_id,
+        "workspace_id": workspace_id or "production",
+        "tenant_id": tenant_id,
+        "app_name": app_name or "bosai-worker",
+        "step_index": step_index,
+        "depth": depth,
+        "source": _pick_text(
+            payload.get("source"),
+            payload.get("Source"),
+            original_input.get("source"),
+            "incident_router_v2",
         ),
-        "depth": _to_int(
-            payload.get("_depth")
-            if payload.get("_depth") is not None
-            else payload.get("depth")
-            if payload.get("depth") is not None
-            else 0,
-            0,
-        ),
-        "source": _to_str(
-            payload.get("source")
-            or payload.get("Source")
-            or "incident_router_v2"
-        ).strip(),
     }
 
 
@@ -408,6 +542,16 @@ def run(
     **kwargs: Any,
 ) -> Dict[str, Any]:
     payload = getattr(req, "input", {}) if hasattr(req, "input") else req or {}
+
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            payload = {}
+
+    if not isinstance(payload, dict):
+        payload = {}
+
     data = _extract_input(payload)
     meta = _extract_meta(data)
 
@@ -419,7 +563,9 @@ def run(
             "error": "max_depth_reached",
             "flow_id": meta.get("flow_id", ""),
             "root_event_id": meta.get("root_event_id", ""),
+            "source_event_id": meta.get("source_event_id", ""),
             "run_record_id": meta.get("run_record_id", "") or run_record_id,
+            "linked_run": meta.get("linked_run", "") or run_record_id,
             "terminal": True,
             "spawn_summary": {
                 "ok": True,
@@ -430,11 +576,16 @@ def run(
         }
 
     effective_run_record_id = _to_str(
-        run_record_id or meta.get("run_record_id") or ""
+        run_record_id or meta.get("run_record_id") or meta.get("linked_run") or ""
+    ).strip()
+
+    effective_linked_run = _to_str(
+        meta.get("linked_run") or effective_run_record_id
     ).strip()
 
     flow_id = meta["flow_id"] or f"flow_router_{_now_ts()}"
-    root_event_id = meta["root_event_id"] or flow_id
+    source_event_id = meta["source_event_id"] or meta["root_event_id"] or flow_id
+    root_event_id = meta["root_event_id"] or source_event_id or flow_id
 
     normalized = _normalize_event(data)
     routing = _route(normalized)
@@ -445,7 +596,8 @@ def run(
         **data,
         "flow_id": flow_id,
         "root_event_id": root_event_id,
-        "event_id": root_event_id,
+        "source_event_id": source_event_id,
+        "event_id": source_event_id,
         "workspace_id": meta["workspace_id"],
         "workspace": meta["workspace_id"],
         "tenant_id": meta["tenant_id"],
@@ -454,6 +606,7 @@ def run(
         "step_index": meta["step_index"] + 1,
         "_depth": depth + 1,
         "run_record_id": effective_run_record_id,
+        "linked_run": effective_linked_run,
         "parent_command_id": meta["parent_command_id"],
         "command_id": meta["command_id"],
         "incident_record_id": normalized["incident_record_id"],
@@ -465,18 +618,24 @@ def run(
         "final_failure": normalized["final_failure"],
         "error": normalized["error"],
         "error_message": normalized["error_message"],
+        "incident_message": normalized["error_message"],
         "incident_code": normalized["incident_code"],
         "original_capability": normalized["original_capability"],
         "failed_capability": normalized["failed_capability"],
+        "source_capability": (
+            normalized["failed_capability"]
+            or normalized["original_capability"]
+        ),
         "failed_url": normalized["failed_url"],
         "target_url": normalized["failed_url"],
         "http_target": normalized["failed_url"],
+        "url": normalized["failed_url"],
         "failed_method": normalized["failed_method"],
         "method": normalized["failed_method"],
         "retry_count": normalized["retry_count"],
         "retry_max": normalized["retry_max"],
-        "goal": "incident_router_v2_test",
-        "decision": "",
+        "goal": _to_str(data.get("goal") or "incident_router_v2_test").strip(),
+        "decision": _to_str(data.get("decision") or "").strip(),
     }
 
     if routing["route"] == "incident":
@@ -495,7 +654,9 @@ def run(
         "ts": _now_ts(),
         "flow_id": flow_id,
         "root_event_id": root_event_id,
+        "source_event_id": source_event_id,
         "run_record_id": effective_run_record_id,
+        "linked_run": effective_linked_run,
         "route": routing["route"],
         "reason": routing["reason"],
         "normalized_category": normalized["category"],
