@@ -6356,6 +6356,7 @@ def _command_context_from_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
         "payload_obj": payload_obj if isinstance(payload_obj, dict) else {},
     }
     
+
 def _create_command_from_next_command(
     next_cmd: Dict[str, Any],
     parent_run_id: str,
@@ -6365,7 +6366,6 @@ def _create_command_from_next_command(
         return {"ok": False, "error": "invalid_next_command"}
 
     next_cmd = _normalize_keys_deep(next_cmd)
-    
 
     capability = str(
         next_cmd.get("capability")
@@ -6399,6 +6399,7 @@ def _create_command_from_next_command(
     parent_command_id = str(
         next_cmd.get("parent_command_id")
         or raw_input.get("parent_command_id")
+        or raw_input.get("parentcommandid")
         or ""
     ).strip()
 
@@ -6414,36 +6415,60 @@ def _create_command_from_next_command(
         fallback_command_id=parent_run_id,
     )
 
+    source_event_id = str(
+        command_input.get("source_event_id")
+        or command_input.get("sourceEventId")
+        or command_input.get("sourceeventid")
+        or command_input.get("event_id")
+        or command_input.get("eventId")
+        or command_input.get("eventid")
+        or root_event_id
+        or flow_id
+        or ""
+    ).strip()
+
     retry_count = int(command_input.get("retry_count") or 0)
     step_index = int(command_input.get("step_index") or 0)
 
     effective_workspace_id = str(
         workspace_id
         or command_input.get("workspace_id")
+        or command_input.get("workspaceId")
+        or command_input.get("workspaceid")
+        or command_input.get("workspace")
         or ""
     ).strip() or None
 
-    # ------------------------------------------------------------
-    # SAFE PATCH — stable flow propagation
-    # Keep child commands inside the same flow unless explicitly overridden.
-    # ------------------------------------------------------------
     if not flow_id:
         flow_id = parent_run_id
 
     if not root_event_id:
         root_event_id = flow_id or parent_run_id
 
+    if not source_event_id:
+        source_event_id = root_event_id or flow_id or parent_run_id
+
     command_input["flow_id"] = flow_id
     command_input["root_event_id"] = root_event_id
+    command_input["source_event_id"] = source_event_id
+    command_input["event_id"] = source_event_id
 
     command_input.pop("flowid", None)
     command_input.pop("rooteventid", None)
+    command_input.pop("eventid", None)
+    command_input.pop("sourceeventid", None)
 
     if parent_command_id:
         command_input["parent_command_id"] = parent_command_id
 
     if effective_workspace_id and not str(command_input.get("workspace_id") or "").strip():
         command_input["workspace_id"] = effective_workspace_id
+
+    if not str(command_input.get("run_record_id") or "").strip():
+        command_input["run_record_id"] = parent_run_id
+
+    if not str(command_input.get("linked_run") or "").strip():
+        command_input["linked_run"] = parent_run_id
 
     if capability == "http_exec":
         command_input = _normalize_http_exec_input(command_input)
@@ -6458,12 +6483,17 @@ def _create_command_from_next_command(
                 "command_input": command_input,
             }
 
-    # Re-assert flow context after possible capability-specific normalization
     if not str(command_input.get("flow_id") or "").strip():
         command_input["flow_id"] = flow_id or parent_run_id
 
     if not str(command_input.get("root_event_id") or "").strip():
         command_input["root_event_id"] = root_event_id or flow_id or parent_run_id
+
+    if not str(command_input.get("source_event_id") or "").strip():
+        command_input["source_event_id"] = source_event_id or root_event_id or flow_id or parent_run_id
+
+    if not str(command_input.get("event_id") or "").strip():
+        command_input["event_id"] = command_input["source_event_id"]
 
     inherited_input_idem = str(command_input.get("idempotency_key") or "").strip()
     explicit_next_cmd_idem = str(next_cmd.get("idempotency_key") or "").strip()
@@ -6486,9 +6516,11 @@ def _create_command_from_next_command(
             "inherited_input_idem": inherited_input_idem,
             "flow_id": flow_id,
             "root_event_id": root_event_id,
+            "source_event_id": source_event_id,
             "parent_command_id": parent_command_id,
             "retry_count": retry_count,
             "step_index": step_index,
+            "workspace_id": effective_workspace_id,
         },
     )
 
@@ -6502,9 +6534,11 @@ def _create_command_from_next_command(
                 "existing_record_id": str(existing.get("id") or "").strip(),
                 "flow_id": flow_id,
                 "root_event_id": root_event_id,
+                "source_event_id": source_event_id,
                 "parent_command_id": parent_command_id,
                 "retry_count": retry_count,
                 "step_index": step_index,
+                "workspace_id": effective_workspace_id,
             },
         )
         return {
@@ -6517,6 +6551,7 @@ def _create_command_from_next_command(
             "parent_run_id": parent_run_id,
             "flow_id": flow_id,
             "root_event_id": root_event_id,
+            "source_event_id": source_event_id,
             "parent_command_id": parent_command_id,
         }
 
@@ -6528,6 +6563,7 @@ def _create_command_from_next_command(
             "workspace_id": effective_workspace_id,
             "flow_id": flow_id,
             "root_event_id": root_event_id,
+            "source_event_id": source_event_id,
             "parent_command_id": parent_command_id,
             "retry_count": retry_count,
             "step_index": step_index,
@@ -6539,7 +6575,7 @@ def _create_command_from_next_command(
         capability=capability,
         command_input=command_input,
         workspace_id=effective_workspace_id,
-        event_record_id=root_event_id or parent_run_id,
+        event_record_id=source_event_id or root_event_id or parent_run_id,
         idempotency_key=effective_idempotency_key,
         priority=priority,
     )
@@ -6566,6 +6602,7 @@ def _create_command_from_next_command(
         "parent_run_id": parent_run_id,
         "flow_id": flow_id,
         "root_event_id": root_event_id,
+        "source_event_id": source_event_id,
         "parent_command_id": parent_command_id,
     }
     
