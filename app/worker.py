@@ -1761,6 +1761,23 @@ def verify_request_auth_or_401(raw_body: bytes, headers: Dict[str, str]) -> None
 
     raise HTTPException(status_code=401, detail="Unauthorized (missing/invalid scheduler secret or run signature)")
 
+def _compact_key_name(key: Any) -> str:
+    text = str(key or "")
+    return "".join(ch for ch in text if ch.isalnum()).lower()
+
+
+def _has_meaningful_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if value == "":
+        return False
+    if value == []:
+        return False
+    if value == {}:
+        return False
+    return True
+
+
 def _normalize_keys_deep(value: Any) -> Any:
     mapping = {
         "commandinput": "command_input",
@@ -1772,6 +1789,8 @@ def _normalize_keys_deep(value: Any) -> Any:
         "maxdepth": "max_depth",
         "workspaceid": "workspace_id",
         "rooteventid": "root_event_id",
+        "sourceeventid": "source_event_id",
+        "eventid": "event_id",
         "flowid": "flow_id",
         "incidentrecordid": "incident_record_id",
         "requesterror": "request_error",
@@ -1785,19 +1804,82 @@ def _normalize_keys_deep(value: Any) -> Any:
         "failedmethod": "failed_method",
         "failedgoal": "failed_goal",
         "originalcapability": "original_capability",
+        "sourcecapability": "source_capability",
+        "failedcapability": "failed_capability",
+        "runrecordid": "run_record_id",
+        "linkedrun": "linked_run",
+        "commandid": "command_id",
+        "decisionstatus": "decision_status",
+        "decisionreason": "decision_reason",
+        "nextaction": "next_action",
+        "autoexecutable": "auto_executable",
+        "priorityscore": "priority_score",
+        "finalfailure": "final_failure",
+        "incidentmessage": "incident_message",
+        "incidentcode": "incident_code",
+        "endpointname": "endpoint_name",
+        "appname": "app_name",
+        "tenantid": "tenant_id",
+        "deduplicateaction": "deduplicate_action",
+        "contenttype": "content_type",
+        "bodytext": "body_text",
+        "bodyjson": "body_json",
+        "elapsedms": "elapsed_ms",
+        "timeoutseconds": "timeout_seconds",
+        "followredirects": "follow_redirects",
+        "verifytls": "verify_tls",
+        "urldebug": "url_debug",
+        "resolvedips": "resolved_ips",
     }
 
     if isinstance(value, dict):
         normalized: Dict[str, Any] = {}
+
         for k, v in value.items():
-            key = mapping.get(str(k), str(k))
-            normalized[key] = _normalize_keys_deep(v)
+            raw_key = str(k)
+            normalized_key = mapping.get(_compact_key_name(raw_key), raw_key)
+            normalized_value = _normalize_keys_deep(v)
+
+            if normalized_key not in normalized:
+                normalized[normalized_key] = normalized_value
+                continue
+
+            existing_value = normalized[normalized_key]
+
+            if isinstance(existing_value, dict) and isinstance(normalized_value, dict):
+                merged: Dict[str, Any] = dict(existing_value)
+                for mk, mv in normalized_value.items():
+                    if mk not in merged:
+                        merged[mk] = mv
+                    elif not _has_meaningful_value(merged[mk]) and _has_meaningful_value(mv):
+                        merged[mk] = mv
+                normalized[normalized_key] = merged
+                continue
+
+            if not _has_meaningful_value(existing_value) and _has_meaningful_value(normalized_value):
+                normalized[normalized_key] = normalized_value
+
         return normalized
 
     if isinstance(value, list):
         return [_normalize_keys_deep(item) for item in value]
 
     return value
+
+
+def _sanitize_payload_for_airtable(value: Any) -> Any:
+    normalized = _normalize_keys_deep(value)
+
+    if isinstance(normalized, dict):
+        return {
+            str(k): _sanitize_payload_for_airtable(v)
+            for k, v in normalized.items()
+        }
+
+    if isinstance(normalized, list):
+        return [_sanitize_payload_for_airtable(item) for item in normalized]
+
+    return normalized
 
 
 def _unwrap_command_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
