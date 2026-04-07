@@ -490,6 +490,12 @@ def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
         payload.get("Linked_Run"),
     )
 
+    linked_run = _pick_text(
+        payload.get("linked_run"),
+        payload.get("linkedrun"),
+        run_record_id,
+    )
+
     command_id = _pick_text(
         payload.get("command_id"),
         payload.get("commandid"),
@@ -509,6 +515,7 @@ def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
         "source_event_id": source_event_id or root_event_id or flow_id,
         "workspace_id": workspace_id or "production",
         "run_record_id": run_record_id,
+        "linked_run": linked_run or run_record_id,
         "command_id": command_id,
         "parent_command_id": parent_command_id,
         "step_index": _to_int(
@@ -640,11 +647,10 @@ def _canonical_incident_context(
         "production",
     )
 
-    # IMPORTANT:
-    # On garde le run hérité en priorité pour la continuité de flow,
-    # puis on garde le run local seulement en dernier fallback.
+    # priorité au run hérité
     run_record_id = _pick_text(
         meta.get("run_record_id"),
+        meta.get("linked_run"),
         data.get("run_record_id"),
         data.get("linked_run"),
         original_input.get("run_record_id"),
@@ -655,6 +661,7 @@ def _canonical_incident_context(
     linked_run = _pick_text(
         data.get("linked_run"),
         original_input.get("linked_run"),
+        meta.get("linked_run"),
         run_record_id,
     )
 
@@ -1025,8 +1032,22 @@ def run(
     root_event_id = _pick_text(meta.get("root_event_id"), flow_id)
     source_event_id = _pick_text(meta.get("source_event_id"), root_event_id)
     workspace_id = _pick_text(meta.get("workspace_id"), "production")
-    effective_run_record_id = _pick_text(meta.get("run_record_id"), run_record_id)
-    parent_command_id = _pick_text(meta.get("parent_command_id"))
+
+    # PATCH: priorité au run hérité, pas au run local de la capability
+    effective_run_record_id = _pick_text(
+        meta.get("run_record_id"),
+        meta.get("linked_run"),
+        run_record_id,
+    )
+
+    linked_run = _pick_text(
+        meta.get("linked_run"),
+        effective_run_record_id,
+    )
+
+    current_command_id = _pick_text(meta.get("command_id"))
+    parent_command_id = _pick_text(meta.get("parent_command_id"), current_command_id)
+
     current_step_index = _to_int(meta.get("step_index"), 0)
 
     decision_block = _normalize_decision_block(data)
@@ -1062,7 +1083,9 @@ def run(
             "flow_id": flow_id,
             "root_event_id": root_event_id,
             "source_event_id": source_event_id,
+            "workspace_id": workspace_id,
             "run_record_id": effective_run_record_id,
+            "linked_run": linked_run,
             "terminal": True,
             "create_attempts": create_best_effort_res.get("attempts", []),
         }
@@ -1101,11 +1124,16 @@ def run(
     except Exception as e:
         print("[incident_create] endpoint link error =", repr(e), flush=True)
 
+    # le prochain parent doit être la commande courante si présente
+    next_parent_command_id = _pick_text(current_command_id, parent_command_id)
+
     next_input = _build_next_input(
         incident_payload,
         incident_record_id=incident_record_id,
-        parent_command_id=parent_command_id,
-        command_id=parent_command_id,
+        run_record_id=effective_run_record_id,
+        linked_run=linked_run or effective_run_record_id,
+        parent_command_id=next_parent_command_id,
+        command_id=next_parent_command_id,
         step_index=current_step_index + 1,
         _depth=depth + 1,
     )
