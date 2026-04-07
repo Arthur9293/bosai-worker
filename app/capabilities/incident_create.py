@@ -67,53 +67,6 @@ def _safe_json(value: Any) -> str:
         return "{}"
 
 
-def _json_load_maybe(value: Any) -> Any:
-    if isinstance(value, (dict, list)):
-        return value
-    if value is None:
-        return None
-
-    text = str(value).strip()
-    if not text:
-        return None
-
-    candidates = [text]
-
-    try:
-        candidates.append(bytes(text, "utf-8").decode("unicode_escape"))
-    except Exception:
-        pass
-
-    candidates.append(text.replace('\\"', '"'))
-    candidates.append(text.replace("\\_", "_"))
-    candidates.append(text.replace('\\"', '"').replace("\\_", "_"))
-
-    seen = set()
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-
-        try:
-            parsed = json.loads(candidate)
-        except Exception:
-            continue
-
-        if isinstance(parsed, str):
-            inner = parsed.strip()
-            if not inner:
-                continue
-            try:
-                parsed2 = json.loads(inner)
-                return parsed2
-            except Exception:
-                return parsed
-
-        return parsed
-
-    return None
-
-
 def _normalize_keys_deep(value: Any) -> Any:
     mapping = {
         "commandinput": "command_input",
@@ -752,36 +705,22 @@ def _canonical_incident_context(
     flow_id = _pick_text(
         meta.get("flow_id"),
         data.get("flow_id"),
-        data.get("flowid"),
-        data.get("flowId"),
         original_input.get("flow_id"),
-        meta.get("root_event_id"),
-        meta.get("source_event_id"),
-        runtime_run_record_id and f"flow_run_{runtime_run_record_id}",
     )
 
     root_event_id = _pick_text(
         meta.get("root_event_id"),
         data.get("root_event_id"),
-        data.get("rooteventid"),
-        data.get("rootEventId"),
         data.get("event_id"),
-        data.get("eventid"),
-        data.get("eventId"),
         original_input.get("root_event_id"),
         original_input.get("event_id"),
-        meta.get("source_event_id"),
         flow_id,
     )
 
     source_event_id = _pick_text(
         meta.get("source_event_id"),
         data.get("source_event_id"),
-        data.get("sourceeventid"),
-        data.get("sourceEventId"),
         data.get("event_id"),
-        data.get("eventid"),
-        data.get("eventId"),
         original_input.get("source_event_id"),
         original_input.get("event_id"),
         root_event_id,
@@ -791,8 +730,6 @@ def _canonical_incident_context(
     workspace_id = _pick_text(
         meta.get("workspace_id"),
         data.get("workspace_id"),
-        data.get("workspaceid"),
-        data.get("workspaceId"),
         data.get("workspace"),
         original_input.get("workspace_id"),
         "production",
@@ -802,9 +739,7 @@ def _canonical_incident_context(
         meta.get("run_record_id"),
         meta.get("linked_run"),
         data.get("run_record_id"),
-        data.get("runrecordid"),
         data.get("linked_run"),
-        data.get("linkedrun"),
         original_input.get("run_record_id"),
         original_input.get("linked_run"),
         runtime_run_record_id,
@@ -813,7 +748,6 @@ def _canonical_incident_context(
     linked_run = _pick_text(
         meta.get("linked_run"),
         data.get("linked_run"),
-        data.get("linkedrun"),
         original_input.get("linked_run"),
         run_record_id,
     )
@@ -821,7 +755,6 @@ def _canonical_incident_context(
     target_url = _pick_text(
         data.get("failed_url"),
         data.get("target_url"),
-        data.get("targeturl"),
         data.get("url"),
         data.get("http_target"),
         original_input.get("failed_url"),
@@ -914,9 +847,7 @@ def _canonical_incident_context(
 
     incident_code = _pick_text(
         data.get("incident_code"),
-        data.get("incidentcode"),
         original_input.get("incident_code"),
-        original_input.get("incidentcode"),
         data.get("retry_reason"),
         original_input.get("retry_reason"),
         data.get("reason"),
@@ -973,13 +904,11 @@ def _canonical_incident_context(
         "parent_command_id": _pick_text(
             meta.get("parent_command_id"),
             data.get("parent_command_id"),
-            data.get("parentcommandid"),
             original_input.get("parent_command_id"),
         ),
         "command_id": _pick_text(
             meta.get("command_id"),
             data.get("command_id"),
-            data.get("commandid"),
             original_input.get("command_id"),
         ),
         "step_index": next_step_index,
@@ -1372,6 +1301,11 @@ def run(
         _depth=depth + 1,
     )
 
+    next_capability = _pick_text(decision_block.get("next_action"))
+    if next_capability not in {"internal_escalate", "resolve_incident", "complete_flow_incident"}:
+        next_capability = "complete_flow_incident"
+
+    print("[incident_create] next_capability =", next_capability, flush=True)
     print("[incident_create] next_input =", next_input, flush=True)
 
     return {
@@ -1392,7 +1326,7 @@ def run(
         "priority_score": decision_block["priority_score"],
         "next_commands": [
             {
-                "capability": "complete_flow_incident",
+                "capability": next_capability,
                 "priority": 1,
                 "input": next_input,
             }
