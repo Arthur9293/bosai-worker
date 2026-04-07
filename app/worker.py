@@ -2714,21 +2714,18 @@ def _resolve_flow_context_from_event(event_record_id, fields, payload_obj):
         or _coerce_non_empty_str(fields.get("Root_Event_ID"))
         or _coerce_non_empty_str(fields.get("root_event_id"))
         or _coerce_non_empty_str(fields.get("rooteventid"))
+        or event_id
+        or _coerce_non_empty_str(event_record_id)
     )
 
     if not flow_id:
-        flow_id = root_event_id or event_id
+        flow_id = root_event_id or _coerce_non_empty_str(event_record_id)
 
     if not root_event_id:
-        root_event_id = event_id or flow_id
-
-    if not flow_id:
-        flow_id = event_record_id
-
-    if not root_event_id:
-        root_event_id = event_record_id
+        root_event_id = event_id or _coerce_non_empty_str(event_record_id)
 
     return flow_id, root_event_id
+    
 def _resolve_flow_ids(payload: Dict[str, Any]) -> Tuple[str, str]:
     if not isinstance(payload, dict):
         payload = {}
