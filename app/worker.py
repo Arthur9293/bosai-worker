@@ -7656,9 +7656,44 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         or payload.get("sourceEventId")
         or payload.get("event_id")
         or payload.get("eventId")
-        or root_event_id
         or ""
     ).strip()
+
+    # ------------------------------------------------------------
+    # ROOT SEED FOR DIRECT /run CALLS
+    # ------------------------------------------------------------
+    if not flow_id:
+        flow_id = str(
+            payload.get("flow_id")
+            or payload.get("event_id")
+            or payload.get("source_event_id")
+            or f"flow_run_{run_record_id}"
+        ).strip()
+
+    if not root_event_id:
+        root_event_id = str(
+            payload.get("root_event_id")
+            or payload.get("event_id")
+            or source_event_id
+            or flow_id
+        ).strip()
+
+    if not source_event_id:
+        source_event_id = str(
+            payload.get("source_event_id")
+            or payload.get("event_id")
+            or root_event_id
+            or flow_id
+        ).strip()
+
+    # Canonical payload propagation
+    payload = dict(payload)
+    payload["flow_id"] = flow_id
+    payload["root_event_id"] = root_event_id
+    payload["source_event_id"] = source_event_id
+    payload["event_id"] = source_event_id
+    payload["workspace_id"] = workspace_id
+    payload["workspace"] = workspace_id
 
     try:
         result = capability_http_exec(
@@ -7708,6 +7743,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
     result.setdefault("flow_id", flow_id)
     result.setdefault("root_event_id", root_event_id)
     result.setdefault("source_event_id", source_event_id)
+    result.setdefault("event_id", source_event_id)
     result.setdefault("step_index", step_index)
     result.setdefault("linked_run", run_record_id)
     result["run_record_id"] = run_record_id
@@ -7769,106 +7805,6 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
     print("[HTTP_EXEC_WRAPPER_RESULT]", result, flush=True)
 
-    def _spawn_commands(next_commands: List[Dict[str, Any]], idem_suffix: str) -> None:
-        for next_cmd in next_commands:
-            if not isinstance(next_cmd, dict):
-                print("[spawn] skipped non-dict next_cmd =", next_cmd, flush=True)
-                continue
-
-            next_capability = str(next_cmd.get("capability") or "").strip()
-            if not next_capability:
-                print("[spawn] skipped empty capability next_cmd =", next_cmd, flush=True)
-                continue
-
-            next_input = (
-                next_cmd.get("input")
-                or next_cmd.get("command_input")
-                or {}
-            )
-            next_priority = int(next_cmd.get("priority") or 1)
-
-            if not isinstance(next_input, dict):
-                print("[spawn] next_input not dict, fallback to {} =", next_input, flush=True)
-                next_input = {}
-
-            next_input = _normalize_flow_keys(dict(next_input))
-
-            if flow_id and not str(next_input.get("flow_id") or "").strip():
-                next_input["flow_id"] = flow_id
-
-            if root_event_id and not str(next_input.get("root_event_id") or "").strip():
-                next_input["root_event_id"] = root_event_id
-
-            if workspace_id and not str(next_input.get("workspace_id") or "").strip():
-                next_input["workspace_id"] = workspace_id
-
-            if run_record_id and not str(next_input.get("run_record_id") or "").strip():
-                next_input["run_record_id"] = run_record_id
-
-            if run_record_id and not str(next_input.get("linked_run") or "").strip():
-                next_input["linked_run"] = run_record_id
-
-            if source_event_id and not str(next_input.get("source_event_id") or "").strip():
-                next_input["source_event_id"] = source_event_id
-
-            if source_event_id and not str(next_input.get("event_id") or "").strip():
-                next_input["event_id"] = source_event_id
-
-            if "step_index" in next_input:
-                try:
-                    next_input["step_index"] = int(next_input["step_index"])
-                except Exception:
-                    next_input["step_index"] = 0
-
-            if "http_status" not in next_input and status_code is not None:
-                next_input["http_status"] = status_code
-
-            if "status_code" not in next_input and status_code is not None:
-                next_input["status_code"] = status_code
-
-            if "retry_max" not in next_input:
-                next_input["retry_max"] = payload.get("retry_max", 2)
-
-            if not next_input.get("reason"):
-                next_input["reason"] = (
-                    result.get("error_code")
-                    or payload.get("reason")
-                    or payload.get("retry_reason")
-                    or "http_status_error"
-                )
-
-            if not next_input.get("retry_reason"):
-                next_input["retry_reason"] = next_input.get("reason")
-
-            if next_capability == "http_exec" and not next_input.get("url"):
-                print("[spawn] skipped http_exec without url", flush=True)
-                print("[spawn] rejected next_input =", next_input, flush=True)
-                continue
-
-            spawn_fields = {
-                "Name": f"{next_capability} from http_exec_wrapped",
-                "Capability": next_capability,
-                "Status_select": "Queued",
-                "Priority": next_priority,
-                "Input_JSON": json.dumps(next_input, ensure_ascii=False),
-                "Idempotency_Key": f"{idem_suffix}:{flow_id}:{next_capability}",
-            }
-
-            if workspace_id:
-                spawn_fields["Workspace_ID"] = workspace_id
-            if flow_id:
-                spawn_fields["Flow_ID"] = flow_id
-            if root_event_id:
-                spawn_fields["Root_Event_ID"] = root_event_id
-
-            print("[SPAWN next_capability] =", next_capability, flush=True)
-            print("[SPAWN next_input] =", next_input, flush=True)
-            print("[SPAWN Input_JSON] =", json.dumps(next_input, ensure_ascii=False), flush=True)
-            print("[SPAWN fields] =", spawn_fields, flush=True)
-
-            create_res = _airtable_create(COMMANDS_TABLE_NAME, spawn_fields)
-            print("[SPAWN create_res] =", create_res, flush=True)
-
     # ------------------------------------------------------------
     # FAILURE PATH -> incident_router_v2
     # ------------------------------------------------------------
@@ -7881,6 +7817,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             "step_index": step_index + 1,
             "_depth": _to_int(payload.get("_depth"), 0) + 1,
             "workspace_id": workspace_id,
+            "workspace": workspace_id,
             "goal": payload.get("goal") or payload.get("failed_goal") or "incident_probe",
             "reason": payload.get("reason") or payload.get("retry_reason") or "http_status_error",
             "retry_reason": payload.get("retry_reason") or payload.get("reason") or "http_status_error",
@@ -7994,7 +7931,6 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                 incident_result.get("next_commands", []),
                 flush=True,
             )
-            _spawn_commands(incident_result.get("next_commands", []), "incident-router-v2")
         else:
             print("[worker.wrapper] no next_commands from incident_result", flush=True)
 
@@ -8014,7 +7950,8 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         ).strip()
 
         final_source_event_id = str(
-            result.get("source_event_id")
+            incident_result.get("source_event_id")
+            or result.get("source_event_id")
             or payload.get("source_event_id")
             or payload.get("sourceEventId")
             or payload.get("event_id")
@@ -8027,6 +7964,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
         result["flow_id"] = final_flow_id
         result["root_event_id"] = final_root_event_id
         result["source_event_id"] = final_source_event_id
+        result["event_id"] = final_source_event_id
         result["workspace_id"] = workspace_id
         result["run_record_id"] = run_record_id
         result["linked_run"] = run_record_id
@@ -8081,7 +8019,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
     print("[worker.wrapper] returning success result =", result, flush=True)
     return result
-
+    
 def capability_retry_router_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
     workspace_id = _resolve_workspace_id(req=req)
