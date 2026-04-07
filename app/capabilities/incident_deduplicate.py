@@ -22,6 +22,8 @@ ORCHESTRATION_CAPABILITIES = {
     "complete_flow",
     "complete_flow_demo",
 }
+
+
 def _pick_capability(*values: Any, fallback: str = "") -> str:
     first_non_empty = ""
 
@@ -37,6 +39,7 @@ def _pick_capability(*values: Any, fallback: str = "") -> str:
             return text
 
     return fallback or first_non_empty
+
 
 def _now_ts() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -898,7 +901,7 @@ def _canonical_incident_context(
         "workspace_id": workspace_id,
         "workspace": workspace_id,
         "run_record_id": run_record_id,
-        "linked_run": linked_run,
+        "linked_run": linked_run or run_record_id,
         "parent_command_id": _pick_text(
             meta.get("parent_command_id"),
             data.get("parent_command_id"),
