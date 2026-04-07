@@ -640,13 +640,16 @@ def _canonical_incident_context(
         "production",
     )
 
+    # IMPORTANT:
+    # On garde le run hérité en priorité pour la continuité de flow,
+    # puis on garde le run local seulement en dernier fallback.
     run_record_id = _pick_text(
-        runtime_run_record_id,
         meta.get("run_record_id"),
         data.get("run_record_id"),
         data.get("linked_run"),
         original_input.get("run_record_id"),
         original_input.get("linked_run"),
+        runtime_run_record_id,
     )
 
     linked_run = _pick_text(
@@ -823,7 +826,6 @@ def _build_incident_fields_candidates(
     incident_key = _pick_text(incident_record_payload.get("incident_key"))
 
     severity_value = _pick_text(incident_record_payload.get("severity"), "High")
-    status_value = _pick_text(incident_record_payload.get("decision_status"), "Open")
     category_value = _pick_text(incident_record_payload.get("category"), "unknown")
     reason_value = _pick_text(incident_record_payload.get("reason"), "incident")
 
@@ -1023,7 +1025,7 @@ def run(
     root_event_id = _pick_text(meta.get("root_event_id"), flow_id)
     source_event_id = _pick_text(meta.get("source_event_id"), root_event_id)
     workspace_id = _pick_text(meta.get("workspace_id"), "production")
-    effective_run_record_id = _pick_text(run_record_id, meta.get("run_record_id"))
+    effective_run_record_id = _pick_text(meta.get("run_record_id"), run_record_id)
     parent_command_id = _pick_text(meta.get("parent_command_id"))
     current_step_index = _to_int(meta.get("step_index"), 0)
 
@@ -1117,6 +1119,7 @@ def run(
         "flow_id": _pick_text(next_input.get("flow_id")),
         "root_event_id": _pick_text(next_input.get("root_event_id")),
         "source_event_id": _pick_text(next_input.get("source_event_id")),
+        "workspace_id": _pick_text(next_input.get("workspace_id")),
         "incident_record_id": incident_record_id,
         "run_record_id": _pick_text(next_input.get("run_record_id")),
         "linked_run": _pick_text(next_input.get("linked_run")),
