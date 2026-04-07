@@ -2015,34 +2015,35 @@ def _airtable_create_best_effort(table_name: str, candidates: List[Dict[str, Any
 # ============================================================
 # System runs
 # ============================================================
-
 def create_system_run(req: RunRequest) -> Tuple[str, str]:
     run_uuid = str(uuid.uuid4())
-    workspace_id = _resolve_workspace_id(req=req)
 
-    input_payload = req.input if isinstance(req.input, dict) else {}
+    raw_input_payload = req.input if isinstance(req.input, dict) else {}
+    input_payload = _sanitize_payload_for_airtable(raw_input_payload)
+
+    workspace_id = str(
+        input_payload.get("workspace_id")
+        or _resolve_workspace_id(req=req)
+        or "production"
+    ).strip() or "production"
 
     flow_id = str(
         input_payload.get("flow_id")
-        or input_payload.get("flowId")
-        or input_payload.get("Flow_ID")
         or ""
     ).strip()
 
     root_event_id = str(
         input_payload.get("root_event_id")
-        or input_payload.get("rootEventId")
-        or input_payload.get("Root_Event_ID")
+        or input_payload.get("event_id")
+        or flow_id
         or ""
     ).strip()
 
     source_event_id = str(
         input_payload.get("source_event_id")
-        or input_payload.get("sourceEventId")
         or input_payload.get("event_id")
-        or input_payload.get("eventId")
-        or input_payload.get("Source_Event_ID")
         or root_event_id
+        or flow_id
         or ""
     ).strip()
 
@@ -2055,7 +2056,7 @@ def create_system_run(req: RunRequest) -> Tuple[str, str]:
         "Started_At": utc_now_iso(),
         "Priority": req.priority,
         "Dry_Run": bool(req.dry_run),
-        "Input_JSON": json.dumps(req.input, ensure_ascii=False),
+        "Input_JSON": json.dumps(input_payload, ensure_ascii=False),
         "App_Name": APP_NAME,
         "App_Version": APP_VERSION,
         "Workspace_ID": workspace_id,
@@ -2072,7 +2073,7 @@ def create_system_run(req: RunRequest) -> Tuple[str, str]:
 
     record_id = _airtable_create(SYSTEM_RUNS_TABLE_NAME, fields)
     return record_id, run_uuid
-    
+
 def _extract_system_run_link_fields(result_obj: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not isinstance(result_obj, dict):
         return {}
