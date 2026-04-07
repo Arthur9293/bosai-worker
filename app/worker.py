@@ -1252,6 +1252,23 @@ def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
         or ""
     ).strip()
 
+    source_event_id = str(
+        normalized.get("source_event_id")
+        or normalized.get("sourceeventid")
+        or normalized.get("sourceEventId")
+        or normalized.get("Source_Event_ID")
+        or ""
+    ).strip()
+
+    workspace_id = str(
+        normalized.get("workspace_id")
+        or normalized.get("workspaceid")
+        or normalized.get("workspaceId")
+        or normalized.get("Workspace_ID")
+        or normalized.get("workspace")
+        or ""
+    ).strip()
+
     goal = str(
         normalized.get("goal")
         or normalized.get("Goal")
@@ -1277,24 +1294,44 @@ def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         step_index = 0
 
+    # flow_id: fallback root -> event
+    if not flow_id:
+        flow_id = root_event_id or event_id
+
+    # root_event_id: fallback event -> flow
+    if not root_event_id:
+        root_event_id = event_id or flow_id
+
+    # source_event_id: fallback event -> root -> flow
+    if not source_event_id:
+        source_event_id = event_id or root_event_id or flow_id
+
+    # event_id: keep explicit value; fallback only if absent
+    if not event_id:
+        event_id = source_event_id or root_event_id
+
     if flow_id:
         normalized["flow_id"] = flow_id
+
+    if root_event_id:
+        normalized["root_event_id"] = root_event_id
+
+    if source_event_id:
+        normalized["source_event_id"] = source_event_id
 
     if event_id:
         normalized["event_id"] = event_id
 
-    # priorité absolue au vrai event
-    if event_id:
-        normalized["root_event_id"] = event_id
-    elif root_event_id:
-        normalized["root_event_id"] = root_event_id
+    if workspace_id:
+        normalized["workspace_id"] = workspace_id
+        normalized["workspace"] = workspace_id
 
     if goal:
         normalized["goal"] = goal
 
     normalized["step_index"] = step_index
 
-    # IMPORTANT: on supprime les alias compacts pour éviter de polluer Input_JSON
+    # remove legacy aliases
     normalized.pop("flowid", None)
     normalized.pop("flowId", None)
     normalized.pop("Flow_ID", None)
@@ -1310,13 +1347,20 @@ def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
     normalized.pop("Root_Event_ID", None)
     normalized.pop("RootEventId", None)
 
+    normalized.pop("sourceeventid", None)
+    normalized.pop("sourceEventId", None)
+    normalized.pop("Source_Event_ID", None)
+
+    normalized.pop("workspaceid", None)
+    normalized.pop("workspaceId", None)
+    normalized.pop("Workspace_ID", None)
+
     normalized.pop("stepindex", None)
     normalized.pop("stepIndex", None)
     normalized.pop("Step_Index", None)
     normalized.pop("StepIndex", None)
 
     return normalized
-
 
 def _resolve_flow_step_index(payload: Dict[str, Any], default: int = 0) -> int:
     if not isinstance(payload, dict):
