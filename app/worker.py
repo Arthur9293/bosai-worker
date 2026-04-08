@@ -8144,21 +8144,128 @@ def capability_retry_router_wrapped(req: RunRequest, run_record_id: str) -> Dict
 
     retry_count = int(payload.get("retry_count") or 0)
     retry_max = int(payload.get("retry_max") or 3)
+    priority = int(getattr(req, "priority", 0) or 2)
 
     goal = str(payload.get("goal") or "").strip()
-    original_capability = str(payload.get("original_capability") or "http_exec").strip()
+
+    orchestration_capabilities = {
+        "retry_router",
+        "decision_router",
+        "incident_router",
+        "incident_router_v2",
+        "incident_deduplicate",
+        "incident_create",
+        "internal_escalate",
+        "resolve_incident",
+        "complete_flow_incident",
+        "complete_flow",
+        "complete_flow_demo",
+    }
+
+    def _pick_capability(*values: Any, fallback: str = "http_exec") -> str:
+        first_non_empty = ""
+        for value in values:
+            text = str(value or "").strip()
+            if not text:
+                continue
+            if not first_non_empty:
+                first_non_empty = text
+            if text not in orchestration_capabilities:
+                return text
+        if first_non_empty and first_non_empty not in orchestration_capabilities:
+            return first_non_empty
+        return fallback
+
+    original_input = payload.get("original_input") if isinstance(payload.get("original_input"), dict) else {}
+
+    original_capability = _pick_capability(
+        payload.get("failed_capability"),
+        payload.get("source_capability"),
+        payload.get("original_capability"),
+        original_input.get("failed_capability") if isinstance(original_input, dict) else "",
+        original_input.get("source_capability") if isinstance(original_input, dict) else "",
+        original_input.get("original_capability") if isinstance(original_input, dict) else "",
+        fallback="http_exec",
+    )
 
     retry_reason = str(
         payload.get("retry_reason")
         or payload.get("error_code")
+        or payload.get("incident_code")
+        or payload.get("reason")
         or "unknown"
     ).strip()
 
     last_error = (
-        payload.get("error")
+        payload.get("error_message")
+        or payload.get("error")
         or payload.get("last_error")
         or payload.get("response_status")
         or payload.get("status_code")
+    )
+
+    source_event_id = str(
+        payload.get("source_event_id")
+        or payload.get("sourceEventId")
+        or payload.get("event_id")
+        or payload.get("eventId")
+        or root_event_id
+        or flow_id
+        or ""
+    ).strip()
+
+    linked_run = str(
+        payload.get("linked_run")
+        or payload.get("linkedrun")
+        or payload.get("run_record_id")
+        or payload.get("runrecordid")
+        or run_record_id
+        or ""
+    ).strip()
+
+    parent_command_id = str(
+        payload.get("command_id")
+        or payload.get("commandid")
+        or payload.get("parent_command_id")
+        or payload.get("parentCommandId")
+        or ""
+    ).strip()
+
+    command_id = str(
+        payload.get("command_id")
+        or payload.get("commandid")
+        or ""
+    ).strip()
+
+    depth = int(payload.get("_depth") or 0)
+
+    failed_url = (
+        payload.get("failed_url")
+        or payload.get("target_url")
+        or payload.get("url")
+        or payload.get("http_target")
+        or (original_input.get("failed_url") if isinstance(original_input, dict) else None)
+        or (original_input.get("target_url") if isinstance(original_input, dict) else None)
+        or (original_input.get("url") if isinstance(original_input, dict) else None)
+        or (original_input.get("http_target") if isinstance(original_input, dict) else None)
+    )
+
+    failed_method = (
+        payload.get("failed_method")
+        or payload.get("method")
+        or (original_input.get("failed_method") if isinstance(original_input, dict) else None)
+        or (original_input.get("method") if isinstance(original_input, dict) else None)
+        or "GET"
+    )
+
+    http_status = (
+        payload.get("http_status")
+        or payload.get("status_code")
+        or (
+            payload.get("response", {}).get("status_code")
+            if isinstance(payload.get("response"), dict)
+            else None
+        )
     )
 
     next_commands: List[Dict[str, Any]] = []
@@ -8172,14 +8279,38 @@ def capability_retry_router_wrapped(req: RunRequest, run_record_id: str) -> Dict
         retry_input = dict(payload)
         retry_input["flow_id"] = flow_id
         retry_input["root_event_id"] = root_event_id
+        retry_input["source_event_id"] = source_event_id
+        retry_input["event_id"] = source_event_id
         retry_input["workspace_id"] = workspace_id
+        retry_input["workspace"] = workspace_id
         retry_input["retry_count"] = next_retry_count
         retry_input["retry_max"] = retry_max
         retry_input["step_index"] = step_index + 1
-        retry_input["goal"] = "retry_http_exec"
+        retry_input["_depth"] = depth + 1
+        retry_input["goal"] = goal or payload.get("failed_goal") or "retry_http_exec"
         retry_input["original_capability"] = original_capability
+        retry_input["source_capability"] = original_capability
+        retry_input["failed_capability"] = original_capability
         retry_input["retry_reason"] = retry_reason
         retry_input["last_error"] = last_error
+        retry_input["run_record_id"] = linked_run or run_record_id
+        retry_input["linked_run"] = linked_run or run_record_id
+        retry_input["parent_command_id"] = command_id or parent_command_id
+        retry_input["command_id"] = command_id or parent_command_id
+
+        if failed_url:
+            retry_input["failed_url"] = failed_url
+            retry_input["target_url"] = failed_url
+            retry_input["url"] = failed_url
+            retry_input["http_target"] = failed_url
+
+        if failed_method:
+            retry_input["failed_method"] = failed_method
+            retry_input["method"] = failed_method
+
+        if http_status is not None:
+            retry_input["http_status"] = http_status
+            retry_input["status_code"] = http_status
 
         # cleanup router-only fields if present
         retry_input.pop("next_capability", None)
@@ -8191,9 +8322,8 @@ def capability_retry_router_wrapped(req: RunRequest, run_record_id: str) -> Dict
         next_commands.append(
             {
                 "capability": original_capability,
-                "priority": req.priority,
+                "priority": priority,
                 "input": retry_input,
-                "terminal": False,
             }
         )
 
@@ -8201,10 +8331,14 @@ def capability_retry_router_wrapped(req: RunRequest, run_record_id: str) -> Dict
             "ok": True,
             "capability": "retry_router",
             "status": "retry_scheduled",
-            "run_record_id": run_record_id,
+            "run_record_id": linked_run or run_record_id,
             "workspace_id": workspace_id,
             "flow_id": flow_id,
             "root_event_id": root_event_id,
+            "source_event_id": source_event_id,
+            "linked_run": linked_run or run_record_id,
+            "command_id": command_id or parent_command_id,
+            "parent_command_id": parent_command_id,
             "step_index": step_index,
             "retry_count": retry_count,
             "retry_max": retry_max,
@@ -8223,22 +8357,55 @@ def capability_retry_router_wrapped(req: RunRequest, run_record_id: str) -> Dict
     escalation_input = {
         "flow_id": flow_id,
         "root_event_id": root_event_id,
+        "source_event_id": source_event_id,
+        "event_id": source_event_id,
         "step_index": step_index + 1,
-        "goal": "retry_exhausted",
+        "_depth": depth + 1,
+        "goal": goal or "retry_exhausted",
         "original_capability": original_capability,
+        "source_capability": original_capability,
+        "failed_capability": original_capability,
         "retry_count": retry_count,
         "retry_max": retry_max,
-        "retry_reason": retry_reason,
+        "retry_reason": retry_reason or "retry_limit_reached",
+        "reason": retry_reason or "retry_limit_reached",
         "last_error": last_error,
+        "error": payload.get("error") or last_error,
+        "error_message": payload.get("error_message") or last_error,
+        "incident_message": payload.get("error_message") or last_error,
         "workspace_id": workspace_id,
+        "workspace": workspace_id,
+        "run_record_id": linked_run or run_record_id,
+        "linked_run": linked_run or run_record_id,
+        "parent_command_id": command_id or parent_command_id,
+        "command_id": command_id or parent_command_id,
+        "final_failure": True,
+        "incident_code": payload.get("incident_code") or retry_reason or "retry_limit_reached",
+        "failed_goal": payload.get("failed_goal") or goal or "retry_exhausted",
+        "request": payload.get("request") if isinstance(payload.get("request"), dict) else {},
+        "response": payload.get("response") if isinstance(payload.get("response"), dict) else {},
+        "original_input": original_input if isinstance(original_input, dict) else dict(payload),
     }
+
+    if failed_url:
+        escalation_input["failed_url"] = failed_url
+        escalation_input["target_url"] = failed_url
+        escalation_input["url"] = failed_url
+        escalation_input["http_target"] = failed_url
+
+    if failed_method:
+        escalation_input["failed_method"] = failed_method
+        escalation_input["method"] = failed_method
+
+    if http_status is not None:
+        escalation_input["http_status"] = http_status
+        escalation_input["status_code"] = http_status
 
     next_commands.append(
         {
             "capability": "decision_router",
-            "priority": req.priority,
+            "priority": priority,
             "input": escalation_input,
-            "terminal": True,
         }
     )
 
@@ -8246,10 +8413,14 @@ def capability_retry_router_wrapped(req: RunRequest, run_record_id: str) -> Dict
         "ok": True,
         "capability": "retry_router",
         "status": "retry_exhausted",
-        "run_record_id": run_record_id,
+        "run_record_id": linked_run or run_record_id,
         "workspace_id": workspace_id,
         "flow_id": flow_id,
         "root_event_id": root_event_id,
+        "source_event_id": source_event_id,
+        "linked_run": linked_run or run_record_id,
+        "command_id": command_id or parent_command_id,
+        "parent_command_id": parent_command_id,
         "step_index": step_index,
         "retry_count": retry_count,
         "retry_max": retry_max,
@@ -8257,10 +8428,9 @@ def capability_retry_router_wrapped(req: RunRequest, run_record_id: str) -> Dict
         "last_error": last_error,
         "decision": "stop_and_escalate",
         "goal": goal,
-        "terminal": True,
+        "terminal": False,
         "next_commands": next_commands,
     }
-
 
 def capability_incident_create_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     return capability_incident_create(
