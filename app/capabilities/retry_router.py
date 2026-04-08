@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import json
 import time
 from typing import Any, Dict, List, Optional
 
@@ -46,14 +48,113 @@ def _safe_str(value: Any) -> str:
         return ""
 
 
+def _coerce_scalar(value: Any) -> Any:
+    current = value
+    for _ in range(3):
+        if isinstance(current, list):
+            next_value = None
+            for item in current:
+                if item not in (None, "", {}, []):
+                    next_value = item
+                    break
+            current = next_value
+            continue
+        if isinstance(current, tuple):
+            current = list(current)
+            continue
+        break
+    return current
+
+
+def _json_like_to_dict(value: Any) -> Dict[str, Any]:
+    value = _coerce_scalar(value)
+
+    if isinstance(value, dict):
+        return dict(value)
+
+    if value is None:
+        return {}
+
+    text = _safe_str(value).strip()
+    if not text:
+        return {}
+
+    candidates = [text]
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        inner = text[1:-1].strip()
+        if inner:
+            candidates.append(inner)
+
+    def _unwrap(parsed: Any) -> Dict[str, Any]:
+        current = _coerce_scalar(parsed)
+
+        for _ in range(3):
+            if isinstance(current, dict):
+                return dict(current)
+
+            if isinstance(current, str):
+                inner_text = current.strip()
+                if not inner_text:
+                    return {}
+
+                try:
+                    current = json.loads(inner_text)
+                    current = _coerce_scalar(current)
+                    continue
+                except Exception:
+                    pass
+
+                try:
+                    current = ast.literal_eval(inner_text)
+                    current = _coerce_scalar(current)
+                    continue
+                except Exception:
+                    return {}
+
+            return {}
+
+        return dict(current) if isinstance(current, dict) else {}
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+            out = _unwrap(parsed)
+            if out:
+                return out
+        except Exception:
+            pass
+
+        try:
+            parsed = ast.literal_eval(candidate)
+            out = _unwrap(parsed)
+            if out:
+                return out
+        except Exception:
+            pass
+
+        try:
+            fixed = bytes(candidate, "utf-8").decode("unicode_escape")
+            parsed = json.loads(fixed)
+            out = _unwrap(parsed)
+            if out:
+                return out
+        except Exception:
+            pass
+
+    return {}
+
+
 def _to_dict(value: Any) -> Dict[str, Any]:
-    return value if isinstance(value, dict) else {}
+    return _json_like_to_dict(value)
 
 
 def _pick(payload: Dict[str, Any], *keys: str, default: Any = None) -> Any:
+    if not isinstance(payload, dict):
+        return default
+
     for key in keys:
         if key in payload:
-            value = payload.get(key)
+            value = _coerce_scalar(payload.get(key))
             if value is not None and value != "":
                 return value
     return default
@@ -71,15 +172,15 @@ def _pick_multi(dicts: List[Dict[str, Any]], *keys: str, default: Any = None) ->
 
 def _coerce_payload(payload: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Dict[str, Any]:
     if isinstance(payload, dict):
-        return payload
+        return dict(payload)
 
     candidate = kwargs.get("input_data")
     if isinstance(candidate, dict):
-        return candidate
+        return dict(candidate)
 
     candidate = kwargs.get("payload")
     if isinstance(candidate, dict):
-        return candidate
+        return dict(candidate)
 
     return {}
 
@@ -90,12 +191,13 @@ def _unwrap_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     # SAFE:
     # on unwrap uniquement les enveloppes d’orchestration.
-    # on ne touche PAS à "body", sinon on écrase le contexte erreur
-    # top-level venant de http_exec.
+    # on ne touche PAS à "body", sinon on peut écraser le contexte erreur
+    # top-level provenant de http_exec.
     for key in ("command_input", "commandinput", "input"):
         nested = payload.get(key)
-        if isinstance(nested, dict):
-            merged = dict(nested)
+        nested_dict = _to_dict(nested)
+        if isinstance(nested_dict, dict) and nested_dict:
+            merged = dict(nested_dict)
             for k, v in payload.items():
                 if k != key and k not in merged:
                     merged[k] = v
@@ -317,6 +419,7 @@ def _extract_target_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     original_input_seed = dict(original_input or {})
+
     if url_value and _pick(original_input_seed, "url", "http_target", "target_url", default="") in (None, ""):
         original_input_seed["url"] = url_value
         original_input_seed["http_target"] = url_value
