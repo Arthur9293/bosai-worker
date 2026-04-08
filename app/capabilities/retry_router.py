@@ -78,18 +78,16 @@ def _unwrap_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
 
-    current = dict(payload)
-
-    for nested_key in ("command_input", "commandinput", "input", "body"):
-        nested = current.get(nested_key)
+    for key in ("command_input", "commandinput", "input", "body"):
+        nested = payload.get(key)
         if isinstance(nested, dict):
             merged = dict(nested)
-            for k, v in current.items():
-                if k != nested_key and k not in merged:
+            for k, v in payload.items():
+                if k != key and k not in merged:
                     merged[k] = v
-            current = merged
+            return merged
 
-    return current
+    return payload
 
 
 def _normalize_method(value: Any) -> str:
@@ -200,7 +198,10 @@ def _extract_retry_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
         DEFAULT_RETRY_DELAY_SECONDS,
     )
     step_index = _to_int(_pick(payload, "step_index", "stepindex", default=0), 0)
-    max_depth = _to_int(_pick(payload, "max_depth", "maxdepth", default=DEFAULT_MAX_DEPTH), DEFAULT_MAX_DEPTH)
+    max_depth = _to_int(
+        _pick(payload, "max_depth", "maxdepth", default=DEFAULT_MAX_DEPTH),
+        DEFAULT_MAX_DEPTH,
+    )
 
     return {
         "retry_count": max(0, retry_count),
@@ -245,7 +246,15 @@ def _extract_target_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
             "failed_url",
             "target_url",
             "URL",
-            default=_pick(payload, "url", "http_target", "failed_url", "target_url", "URL", default=""),
+            default=_pick(
+                payload,
+                "url",
+                "http_target",
+                "failed_url",
+                "target_url",
+                "URL",
+                default="",
+            ),
         )
     ).strip()
 
@@ -256,7 +265,14 @@ def _extract_target_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
             "failed_method",
             "HTTP_Method",
             "HTTPMethod",
-            default=_pick(payload, "method", "failed_method", "HTTP_Method", "HTTPMethod", default="GET"),
+            default=_pick(
+                payload,
+                "method",
+                "failed_method",
+                "HTTP_Method",
+                "HTTPMethod",
+                default="GET",
+            ),
         )
     )
 
@@ -270,62 +286,17 @@ def _extract_target_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def _extract_error_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
     response_obj = _to_dict(_pick(payload, "response", default={}))
-    original_input = _to_dict(_pick(payload, "original_input", "originalinput", default={}))
 
     retry_reason = _safe_str(
-        _pick(
-            payload,
-            "retry_reason",
-            "retryreason",
-            "reason",
-            "incident_code",
-            default=_pick(
-                original_input,
-                "retry_reason",
-                "retryreason",
-                "reason",
-                "incident_code",
-                default="",
-            ),
-        )
+        _pick(payload, "retry_reason", "retryreason", "reason", default="")
     ).strip()
 
     error_type = _safe_str(
-        _pick(
-            payload,
-            "error_type",
-            "errortype",
-            "incident_code",
-            "error",
-            default=_pick(
-                original_input,
-                "error_type",
-                "errortype",
-                "incident_code",
-                "error",
-                default=retry_reason,
-            ),
-        )
+        _pick(payload, "error_type", "errortype", "error", default=retry_reason)
     ).strip()
 
     request_error = _safe_str(
-        _pick(
-            payload,
-            "request_error",
-            "requesterror",
-            "error_message",
-            "incident_message",
-            "last_error",
-            default=_pick(
-                original_input,
-                "request_error",
-                "requesterror",
-                "error_message",
-                "incident_message",
-                "last_error",
-                default="",
-            ),
-        )
+        _pick(payload, "request_error", "requesterror", "error_message", "last_error", default="")
     ).strip()
 
     http_status_raw = _pick(
@@ -334,18 +305,7 @@ def _extract_error_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
         "httpstatus",
         "status_code",
         "statuscode",
-        default=_pick(
-            response_obj,
-            "status_code",
-            default=_pick(
-                original_input,
-                "http_status",
-                "httpstatus",
-                "status_code",
-                "statuscode",
-                default=None,
-            ),
-        ),
+        default=_pick(response_obj, "status_code", default=None),
     )
 
     http_status: Optional[int] = None
@@ -369,15 +329,15 @@ def _is_retryable(payload: Dict[str, Any], error_meta: Dict[str, Any]) -> bool:
     retry_reason = (error_meta["retry_reason"] or "").lower()
     error_type = (error_meta["error_type"] or "").lower()
 
+    if request_error:
+        return True
+
     if http_status is not None:
         if http_status in {408, 409, 425, 429}:
             return True
         if 500 <= http_status <= 599:
             return True
         return False
-
-    if request_error:
-        return True
 
     retryable_reasons = {
         "timeout",
@@ -431,8 +391,6 @@ def _compose_retry_input(
     error_meta: Dict[str, Any],
 ) -> Dict[str, Any]:
     original_input = dict(target_meta["original_input"])
-    request_obj = _to_dict(_pick(payload, "request", default={}))
-    response_obj = _to_dict(_pick(payload, "response", default={}))
 
     next_retry_count = retry_meta["retry_count"] + 1
     next_step_index = retry_meta["step_index"] + 1
@@ -466,13 +424,6 @@ def _compose_retry_input(
         "original_capability": target_meta["target_capability"],
         "source_capability": target_meta["target_capability"],
         "failed_capability": target_meta["target_capability"],
-        "original_input": original_input or {
-            "url": target_meta["url"],
-            "method": target_meta["method"],
-            "flow_id": flow_meta["flow_id"],
-            "root_event_id": flow_meta["root_event_id"],
-            "workspace_id": flow_meta["workspace_id"],
-        },
     }
 
     if target_meta["url"]:
@@ -487,7 +438,6 @@ def _compose_retry_input(
     if error_meta["retry_reason"]:
         retry_input["retry_reason"] = error_meta["retry_reason"]
         retry_input["reason"] = error_meta["retry_reason"]
-        retry_input["incident_code"] = error_meta["retry_reason"]
 
     if error_meta["error_type"]:
         retry_input["error_type"] = error_meta["error_type"]
@@ -499,13 +449,6 @@ def _compose_retry_input(
     if error_meta["request_error"]:
         retry_input["request_error"] = error_meta["request_error"]
         retry_input["error_message"] = error_meta["request_error"]
-        retry_input["incident_message"] = error_meta["request_error"]
-        retry_input["last_error"] = error_meta["request_error"]
-
-    if request_obj:
-        retry_input["request"] = request_obj
-    if response_obj:
-        retry_input["response"] = response_obj
 
     return retry_input
 
