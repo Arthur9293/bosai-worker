@@ -1627,8 +1627,6 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         candidate = parsed_sources.get(source_key) or {}
         if not candidate:
             continue
-        if candidate is base:
-            continue
         base = _merge_if_missing(base, candidate)
 
     if not isinstance(base, dict):
@@ -1733,9 +1731,10 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         fields.get("commandid"),
     )
 
+    step_index_candidate = _pick_from_dicts(search_dicts, "step_index", "stepindex", default=None)
     step_index = _to_int(
-        _pick_from_dicts(search_dicts, "step_index", "stepindex", default=None)
-        if _pick_from_dicts(search_dicts, "step_index", "stepindex", default=None) is not None
+        step_index_candidate
+        if step_index_candidate is not None
         else fields.get("Step_Index")
         if fields.get("Step_Index") is not None
         else fields.get("step_index")
@@ -1744,9 +1743,10 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         0,
     )
 
+    depth_candidate = _pick_from_dicts(search_dicts, "_depth", "depth", default=None)
     depth = _to_int(
-        _pick_from_dicts(search_dicts, "_depth", "depth", default=None)
-        if _pick_from_dicts(search_dicts, "_depth", "depth", default=None) is not None
+        depth_candidate
+        if depth_candidate is not None
         else fields.get("_depth")
         if fields.get("_depth") is not None
         else fields.get("Depth"),
@@ -1779,27 +1779,32 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     if not method_value:
         method_value = "GET"
 
-    if not headers_obj := (base.get("headers") if isinstance(base.get("headers"), dict) else {}):
-        headers_obj = (
-            request_obj.get("headers") if isinstance(request_obj.get("headers"), dict) else {}
-        )
+    headers_obj = base.get("headers") if isinstance(base.get("headers"), dict) else {}
     if not headers_obj:
-        headers_obj = _json_load_maybe(fields.get("HTTP_Headers_JSON"))
+        headers_obj = request_obj.get("headers") if isinstance(request_obj.get("headers"), dict) else {}
+    if not headers_obj:
+        maybe_headers = _json_load_maybe(fields.get("HTTP_Headers_JSON"))
+        headers_obj = maybe_headers if isinstance(maybe_headers, dict) else {}
 
     json_obj = base.get("json") if isinstance(base.get("json"), dict) else {}
     if not json_obj and isinstance(body_obj.get("json"), dict):
         json_obj = dict(body_obj.get("json") or {})
     if not json_obj:
-        json_obj = _json_load_maybe(fields.get("JSON"))
+        maybe_json = _json_load_maybe(fields.get("JSON"))
+        json_obj = maybe_json if isinstance(maybe_json, dict) else {}
 
     body_dict = body_obj if isinstance(body_obj, dict) else {}
     if not body_dict:
-        body_dict = _json_load_maybe(fields.get("HTTP_Payload_JSON"))
+        maybe_body = _json_load_maybe(fields.get("HTTP_Payload_JSON"))
+        body_dict = maybe_body if isinstance(maybe_body, dict) else {}
 
     if not request_obj:
-        request_obj = _json_load_maybe(fields.get("Request_JSON"))
+        maybe_request = _json_load_maybe(fields.get("Request_JSON"))
+        request_obj = maybe_request if isinstance(maybe_request, dict) else {}
+
     if not response_obj:
-        response_obj = _json_load_maybe(fields.get("Response_JSON"))
+        maybe_response = _json_load_maybe(fields.get("Response_JSON"))
+        response_obj = maybe_response if isinstance(maybe_response, dict) else {}
 
     base["flow_id"] = flow_id
     base["root_event_id"] = root_event_id
@@ -1980,7 +1985,7 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         "workspaceId",
         "Workspace_ID",
         "runrecordid",
-        "runRecordId",
+        "Run_RecordId",
         "Run_Record_ID",
         "linkedrun",
         "Linked_Run",
