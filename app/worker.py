@@ -4097,6 +4097,63 @@ def _command_mark_retry_or_dead_best_effort(command_id: str, run_record_id: str,
         ],
     )
 
+def _command_mark_retry_or_dead_from_result_best_effort(
+    command_id: str,
+    run_record_id: str,
+    fields: Dict[str, Any],
+    result_obj: Dict[str, Any],
+) -> Dict[str, Any]:
+    result_obj = result_obj if isinstance(result_obj, dict) else {}
+
+    message = str(
+        result_obj.get("error_message")
+        or result_obj.get("error")
+        or result_obj.get("message")
+        or "capability_failed"
+    ).strip() or "capability_failed"
+
+    retry_fields = dict(fields or {})
+
+    retry_max = _to_int(
+        result_obj.get("retry_max"),
+        _to_int(retry_fields.get("Retry_Max"), 0),
+    )
+    if POLICY_RETRY_LIMIT > 0:
+        retry_max = POLICY_RETRY_LIMIT
+    elif retry_max <= 0:
+        retry_max = 3
+
+    retry_count_after_failure = _to_int(
+        result_obj.get("retry_count"),
+        _to_int(retry_fields.get("Retry_Count"), 0) + 1,
+    )
+
+    retry_delay_seconds = _to_int(
+        result_obj.get("retry_delay_seconds"),
+        _to_int(retry_fields.get("Retry_Backoff_Sec"), 60),
+    )
+    if retry_delay_seconds <= 0:
+        retry_delay_seconds = 60
+
+    retryable = _is_truthy(result_obj.get("retryable"))
+    final_failure = _is_truthy(result_obj.get("final_failure"))
+
+    retry_fields["Retry_Max"] = retry_max
+    retry_fields["Retry_Backoff_Sec"] = retry_delay_seconds
+
+    if retryable and not final_failure:
+        # helper existant incrémente déjà de +1
+        retry_fields["Retry_Count"] = max(0, retry_count_after_failure - 1)
+    else:
+        # forcer le Dead
+        retry_fields["Retry_Count"] = max(retry_count_after_failure, retry_max)
+
+    return _command_mark_retry_or_dead_best_effort(
+        command_id=command_id,
+        run_record_id=run_record_id,
+        fields=retry_fields,
+        message=message,
+    )
 
 def capability_retry_queue(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     inp = req.input or {}
