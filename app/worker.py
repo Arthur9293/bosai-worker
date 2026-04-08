@@ -1485,6 +1485,7 @@ def _read_command_status(fields: Dict[str, Any]) -> str:
     return str(fields.get("Status_select", fields.get("Status", "")) or "").strip()
 
 def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
+    parsed_sources: Dict[str, Dict[str, Any]] = {}
     base: Dict[str, Any] = {}
     parse_errors: List[Dict[str, Any]] = []
 
@@ -1547,7 +1548,7 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
             return {}
 
         if isinstance(raw_val, dict):
-            parsed = raw_val
+            parsed = dict(raw_val)
         else:
             raw_text = _textify(raw_val)
             if not raw_text:
@@ -1555,13 +1556,13 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
 
             parsed = _json_load_maybe(raw_text)
 
-            if (not isinstance(parsed, dict) or not parsed):
+            if not isinstance(parsed, dict) or not parsed:
                 try:
                     literal = ast.literal_eval(raw_text)
                     literal = _extract_scalar(literal)
 
                     if isinstance(literal, dict):
-                        parsed = literal
+                        parsed = dict(literal)
                     else:
                         literal_text = _textify(literal)
                         if literal_text:
@@ -1595,15 +1596,40 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
 
         return parsed if isinstance(parsed, dict) else {}
 
-    for source_key in ("Input_JSON", "Command_JSON", "Command_Input_JSON", "Payload_JSON"):
-        candidate = _parse_candidate(fields.get(source_key), source_key)
+    def _pick_from_dicts(dicts: List[Dict[str, Any]], *keys: str, default: Any = "") -> Any:
+        for data in dicts:
+            if not isinstance(data, dict):
+                continue
+            for key in keys:
+                if key in data:
+                    value = data.get(key)
+                    if value not in (None, "", {}, []):
+                        return value
+        return default
+
+    source_priority = (
+        "Input_JSON",
+        "Command_Input_JSON",
+        "Command_JSON",
+        "Payload_JSON",
+    )
+
+    for source_key in source_priority:
+        parsed_sources[source_key] = _parse_candidate(fields.get(source_key), source_key)
+
+    for source_key in source_priority:
+        candidate = parsed_sources.get(source_key) or {}
+        if candidate:
+            base = dict(candidate)
+            break
+
+    for source_key in source_priority:
+        candidate = parsed_sources.get(source_key) or {}
         if not candidate:
             continue
-
-        if not base:
-            base = dict(candidate)
-        else:
-            base = _merge_if_missing(base, candidate)
+        if candidate is base:
+            continue
+        base = _merge_if_missing(base, candidate)
 
     if not isinstance(base, dict):
         base = {}
@@ -1612,16 +1638,47 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     base = _unwrap_command_payload(base)
     base = _normalize_flow_keys(base)
 
+    original_input_obj = base.get("original_input") if isinstance(base.get("original_input"), dict) else {}
+    if original_input_obj:
+        original_input_obj = _normalize_keys_deep(dict(original_input_obj))
+        original_input_obj = _unwrap_command_payload(original_input_obj)
+        original_input_obj = _normalize_flow_keys(original_input_obj)
+
+    body_obj = base.get("body") if isinstance(base.get("body"), dict) else {}
+    if body_obj:
+        body_obj = _normalize_keys_deep(dict(body_obj))
+        body_obj = _unwrap_command_payload(body_obj)
+        body_obj = _normalize_flow_keys(body_obj)
+
+    request_obj = base.get("request") if isinstance(base.get("request"), dict) else {}
+    if request_obj:
+        request_obj = _normalize_keys_deep(dict(request_obj))
+
+    response_obj = base.get("response") if isinstance(base.get("response"), dict) else {}
+    if response_obj:
+        response_obj = _normalize_keys_deep(dict(response_obj))
+
+    search_dicts: List[Dict[str, Any]] = [
+        base,
+        original_input_obj,
+        body_obj,
+        request_obj,
+        response_obj,
+        parsed_sources.get("Input_JSON") or {},
+        parsed_sources.get("Command_Input_JSON") or {},
+        parsed_sources.get("Command_JSON") or {},
+        parsed_sources.get("Payload_JSON") or {},
+    ]
+
     flow_id = _pick(
-        base.get("flow_id"),
+        _pick_from_dicts(search_dicts, "flow_id", "flowid"),
         fields.get("Flow_ID"),
         fields.get("flow_id"),
         fields.get("flowid"),
     )
 
     root_event_id = _pick(
-        base.get("root_event_id"),
-        base.get("event_id"),
+        _pick_from_dicts(search_dicts, "root_event_id", "rooteventid", "event_id", "eventid"),
         fields.get("Root_Event_ID"),
         fields.get("root_event_id"),
         fields.get("rooteventid"),
@@ -1631,8 +1688,7 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     source_event_id = _pick(
-        base.get("source_event_id"),
-        base.get("event_id"),
+        _pick_from_dicts(search_dicts, "source_event_id", "sourceeventid", "event_id", "eventid"),
         fields.get("Source_Event_ID"),
         fields.get("source_event_id"),
         fields.get("sourceeventid"),
@@ -1643,8 +1699,7 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     workspace_id = _pick(
-        base.get("workspace_id"),
-        base.get("workspace"),
+        _pick_from_dicts(search_dicts, "workspace_id", "workspaceid", "workspace"),
         fields.get("Workspace_ID"),
         fields.get("workspace_id"),
         fields.get("workspaceid"),
@@ -1652,37 +1707,35 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     run_record_id = _pick(
-        base.get("run_record_id"),
-        base.get("linked_run"),
+        _pick_from_dicts(search_dicts, "run_record_id", "runrecordid", "linked_run", "linkedrun"),
         fields.get("Run_Record_ID"),
         fields.get("run_record_id"),
         fields.get("Linked_Run"),
     )
 
     linked_run = _pick(
-        base.get("linked_run"),
-        base.get("run_record_id"),
+        _pick_from_dicts(search_dicts, "linked_run", "linkedrun", "run_record_id", "runrecordid"),
         fields.get("Linked_Run"),
         fields.get("Run_Record_ID"),
     )
 
     parent_command_id = _pick(
-        base.get("parent_command_id"),
+        _pick_from_dicts(search_dicts, "parent_command_id", "parentcommandid"),
         fields.get("Parent_Command_ID"),
         fields.get("parent_command_id"),
         fields.get("parentcommandid"),
     )
 
     command_id = _pick(
-        base.get("command_id"),
+        _pick_from_dicts(search_dicts, "command_id", "commandid"),
         fields.get("Command_ID"),
         fields.get("command_id"),
         fields.get("commandid"),
     )
 
     step_index = _to_int(
-        base.get("step_index")
-        if base.get("step_index") is not None
+        _pick_from_dicts(search_dicts, "step_index", "stepindex", default=None)
+        if _pick_from_dicts(search_dicts, "step_index", "stepindex", default=None) is not None
         else fields.get("Step_Index")
         if fields.get("Step_Index") is not None
         else fields.get("step_index")
@@ -1692,10 +1745,8 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     depth = _to_int(
-        base.get("_depth")
-        if base.get("_depth") is not None
-        else base.get("depth")
-        if base.get("depth") is not None
+        _pick_from_dicts(search_dicts, "_depth", "depth", default=None)
+        if _pick_from_dicts(search_dicts, "_depth", "depth", default=None) is not None
         else fields.get("_depth")
         if fields.get("_depth") is not None
         else fields.get("Depth"),
@@ -1703,48 +1754,51 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     url_value = _pick(
-        base.get("url"),
-        base.get("http_target"),
-        base.get("target_url"),
+        _pick_from_dicts(
+            search_dicts,
+            "url",
+            "http_target",
+            "target_url",
+            "failed_url",
+            "URL",
+        ),
         fields.get("http_target"),
         fields.get("Http_Target"),
         fields.get("URL"),
         fields.get("url"),
-        base.get("failed_url"),
     )
 
     method_value = _pick(
-        base.get("method"),
+        _pick_from_dicts(search_dicts, "method", "failed_method", "HTTP_Method", "Http_Method"),
         fields.get("HTTP_Method"),
         fields.get("Http_Method"),
         fields.get("method"),
-        base.get("failed_method"),
         "GET",
     ).upper()
 
     if not method_value:
         method_value = "GET"
 
-    headers_obj = base.get("headers")
-    if not isinstance(headers_obj, dict):
+    if not headers_obj := (base.get("headers") if isinstance(base.get("headers"), dict) else {}):
+        headers_obj = (
+            request_obj.get("headers") if isinstance(request_obj.get("headers"), dict) else {}
+        )
+    if not headers_obj:
         headers_obj = _json_load_maybe(fields.get("HTTP_Headers_JSON"))
 
-    json_obj = base.get("json")
-    if not isinstance(json_obj, dict):
+    json_obj = base.get("json") if isinstance(base.get("json"), dict) else {}
+    if not json_obj and isinstance(body_obj.get("json"), dict):
+        json_obj = dict(body_obj.get("json") or {})
+    if not json_obj:
         json_obj = _json_load_maybe(fields.get("JSON"))
-        if not json_obj:
-            json_obj = _json_load_maybe(fields.get("Payload_JSON"))
 
-    body_obj = base.get("body")
-    if not isinstance(body_obj, dict):
-        body_obj = _json_load_maybe(fields.get("HTTP_Payload_JSON"))
+    body_dict = body_obj if isinstance(body_obj, dict) else {}
+    if not body_dict:
+        body_dict = _json_load_maybe(fields.get("HTTP_Payload_JSON"))
 
-    request_obj = base.get("request")
-    if not isinstance(request_obj, dict):
+    if not request_obj:
         request_obj = _json_load_maybe(fields.get("Request_JSON"))
-
-    response_obj = base.get("response")
-    if not isinstance(response_obj, dict):
+    if not response_obj:
         response_obj = _json_load_maybe(fields.get("Response_JSON"))
 
     base["flow_id"] = flow_id
@@ -1773,8 +1827,8 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     if json_obj:
         base["json"] = json_obj
 
-    if body_obj:
-        base["body"] = body_obj
+    if body_dict:
+        base["body"] = body_dict
 
     if request_obj:
         base["request"] = request_obj
@@ -1782,18 +1836,18 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     if response_obj:
         base["response"] = response_obj
 
+    if original_input_obj:
+        base["original_input"] = original_input_obj
+
     if not _pick(base.get("failed_method")):
         base["failed_method"] = method_value
 
     if url_value and not _pick(base.get("failed_url")):
         base["failed_url"] = url_value
 
-    # Enrich from original_input if present
-    original_input_obj = base.get("original_input")
-    if isinstance(original_input_obj, dict) and original_input_obj:
-        original_input_obj = _normalize_keys_deep(original_input_obj)
-        original_input_obj = _unwrap_command_payload(original_input_obj)
-        original_input_obj = _normalize_flow_keys(original_input_obj)
+    for src in (original_input_obj, body_dict, request_obj, response_obj):
+        if not isinstance(src, dict) or not src:
+            continue
 
         for k in (
             "goal",
@@ -1811,30 +1865,27 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
             "error",
             "error_message",
             "last_error",
+            "request_error",
+            "incident_code",
+            "incident_message",
+            "retry_count",
+            "retry_max",
+            "retry_delay_seconds",
+            "next_retry_at",
+            "max_depth",
         ):
-            if base.get(k) in (None, "", {}, []) and original_input_obj.get(k) not in (None, "", {}, []):
-                base[k] = original_input_obj.get(k)
+            if base.get(k) in (None, "", {}, []) and src.get(k) not in (None, "", {}, []):
+                base[k] = src.get(k)
 
-    # Enrich from request / response
-    if isinstance(request_obj, dict) and request_obj:
-        if base.get("url") in (None, "", {}, []):
-            req_url = _pick(request_obj.get("url"), request_obj.get("http_target"), request_obj.get("target_url"))
-            if req_url:
-                base["url"] = req_url
-                base["http_target"] = req_url
-                if not _pick(base.get("target_url")):
-                    base["target_url"] = req_url
-
-        if base.get("method") in (None, "", {}, []):
-            req_method = _pick(request_obj.get("method"), "GET").upper()
-            base["method"] = req_method
-
+    resp_status = None
     if isinstance(response_obj, dict) and response_obj:
         resp_status = response_obj.get("status_code")
-        if base.get("http_status") in (None, "", {}, []) and resp_status not in (None, ""):
-            base["http_status"] = resp_status
-        if base.get("status_code") in (None, "", {}, []) and resp_status not in (None, ""):
-            base["status_code"] = resp_status
+
+    if base.get("http_status") in (None, "", {}, []) and resp_status not in (None, ""):
+        base["http_status"] = resp_status
+
+    if base.get("status_code") in (None, "", {}, []) and resp_status not in (None, ""):
+        base["status_code"] = resp_status
 
     field_alias_map = {
         "goal": ("goal", "Goal", "failed_goal", "failedgoal", "Failed_Goal"),
@@ -1842,6 +1893,7 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         "retry_reason": ("retry_reason", "retryreason", "reason", "Reason", "incident_code"),
         "retry_count": ("retry_count", "retrycount", "Retry_Count"),
         "retry_max": ("retry_max", "retrymax", "Retry_Max"),
+        "retry_delay_seconds": ("retry_delay_seconds", "retrydelayseconds", "Retry_Delay_Seconds"),
         "failed_goal": ("failed_goal", "failedgoal", "Failed_Goal", "goal", "Goal"),
         "failed_url": ("failed_url", "failedurl", "Failed_URL", "url", "URL", "http_target"),
         "failed_method": ("failed_method", "failedmethod", "Failed_Method", "method", "HTTP_Method"),
@@ -1849,7 +1901,7 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         "status_code": ("status_code", "statuscode", "http_status", "httpstatus", "HTTP_Status", "Response_Status"),
         "error": ("error", "Error", "last_error", "Last_Error", "Error_Message", "incident_code"),
         "error_message": ("error_message", "Error_Message", "Last_Error", "error"),
-        # IMPORTANT: ne plus fallback vers Capability ici
+        "request_error": ("request_error", "Request_Error", "error_message", "last_error"),
         "original_capability": (
             "original_capability",
             "originalcapability",
@@ -1876,6 +1928,8 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         ),
         "target_capability": ("target_capability", "targetcapability", "Mapped_Capability"),
         "incident_record_id": ("incident_record_id", "incidentrecordid", "Incident_Record_ID"),
+        "next_retry_at": ("next_retry_at", "Next_Retry_At"),
+        "max_depth": ("max_depth", "Max_Depth"),
     }
 
     for target_key, aliases in field_alias_map.items():
@@ -1888,11 +1942,26 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
                 base[target_key] = value
                 break
 
-    # Dernier fallback SAFE uniquement pour target_capability
     if base.get("target_capability") in (None, "", {}, []):
         cap_value = fields.get("Capability")
         if cap_value is not None and str(cap_value).strip():
             base["target_capability"] = str(cap_value).strip()
+
+    if base.get("retry_reason") in (None, "", {}, []):
+        http_status = base.get("http_status")
+        try:
+            http_status_int = int(http_status) if http_status not in (None, "") else None
+        except Exception:
+            http_status_int = None
+
+        if http_status_int is not None and 500 <= http_status_int <= 599:
+            base["retry_reason"] = "http_status_error"
+
+    if base.get("error") in (None, "", {}, []) and base.get("retry_reason") not in (None, "", {}, []):
+        base["error"] = base.get("retry_reason")
+
+    if base.get("reason") in (None, "", {}, []) and base.get("retry_reason") not in (None, "", {}, []):
+        base["reason"] = base.get("retry_reason")
 
     for legacy_key in (
         "flowid",
@@ -1936,9 +2005,15 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     base = _sanitize_payload_for_airtable(base)
 
     if parse_errors:
-        print(f"[compose_command_input] parse_errors={json.dumps(parse_errors, ensure_ascii=False)}", flush=True)
+        print(
+            f"[compose_command_input] parse_errors={json.dumps(parse_errors, ensure_ascii=False)}",
+            flush=True,
+        )
 
-    print(f"[compose_command_input] final_base={json.dumps(base, ensure_ascii=False)}", flush=True)
+    print(
+        f"[compose_command_input] final_base={json.dumps(base, ensure_ascii=False)}",
+        flush=True,
+    )
     return base
     
 def airtable_create(table_name: str, fields: Dict[str, Any]) -> Dict[str, Any]:
