@@ -4397,6 +4397,7 @@ def _spawn_next_commands_from_result(
         "max_depth": CHAIN_MAX_DEPTH,
     }
 
+
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     max_cmds = int(req.max_commands or 0) or 5
     if POLICY_MAX_TOOL_CALLS > 0:
@@ -4411,6 +4412,28 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         "{Is_Lock_Stale}=1"
         ")"
     )
+
+    ORCHESTRATION_CAPABILITIES = {
+        "retry_router",
+        "decision_router",
+        "incident_router",
+        "incident_router_v2",
+        "incident_deduplicate",
+        "incident_create",
+        "incident_update",
+        "internal_escalate",
+        "resolve_incident",
+        "close_incident",
+        "smart_resolve",
+        "complete_flow_incident",
+        "complete_flow",
+        "complete_flow_demo",
+        "event_engine",
+        "command_orchestrator",
+        "lock_recovery",
+        "retry_queue",
+        "sla_router",
+    }
 
     def _as_text(value: Any) -> str:
         if isinstance(value, list):
@@ -4432,6 +4455,45 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             if txt:
                 return txt
         return ""
+
+    def _to_int_local(value: Any, default: int) -> int:
+        try:
+            if value is None or value == "":
+                return default
+            return int(value)
+        except Exception:
+            return default
+
+    def _unwrap_command_input(value: Any) -> Dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+
+        current = dict(value)
+
+        for _ in range(4):
+            changed = False
+            for nested_key in ("command_input", "commandinput", "input", "body"):
+                nested = current.get(nested_key)
+                if isinstance(nested, dict):
+                    merged = dict(nested)
+                    for k, v in current.items():
+                        if k != nested_key and k not in merged:
+                            merged[k] = v
+                    current = merged
+                    changed = True
+            if not changed:
+                break
+
+        return current
+
+    def _resolve_command_priority(fields: Dict[str, Any]) -> int:
+        return max(
+            1,
+            _to_int_local(
+                fields.get("Priority"),
+                _to_int_local(fields.get("priority"), _to_int_local(req.priority, 1)),
+            ),
+        )
 
     def _normalize_command_context(
         *,
@@ -4631,7 +4693,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             if not isinstance(child_input, dict):
                 child_input = {}
 
-            child_input = dict(child_input)
+            child_input = _unwrap_command_input(dict(child_input))
 
             if not _pick(
                 child_input.get("parent_command_id"),
@@ -4731,7 +4793,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
 
         print("[command_orchestrator] capability =", capability, flush=True)
         print("[command_orchestrator] fn =", fn, flush=True)
-        
+
         if not fn:
             unsupported += 1
             _command_mark_unsupported_best_effort(
@@ -4766,12 +4828,16 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                 continue
 
         idem = str(fields.get("Idempotency_Key", "")).strip() or f"cmd:{cid}:{capability}"
+        command_priority = _resolve_command_priority(fields)
 
         raw_cmd_input = _compose_command_input(fields)
         if not isinstance(raw_cmd_input, dict):
             raw_cmd_input = {}
 
         raw_cmd_input = _normalize_keys_deep(raw_cmd_input)
+        raw_cmd_input = _unwrap_command_input(raw_cmd_input)
+        preserved_raw_cmd_input = dict(raw_cmd_input)
+
         cmd_ctx = _normalize_command_context(
             command_id=cid,
             fields=fields,
@@ -4813,9 +4879,19 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
 
         lock_token = lock_res.get("lock_token")
 
-        is_valid, cmd_input, validation_error = _validate_command_input(capability, cmd_input)
-        if not isinstance(cmd_input, dict):
-            cmd_input = {}
+        is_valid, validated_cmd_input, validation_error = _validate_command_input(capability, cmd_input)
+        if not isinstance(validated_cmd_input, dict):
+            validated_cmd_input = {}
+
+        validated_cmd_input = _normalize_keys_deep(validated_cmd_input)
+        validated_cmd_input = _unwrap_command_input(validated_cmd_input)
+
+        if capability in ORCHESTRATION_CAPABILITIES:
+            merged_cmd_input = dict(preserved_raw_cmd_input)
+            merged_cmd_input.update(validated_cmd_input)
+            cmd_input = merged_cmd_input
+        else:
+            cmd_input = validated_cmd_input
 
         cmd_ctx = _normalize_command_context(
             command_id=cid,
@@ -4827,16 +4903,19 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         cmd_input = _inject_context_into_input(cmd_input, cmd_ctx)
 
         if not is_valid:
-            failed += 1
-            _command_mark_retry_or_dead_best_effort(
-                cid,
-                run_record_id,
-                fields,
-                validation_error or "invalid_command_input",
-            )
-            _release_command_lock_best_effort(cid)
-            errors.append(f"{cid}: {validation_error or 'invalid_command_input'}")
-            continue
+            if capability in ORCHESTRATION_CAPABILITIES and preserved_raw_cmd_input:
+                cmd_input = _inject_context_into_input(preserved_raw_cmd_input, cmd_ctx)
+            else:
+                failed += 1
+                _command_mark_retry_or_dead_best_effort(
+                    cid,
+                    run_record_id,
+                    fields,
+                    validation_error or "invalid_command_input",
+                )
+                _release_command_lock_best_effort(cid)
+                errors.append(f"{cid}: {validation_error or 'invalid_command_input'}")
+                continue
 
         executed += 1
 
@@ -4847,7 +4926,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                     "capability": capability,
                     "idempotency_key": idem,
                     "input": cmd_input,
-                    "priority": req.priority,
+                    "priority": command_priority,
                     "dry_run": bool(req.dry_run),
                 }
             )
@@ -4877,16 +4956,13 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
 
             if not _worker_still_owns_lock(cid, req.worker, lock_token):
                 blocked += 1
-
                 _command_mark_retry_or_dead_best_effort(
                     cid,
                     run_record_id,
                     fields,
                     "lock_lost_before_finalize",
                 )
-
                 _release_command_lock_best_effort(cid)
-
                 errors.append(f"{cid}: lock_lost_before_finalize")
                 continue
 
