@@ -5167,7 +5167,11 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                 result_obj = {
                     "ok": False,
                     "error": "capability_returned_non_dict",
+                    "error_message": "capability_returned_non_dict",
                     "capability": capability,
+                    "retryable": False,
+                    "final_failure": True,
+                    "next_commands": [],
                 }
 
             result_obj = _inject_context_into_result(result_obj, cmd_ctx)
@@ -5225,17 +5229,44 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                 result_obj["root_event_id"] = root_event_id or ""
                 result_obj["source_event_id"] = source_event_id or ""
                 result_obj["workspace_id"] = workspace_id or "production"
-                result_obj["linked_run"] = _pick(result_obj.get("linked_run"), cmd_ctx.get("linked_run"), run_record_id)
-                result_obj["run_record_id"] = _pick(result_obj.get("run_record_id"), cmd_ctx.get("run_record_id"), run_record_id)
+                result_obj["linked_run"] = _pick(
+                    result_obj.get("linked_run"),
+                    cmd_ctx.get("linked_run"),
+                    run_record_id,
+                )
+                result_obj["run_record_id"] = _pick(
+                    result_obj.get("run_record_id"),
+                    cmd_ctx.get("run_record_id"),
+                    run_record_id,
+                )
                 result_obj["command_id"] = _pick(result_obj.get("command_id"), cid)
 
-            spawn_res = _spawn_next_commands_from_result(
-                parent_command_id=cid,
-                parent_idempotency_key=idem,
-                workspace_id=workspace_id,
-                result_obj=result_obj,
-                root_event_id=root_event_id,
+            result_is_ok = not (result_obj.get("ok") is False)
+
+            allow_spawn = (
+                result_is_ok
+                or _is_truthy(result_obj.get("final_failure"))
+                or _is_truthy(result_obj.get("spawn_on_error"))
             )
+
+            spawn_res = {
+                "ok": True,
+                "spawned": 0,
+                "skipped": 0,
+                "errors": [],
+                "flow_id": flow_id,
+                "root_event_id": root_event_id,
+                "max_depth": CHAIN_MAX_DEPTH,
+            }
+
+            if allow_spawn:
+                spawn_res = _spawn_next_commands_from_result(
+                    parent_command_id=cid,
+                    parent_idempotency_key=idem,
+                    workspace_id=workspace_id,
+                    result_obj=result_obj,
+                    root_event_id=root_event_id,
+                )
 
             if isinstance(result_obj, dict):
                 result_obj["spawn_summary"] = spawn_res
@@ -5255,7 +5286,12 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                     )
 
                 if not result_obj.get("source_event_id"):
-                    result_obj["source_event_id"] = source_event_id or result_obj.get("root_event_id") or result_obj.get("flow_id") or ""
+                    result_obj["source_event_id"] = (
+                        source_event_id
+                        or result_obj.get("root_event_id")
+                        or result_obj.get("flow_id")
+                        or ""
+                    )
 
                 if not result_obj.get("workspace_id"):
                     result_obj["workspace_id"] = workspace_id or "production"
@@ -5269,9 +5305,24 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                 if not result_obj.get("command_id"):
                     result_obj["command_id"] = cid
 
-            _command_mark_done_best_effort(cid, run_record_id, result_obj)
-            succeeded += 1
-
+            if result_is_ok:
+                _command_mark_done_best_effort(cid, run_record_id, result_obj)
+                succeeded += 1
+            else:
+                error_message = _pick(
+                    result_obj.get("error_message"),
+                    result_obj.get("error"),
+                    result_obj.get("message"),
+                    "capability_failed",
+                )
+                _command_mark_retry_or_dead_from_result_best_effort(
+                    command_id=cid,
+                    run_record_id=run_record_id,
+                    fields=fields,
+                    result_obj=result_obj,
+                )
+                failed += 1
+                errors.append(f"{cid}: {error_message}")
         except HTTPException as e:
             msg = str(e.detail)
             failed += 1
