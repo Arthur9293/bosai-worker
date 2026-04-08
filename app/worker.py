@@ -7636,7 +7636,7 @@ def capability_planner_monitoring(req: RunRequest, run_record_id: str) -> Dict[s
     }
 
 def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    print("HTTP_EXEC_WRAPPER_V5_ENTERED", flush=True)
+    print("HTTP_EXEC_WRAPPER_V6_ENTERED", flush=True)
 
     payload = _normalize_flow_keys(req.input or {})
     workspace_id = _resolve_workspace_id(req=req)
@@ -7800,6 +7800,64 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
     if "next_commands" not in result or not isinstance(result.get("next_commands"), list):
         result["next_commands"] = []
 
+    core_next_commands = result.get("next_commands", [])
+    core_retry_planned = bool(result.get("retry_planned"))
+
+    # ------------------------------------------------------------
+    # IMPORTANT GUARDRAIL:
+    # if core already planned a retry, DO NOT override it
+    # ------------------------------------------------------------
+    if core_retry_planned and core_next_commands:
+        result["flow_id"] = flow_id
+        result["root_event_id"] = root_event_id
+        result["source_event_id"] = source_event_id
+        result["event_id"] = source_event_id
+        result["workspace_id"] = workspace_id
+        result["run_record_id"] = run_record_id
+        result["linked_run"] = run_record_id
+        result["goal"] = goal or result.get("goal") or ""
+        result["terminal"] = False
+
+        try:
+            _append_flow_step_safe(
+                flow_id=flow_id,
+                workspace_id=workspace_id,
+                step_obj={
+                    "step_index": step_index,
+                    "capability": "http_exec",
+                    "status": "retry_planned",
+                    "http_status": status_code,
+                    "goal": goal,
+                    "error": result.get("error"),
+                    "error_message": result.get("error_message"),
+                    "run_record_id": run_record_id,
+                },
+            )
+        except Exception as e:
+            print("[worker.wrapper] append_flow_step_safe retry error =", str(e), flush=True)
+
+        try:
+            _update_flow_registry_safe(
+                flow_id=flow_id,
+                workspace_id=workspace_id,
+                status="Running",
+                current_step=step_index,
+                last_decision="http_exec_retry_planned",
+                memory_obj={
+                    "last_http_status": status_code,
+                    "last_goal": goal,
+                    "last_error": result.get("error"),
+                    "retry_planned": True,
+                },
+                result_obj=result,
+                linked_run=[run_record_id],
+            )
+        except Exception as e:
+            print("[worker.wrapper] update_flow_registry_safe retry error =", str(e), flush=True)
+
+        print("[worker.wrapper] returning core retry result =", result, flush=True)
+        return result
+
     if "terminal" not in result:
         result["terminal"] = not bool(result["next_commands"])
 
@@ -7807,8 +7865,17 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
 
     # ------------------------------------------------------------
     # FAILURE PATH -> incident_router_v2
+    # only if retry is NOT already planned by core
     # ------------------------------------------------------------
-    if (result.get("ok") is False) or (isinstance(status_code, int) and status_code >= 400):
+    should_enter_failure_path = (
+        (
+            (result.get("ok") is False)
+            or (isinstance(status_code, int) and status_code >= 400)
+        )
+        and not core_retry_planned
+    )
+
+    if should_enter_failure_path:
         incident_input = {
             "flow_id": flow_id,
             "root_event_id": root_event_id,
@@ -7818,26 +7885,74 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
             "_depth": _to_int(payload.get("_depth"), 0) + 1,
             "workspace_id": workspace_id,
             "workspace": workspace_id,
-            "goal": payload.get("goal") or payload.get("failed_goal") or "incident_probe",
-            "reason": payload.get("reason") or payload.get("retry_reason") or "http_status_error",
-            "retry_reason": payload.get("retry_reason") or payload.get("reason") or "http_status_error",
+            "goal": (
+                payload.get("goal")
+                or payload.get("failed_goal")
+                or result.get("goal")
+                or "incident_probe"
+            ),
+            "reason": (
+                result.get("error")
+                or payload.get("reason")
+                or payload.get("retry_reason")
+                or "http_status_error"
+            ),
+            "retry_reason": (
+                result.get("error")
+                or payload.get("retry_reason")
+                or payload.get("reason")
+                or "http_status_error"
+            ),
             "error": result.get("error") or payload.get("error"),
             "error_message": result.get("error_message") or payload.get("error_message"),
-            "incident_message": result.get("error_message") or payload.get("error_message"),
+            "incident_message": (
+                result.get("error_message")
+                or payload.get("incident_message")
+                or payload.get("error_message")
+            ),
             "http_status": status_code,
             "status_code": status_code,
-            "retry_count": payload.get("retry_count", 0),
-            "retry_max": payload.get("retry_max", 2),
+            "retry_count": result.get("retry_count", payload.get("retry_count", 0)),
+            "retry_max": result.get("retry_max", payload.get("retry_max", 2)),
             "final_failure": True,
             "source_capability": "http_exec",
             "original_capability": "http_exec",
-            "failed_goal": payload.get("failed_goal") or payload.get("goal") or "retry_probe",
-            "failed_url": payload.get("failed_url") or payload.get("url") or payload.get("http_target"),
-            "failed_method": payload.get("failed_method") or payload.get("method") or "GET",
-            "target_url": payload.get("url") or payload.get("failed_url") or payload.get("http_target"),
-            "url": payload.get("url") or payload.get("failed_url") or payload.get("http_target"),
-            "http_target": payload.get("http_target") or payload.get("url") or payload.get("failed_url"),
-            "method": payload.get("method") or payload.get("failed_method") or "GET",
+            "failed_goal": (
+                payload.get("failed_goal")
+                or payload.get("goal")
+                or result.get("goal")
+                or "retry_probe"
+            ),
+            "failed_url": (
+                payload.get("failed_url")
+                or payload.get("url")
+                or payload.get("http_target")
+            ),
+            "failed_method": (
+                payload.get("failed_method")
+                or payload.get("method")
+                or "GET"
+            ),
+            "target_url": (
+                payload.get("url")
+                or payload.get("failed_url")
+                or payload.get("http_target")
+            ),
+            "url": (
+                payload.get("url")
+                or payload.get("failed_url")
+                or payload.get("http_target")
+            ),
+            "http_target": (
+                payload.get("http_target")
+                or payload.get("url")
+                or payload.get("failed_url")
+            ),
+            "method": (
+                payload.get("method")
+                or payload.get("failed_method")
+                or "GET"
+            ),
             "request": result.get("request") if isinstance(result.get("request"), dict) else {},
             "response": result.get("response") if isinstance(result.get("response"), dict) else {},
             "incident_code": (
