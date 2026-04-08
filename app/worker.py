@@ -5525,10 +5525,13 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
     if not isinstance(normalized, dict):
         normalized = {}
 
-    # IMPORTANT:
-    # on garde tout le payload brut, puis on applique les clés normalisées par-dessus
+    # SAFE:
+    # on part du payload brut, puis on ajoute uniquement
+    # les clés normalisées manquantes/vide.
     payload = dict(raw_input)
-    payload.update(normalized)
+    for k, v in normalized.items():
+        if k not in payload or payload.get(k) in (None, "", {}, []):
+            payload[k] = v
 
     workspace_id = _resolve_workspace_id(req=req)
     flow_id, root_event_id = _resolve_flow_ids(payload)
@@ -5544,21 +5547,28 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
         or ""
     ).strip()
 
-    payload["flow_id"] = flow_id
-    payload["root_event_id"] = root_event_id
-    payload["source_event_id"] = source_event_id
-    payload["event_id"] = source_event_id
-    payload["workspace_id"] = workspace_id
-    payload["workspace"] = workspace_id
-
+    # SAFE:
+    # on complète sans écraser la matière utile déjà présente
+    if not str(payload.get("flow_id") or "").strip():
+        payload["flow_id"] = flow_id
+    if not str(payload.get("root_event_id") or "").strip():
+        payload["root_event_id"] = root_event_id
+    if not str(payload.get("source_event_id") or "").strip():
+        payload["source_event_id"] = source_event_id
+    if not str(payload.get("event_id") or "").strip():
+        payload["event_id"] = source_event_id
+    if not str(payload.get("workspace_id") or "").strip():
+        payload["workspace_id"] = workspace_id
+    if not str(payload.get("workspace") or "").strip():
+        payload["workspace"] = workspace_id
     if not str(payload.get("run_record_id") or "").strip():
         payload["run_record_id"] = run_record_id
     if not str(payload.get("linked_run") or "").strip():
         payload["linked_run"] = run_record_id
 
-    try:
-        print("[retry_router wrapper] merged payload =", repr(payload), flush=True)
+    print("[retry_router wrapper] merged payload =", repr(payload), flush=True)
 
+    try:
         result = capability_retry_router_run(payload=payload)
 
     except Exception as e:
