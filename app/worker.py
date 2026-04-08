@@ -4728,6 +4728,10 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             continue
 
         fn = CAPABILITIES.get(capability)
+
+        print("[command_orchestrator] capability =", capability, flush=True)
+        print("[command_orchestrator] fn =", fn, flush=True)
+        
         if not fn:
             unsupported += 1
             _command_mark_unsupported_best_effort(
@@ -4780,6 +4784,9 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             fallback_run_record_id=run_record_id,
         )
         cmd_input = _inject_context_into_input(raw_cmd_input, cmd_ctx)
+
+        print("[command_orchestrator] cmd_input capability =", capability, flush=True)
+        print("[command_orchestrator] cmd_input payload =", cmd_input, flush=True)
 
         dup_done = find_done_command_by_idem(idem, exclude_record_id=cid)
         if dup_done:
