@@ -1146,7 +1146,6 @@ def capability_send_lead_email(req: RunRequest, run_record_id: str) -> Dict[str,
         "run_record_id": run_record_id,
     }
 
-
 def _json_load_maybe(val: Any) -> Dict[str, Any]:
     if val is None:
         return {}
@@ -1155,6 +1154,8 @@ def _json_load_maybe(val: Any) -> Dict[str, Any]:
         return val
 
     if isinstance(val, list):
+        if val and isinstance(val[0], dict):
+            return val[0]
         return {}
 
     s = str(val).strip()
@@ -1163,11 +1164,21 @@ def _json_load_maybe(val: Any) -> Dict[str, Any]:
 
     candidates = [s]
 
-    # cas: chaîne entourée de quotes
     if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
         inner = s[1:-1].strip()
         if inner:
             candidates.append(inner)
+
+    try:
+        decoded = bytes(s, "utf-8").decode("unicode_escape").strip()
+        if decoded:
+            candidates.append(decoded)
+    except Exception:
+        pass
+
+    fixed = s.replace('\\"', '"').strip()
+    if fixed:
+        candidates.append(fixed)
 
     def _unwrap_string_json(parsed: Any) -> Dict[str, Any]:
         current = parsed
@@ -1191,56 +1202,28 @@ def _json_load_maybe(val: Any) -> Dict[str, Any]:
                 return {}
         return current if isinstance(current, dict) else {}
 
+    seen = set()
+
     for candidate in candidates:
-        # 1) json.loads direct
-        try:
-            parsed = json.loads(candidate)
-            out = _unwrap_string_json(parsed)
-            if out:
-                return out
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
-            pass
+        candidate = candidate.strip()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
 
-        # 2) ast.literal_eval pour dict/list Python-like
-        try:
-            parsed = ast.literal_eval(candidate)
-            out = _unwrap_string_json(parsed)
-            if out:
-                return out
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
-            pass
-
-        # 3) tentative unicode_escape
-        try:
-            fixed = bytes(candidate, "utf-8").decode("unicode_escape")
-            parsed = json.loads(fixed)
-            out = _unwrap_string_json(parsed)
-            if out:
-                return out
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
-            pass
-
-        # 4) tentative après dé-échappement simple
-        try:
-            fixed = candidate.replace('\\"', '"')
-            parsed = json.loads(fixed)
-            out = _unwrap_string_json(parsed)
-            if out:
-                return out
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
-            pass
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                parsed = parser(candidate)
+                out = _unwrap_string_json(parsed)
+                if out:
+                    return out
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
 
     print("[_json_load_maybe] JSON PARSE FAILED:", s[:1000], flush=True)
     return {}
-    
+
 def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
