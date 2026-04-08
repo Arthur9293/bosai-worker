@@ -1161,75 +1161,85 @@ def _json_load_maybe(val: Any) -> Dict[str, Any]:
     if not s:
         return {}
 
-    # 1) JSON normal
-    try:
-        parsed = json.loads(s)
+    candidates = [s]
 
-        if isinstance(parsed, dict):
-            return parsed
+    # cas: chaîne entourée de quotes
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        inner = s[1:-1].strip()
+        if inner:
+            candidates.append(inner)
 
-        # cas JSON double-encodé
-        if isinstance(parsed, str):
-            inner = parsed.strip()
-            if inner:
-                try:
-                    parsed2 = json.loads(inner)
-                    if isinstance(parsed2, dict):
-                        return parsed2
-                except Exception:
-                    pass
-    except Exception:
-        pass
+    def _unwrap_string_json(parsed: Any) -> Dict[str, Any]:
+        current = parsed
+        for _ in range(3):
+            if isinstance(current, dict):
+                return current
+            if not isinstance(current, str):
+                return {}
+            inner = current.strip()
+            if not inner:
+                return {}
+            try:
+                current = json.loads(inner)
+                continue
+            except Exception:
+                pass
+            try:
+                current = ast.literal_eval(inner)
+                continue
+            except Exception:
+                return {}
+        return current if isinstance(current, dict) else {}
 
-    # 2) JSON avec quotes échappées
-    try:
-        parsed = json.loads(s.replace('\\"', '"'))
+    for candidate in candidates:
+        # 1) json.loads direct
+        try:
+            parsed = json.loads(candidate)
+            out = _unwrap_string_json(parsed)
+            if out:
+                return out
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
 
-        if isinstance(parsed, dict):
-            return parsed
+        # 2) ast.literal_eval pour dict/list Python-like
+        try:
+            parsed = ast.literal_eval(candidate)
+            out = _unwrap_string_json(parsed)
+            if out:
+                return out
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
 
-        if isinstance(parsed, str):
-            inner = parsed.strip()
-            if inner:
-                try:
-                    parsed2 = json.loads(inner)
-                    if isinstance(parsed2, dict):
-                        return parsed2
-                except Exception:
-                    pass
-    except Exception:
-        pass
+        # 3) tentative unicode_escape
+        try:
+            fixed = bytes(candidate, "utf-8").decode("unicode_escape")
+            parsed = json.loads(fixed)
+            out = _unwrap_string_json(parsed)
+            if out:
+                return out
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
 
-    # 3) unicode_escape
-    try:
-        fixed = bytes(s, "utf-8").decode("unicode_escape")
-        parsed = json.loads(fixed)
+        # 4) tentative après dé-échappement simple
+        try:
+            fixed = candidate.replace('\\"', '"')
+            parsed = json.loads(fixed)
+            out = _unwrap_string_json(parsed)
+            if out:
+                return out
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
 
-        if isinstance(parsed, dict):
-            return parsed
-
-        if isinstance(parsed, str):
-            inner = parsed.strip()
-            if inner:
-                try:
-                    parsed2 = json.loads(inner)
-                    if isinstance(parsed2, dict):
-                        return parsed2
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-    # 4) fallback SAFE pour dict Python sérialisé avec quotes simples
-    try:
-        parsed = ast.literal_eval(s)
-        if isinstance(parsed, dict):
-            return parsed
-    except Exception:
-        pass
-
-    print("[_json_load_maybe] JSON PARSE FAILED:", s)
-    return {}  
+    print("[_json_load_maybe] JSON PARSE FAILED:", s[:1000], flush=True)
+    return {}
     
 def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
