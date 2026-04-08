@@ -5517,10 +5517,19 @@ def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, A
 
 
 def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    
-    print("[retry_router wrapper] req.input =", repr(req.input), flush=True)
-    
-    payload = _normalize_flow_keys(req.input or {})
+    raw_input = dict(req.input or {}) if isinstance(req.input, dict) else {}
+
+    print("[retry_router wrapper] raw req.input =", repr(raw_input), flush=True)
+
+    normalized = _normalize_flow_keys(dict(raw_input))
+    if not isinstance(normalized, dict):
+        normalized = {}
+
+    # IMPORTANT:
+    # on garde tout le payload brut, puis on applique les clés normalisées par-dessus
+    payload = dict(raw_input)
+    payload.update(normalized)
+
     workspace_id = _resolve_workspace_id(req=req)
     flow_id, root_event_id = _resolve_flow_ids(payload)
     step_index = _resolve_flow_step_index(payload, 0)
@@ -5535,7 +5544,6 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
         or ""
     ).strip()
 
-    payload = dict(payload)
     payload["flow_id"] = flow_id
     payload["root_event_id"] = root_event_id
     payload["source_event_id"] = source_event_id
@@ -5549,11 +5557,10 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
         payload["linked_run"] = run_record_id
 
     try:
-        print("[retry_router wrapper] req.input =", repr(req.input), flush=True)
-        print("[retry_router wrapper] normalized payload =", repr(payload), flush=True)
-        
+        print("[retry_router wrapper] merged payload =", repr(payload), flush=True)
+
         result = capability_retry_router_run(payload=payload)
-        
+
     except Exception as e:
         return {
             "ok": False,
