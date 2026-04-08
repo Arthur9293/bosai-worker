@@ -787,6 +787,11 @@ def capability_http_exec(
             "retryable": bool(retryable),
             "final_failure": bool(final_failure),
             "next_commands": next_commands if isinstance(next_commands, list) else [],
+            "event_id": meta["source_event_id"] or meta["root_event_id"] or meta["flow_id"],
+            "goal": _pick_text(
+                original_payload.get("goal"),
+                original_payload.get("failed_goal"),
+            ),
             **base_result_fields,
         }
         result["terminal"] = not bool(result["next_commands"])
@@ -981,6 +986,7 @@ def capability_http_exec(
             return result
 
         retry_count_after_failure = meta["retry_count"] + 1
+        retryable = True
         retry_allowed = retry_count_after_failure <= meta["retry_max"]
 
         _update_monitored_endpoint_best_effort(
@@ -991,9 +997,37 @@ def capability_http_exec(
             elapsed_ms=elapsed_ms,
         )
 
-        incident_commands: List[Dict[str, Any]] = []
-        if not retry_allowed:
-            incident_commands = [
+        next_retry_at = ""
+        next_commands: List[Dict[str, Any]] = []
+
+        if retry_allowed:
+            delay_seconds = _compute_backoff_seconds(
+                original_payload,
+                retry_count_after_failure,
+            )
+            next_retry_at = _build_next_retry_at(delay_seconds)
+
+            retry_router_input = _build_retry_router_input(
+                original_payload=original_payload,
+                meta=meta,
+                run_record_id=run_record_id,
+                retry_count_after_failure=retry_count_after_failure,
+                next_retry_at=next_retry_at,
+                error_code="http_status_error",
+                error_message=f"HTTP request failed with status {response.status_code}",
+                http_status=int(response.status_code),
+                request_summary=request_summary,
+                response_summary=response_payload,
+            )
+
+            next_commands = [
+                {
+                    "capability": "retry_router",
+                    "input": retry_router_input,
+                }
+            ]
+        else:
+            next_commands = [
                 _build_incident_router_command(
                     original_payload=original_payload,
                     meta=meta,
@@ -1014,16 +1048,22 @@ def capability_http_exec(
             response_summary=response_payload,
             http_status=int(response.status_code),
             retry_count_after_failure=retry_count_after_failure,
-            retryable=retry_allowed,
+            retryable=retryable,
             final_failure=not retry_allowed,
-            next_commands=incident_commands,
+            next_commands=next_commands,
         )
+
+        result["retry_planned"] = bool(retry_allowed)
+        if next_retry_at:
+            result["next_retry_at"] = next_retry_at
+
         print("[HTTP_EXEC CORE] error return =", result)
         return result
 
     except requests.Timeout as exc:
         elapsed_ms = int((time.time() - started_at) * 1000)
         retry_count_after_failure = meta["retry_count"] + 1
+        retryable = True
         retry_allowed = retry_count_after_failure <= meta["retry_max"]
         error_message = _trim_text(str(exc), 1000) or "Request timeout"
 
@@ -1045,9 +1085,38 @@ def capability_http_exec(
             elapsed_ms=elapsed_ms,
         )
 
-        incident_commands: List[Dict[str, Any]] = []
-        if not retry_allowed:
-            incident_commands = [
+        next_retry_at = ""
+        next_commands: List[Dict[str, Any]] = []
+
+        if retry_allowed:
+            delay_seconds = _compute_backoff_seconds(
+                original_payload,
+                retry_count_after_failure,
+            )
+            next_retry_at = _build_next_retry_at(delay_seconds)
+
+            retry_router_input = _build_retry_router_input(
+                original_payload=original_payload,
+                meta=meta,
+                run_record_id=run_record_id,
+                retry_count_after_failure=retry_count_after_failure,
+                next_retry_at=next_retry_at,
+                error_code="timeout",
+                error_message=error_message,
+                http_status=None,
+                request_summary=request_summary,
+                response_summary=response_payload,
+                request_error_value=error_message,
+            )
+
+            next_commands = [
+                {
+                    "capability": "retry_router",
+                    "input": retry_router_input,
+                }
+            ]
+        else:
+            next_commands = [
                 _build_incident_router_command(
                     original_payload=original_payload,
                     meta=meta,
@@ -1068,16 +1137,22 @@ def capability_http_exec(
             response_summary=response_payload,
             http_status=None,
             retry_count_after_failure=retry_count_after_failure,
-            retryable=retry_allowed,
+            retryable=retryable,
             final_failure=not retry_allowed,
-            next_commands=incident_commands,
+            next_commands=next_commands,
         )
+
+        result["retry_planned"] = bool(retry_allowed)
+        if next_retry_at:
+            result["next_retry_at"] = next_retry_at
+
         print("[HTTP_EXEC CORE] error return =", result)
         return result
 
     except requests.RequestException as exc:
         elapsed_ms = int((time.time() - started_at) * 1000)
         retry_count_after_failure = meta["retry_count"] + 1
+        retryable = True
         retry_allowed = retry_count_after_failure <= meta["retry_max"]
         error_message = _trim_text(str(exc), 1000) or exc.__class__.__name__
 
@@ -1099,9 +1174,38 @@ def capability_http_exec(
             elapsed_ms=elapsed_ms,
         )
 
-        incident_commands: List[Dict[str, Any]] = []
-        if not retry_allowed:
-            incident_commands = [
+        next_retry_at = ""
+        next_commands: List[Dict[str, Any]] = []
+
+        if retry_allowed:
+            delay_seconds = _compute_backoff_seconds(
+                original_payload,
+                retry_count_after_failure,
+            )
+            next_retry_at = _build_next_retry_at(delay_seconds)
+
+            retry_router_input = _build_retry_router_input(
+                original_payload=original_payload,
+                meta=meta,
+                run_record_id=run_record_id,
+                retry_count_after_failure=retry_count_after_failure,
+                next_retry_at=next_retry_at,
+                error_code="request_exception",
+                error_message=error_message,
+                http_status=None,
+                request_summary=request_summary,
+                response_summary=response_payload,
+                request_error_value=error_message,
+            )
+
+            next_commands = [
+                {
+                    "capability": "retry_router",
+                    "input": retry_router_input,
+                }
+            ]
+        else:
+            next_commands = [
                 _build_incident_router_command(
                     original_payload=original_payload,
                     meta=meta,
@@ -1122,16 +1226,22 @@ def capability_http_exec(
             response_summary=response_payload,
             http_status=None,
             retry_count_after_failure=retry_count_after_failure,
-            retryable=retry_allowed,
+            retryable=retryable,
             final_failure=not retry_allowed,
-            next_commands=incident_commands,
+            next_commands=next_commands,
         )
+
+        result["retry_planned"] = bool(retry_allowed)
+        if next_retry_at:
+            result["next_retry_at"] = next_retry_at
+
         print("[HTTP_EXEC CORE] error return =", result)
         return result
 
     except Exception as exc:
         elapsed_ms = int((time.time() - started_at) * 1000)
         retry_count_after_failure = meta["retry_count"] + 1
+        retryable = True
         retry_allowed = retry_count_after_failure <= meta["retry_max"]
         error_message = _trim_text(f"{exc.__class__.__name__}: {exc}", 1000)
 
@@ -1153,9 +1263,38 @@ def capability_http_exec(
             elapsed_ms=elapsed_ms,
         )
 
-        incident_commands: List[Dict[str, Any]] = []
-        if not retry_allowed:
-            incident_commands = [
+        next_retry_at = ""
+        next_commands: List[Dict[str, Any]] = []
+
+        if retry_allowed:
+            delay_seconds = _compute_backoff_seconds(
+                original_payload,
+                retry_count_after_failure,
+            )
+            next_retry_at = _build_next_retry_at(delay_seconds)
+
+            retry_router_input = _build_retry_router_input(
+                original_payload=original_payload,
+                meta=meta,
+                run_record_id=run_record_id,
+                retry_count_after_failure=retry_count_after_failure,
+                next_retry_at=next_retry_at,
+                error_code="unexpected_exception",
+                error_message=error_message,
+                http_status=None,
+                request_summary=request_summary,
+                response_summary=response_payload,
+                request_error_value=error_message,
+            )
+
+            next_commands = [
+                {
+                    "capability": "retry_router",
+                    "input": retry_router_input,
+                }
+            ]
+        else:
+            next_commands = [
                 _build_incident_router_command(
                     original_payload=original_payload,
                     meta=meta,
@@ -1176,10 +1315,15 @@ def capability_http_exec(
             response_summary=response_payload,
             http_status=None,
             retry_count_after_failure=retry_count_after_failure,
-            retryable=retry_allowed,
+            retryable=retryable,
             final_failure=not retry_allowed,
-            next_commands=incident_commands,
+            next_commands=next_commands,
         )
+
+        result["retry_planned"] = bool(retry_allowed)
+        if next_retry_at:
+            result["next_retry_at"] = next_retry_at
+
         print("[HTTP_EXEC CORE] error return =", result)
         return result
 
