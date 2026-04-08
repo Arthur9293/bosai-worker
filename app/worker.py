@@ -8514,7 +8514,6 @@ CAPABILITIES = {
     "lock_acquire": capability_lock_acquire,
     "lock_release": capability_lock_release,
     "retry_queue": capability_retry_queue,
-    "retry_router": capability_retry_router,
     "lock_recovery": capability_lock_recovery,
     "command_orchestrator": capability_command_orchestrator,
     "event_engine": capability_event_engine,
