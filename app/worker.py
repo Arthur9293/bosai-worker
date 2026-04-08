@@ -5306,423 +5306,122 @@ def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, A
 
 def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
-    flow_id, root_event_id = _resolve_flow_ids(payload)
-
-    if not flow_id:
-        raise HTTPException(status_code=400, detail="retry_router missing flow_id")
-
     workspace_id = _resolve_workspace_id(req=req)
+    flow_id, root_event_id = _resolve_flow_ids(payload)
     step_index = _resolve_flow_step_index(payload, 0)
 
-    orchestration_capabilities = {
-        "retry_router",
-        "decision_router",
-        "incident_router",
-        "incident_router_v2",
-        "incident_deduplicate",
-        "incident_create",
-        "internal_escalate",
-        "resolve_incident",
-        "complete_flow_incident",
-        "complete_flow",
-        "complete_flow_demo",
-    }
-
-    def _pick_business_capability(*values: Any, fallback: str = "http_exec") -> str:
-        first_non_empty = ""
-
-        for value in values:
-            text = str(value or "").strip()
-            if not text:
-                continue
-
-            if not first_non_empty:
-                first_non_empty = text
-
-            if text not in orchestration_capabilities:
-                return text
-
-        if first_non_empty and first_non_empty not in orchestration_capabilities:
-            return first_non_empty
-
-        return fallback
-
-    failed_url = str(
-        payload.get("failed_url")
-        or payload.get("url")
-        or payload.get("http_target")
+    source_event_id = str(
+        payload.get("source_event_id")
+        or payload.get("sourceEventId")
+        or payload.get("event_id")
+        or payload.get("eventId")
+        or root_event_id
+        or flow_id
         or ""
     ).strip()
 
-    failed_goal = str(
-        payload.get("failed_goal")
-        or payload.get("goal")
-        or "retry_probe"
-    ).strip()
+    payload = dict(payload)
+    payload["flow_id"] = flow_id
+    payload["root_event_id"] = root_event_id
+    payload["source_event_id"] = source_event_id
+    payload["event_id"] = source_event_id
+    payload["workspace_id"] = workspace_id
+    payload["workspace"] = workspace_id
 
-    failed_method = str(
-        payload.get("failed_method")
-        or payload.get("method")
-        or "GET"
-    ).strip().upper()
-
-    original_input = payload.get("original_input") if isinstance(payload.get("original_input"), dict) else {}
-
-    original_capability = _pick_business_capability(
-        payload.get("failed_capability"),
-        payload.get("source_capability"),
-        payload.get("original_capability"),
-        original_input.get("failed_capability") if isinstance(original_input, dict) else "",
-        original_input.get("source_capability") if isinstance(original_input, dict) else "",
-        original_input.get("original_capability") if isinstance(original_input, dict) else "",
-        fallback="http_exec",
-    )
-
-    error_text = str(
-        payload.get("error")
-        or payload.get("last_error")
-        or ""
-    ).strip()
-
-    retry_reason = str(
-        payload.get("retry_reason")
-        or payload.get("reason")
-        or "http_failure"
-    ).strip()
+    if not str(payload.get("run_record_id") or "").strip():
+        payload["run_record_id"] = run_record_id
+    if not str(payload.get("linked_run") or "").strip():
+        payload["linked_run"] = run_record_id
 
     try:
-        retry_count = int(payload.get("retry_count") or 0)
-    except Exception:
-        retry_count = 0
-
-    try:
-        retry_max = int(payload.get("retry_max") or 2)
-    except Exception:
-        retry_max = 2
-
-    http_status = None
-
-    if payload.get("http_status") is not None:
-        try:
-            http_status = int(payload.get("http_status"))
-        except Exception:
-            http_status = None
-    elif payload.get("status_code") is not None:
-        try:
-            http_status = int(payload.get("status_code"))
-        except Exception:
-            http_status = None
-    elif isinstance(payload.get("response"), dict) and payload["response"].get("status_code") is not None:
-        try:
-            http_status = int(payload["response"]["status_code"])
-        except Exception:
-            http_status = None
-
-    retryable_statuses = {408, 409, 425, 429, 500, 502, 503, 504}
-    retryable_reasons = {
-        "http_failure",
-        "probe_failed",
-        "timeout",
-        "request_failed",
-        "temporary_failure",
-        "http_status_error",
-        "request_exception",
-    }
-
-    should_retry = False
-    if http_status is not None:
-        should_retry = http_status in retryable_statuses
-    elif retry_reason in retryable_reasons:
-        should_retry = True
-
-    decision = ""
-    reason = ""
-    next_commands: List[Dict[str, Any]] = []
-    terminal = False
-    retry_delay_seconds = 0
-    status = "decision_made"
-
-    # état effectif qu’on renverra/loguera
-    effective_retry_count = retry_count
-    effective_retry_max = retry_max
-
-    def _base_downstream_input(
-        *,
-        next_step_index: int,
-        goal_value: str,
-        reason_value: str,
-    ) -> Dict[str, Any]:
+        result = capability_retry_router_run(payload=payload)
+    except Exception as e:
         return {
-            # clés canon
+            "ok": False,
+            "capability": "retry_router",
+            "status": "error",
+            "error": "retry_router_wrapper_exception",
+            "error_message": str(e),
             "flow_id": flow_id,
             "root_event_id": root_event_id,
-            "step_index": next_step_index,
-            "goal": goal_value,
-            "reason": reason_value,
-            "retry_reason": retry_reason,
-            "http_status": http_status,
-            "status_code": http_status,
-            "error": error_text,
-            "original_capability": original_capability,
-            "source_capability": original_capability,
-            "failed_capability": original_capability,
-            "failed_goal": failed_goal,
-            "failed_url": failed_url,
-            "failed_method": failed_method,
-            "retry_count": effective_retry_count,
-            "retry_max": effective_retry_max,
+            "source_event_id": source_event_id,
             "workspace_id": workspace_id,
             "run_record_id": run_record_id,
-            # alias legacy / tolérance
-            "flowid": flow_id,
-            "rooteventid": root_event_id,
-            "stepindex": next_step_index,
-            "url": failed_url,
-            "http_target": failed_url,
-            "method": failed_method,
+            "linked_run": run_record_id,
+            "next_commands": [],
+            "terminal": True,
         }
 
-    # 1) succès réel -> terminaison propre
-    if http_status is not None and http_status < 400:
-        decision = "no_retry_needed"
-        reason = "http_success"
-        status = "success_no_retry"
-        terminal = False
-
-        next_commands = [
-            {
-                "capability": "complete_flow_demo",
-                "priority": 1,
-                "input": {
-                    "flow_id": flow_id,
-                    "root_event_id": root_event_id,
-                    "step_index": step_index + 1,
-                    "goal": "success_no_retry",
-                    "workspace_id": workspace_id,
-                    "run_record_id": run_record_id,
-                    "flowid": flow_id,
-                    "rooteventid": root_event_id,
-                    "stepindex": step_index + 1,
-                },
-            }
-        ]
-
-    # 2) URL absente -> incident direct
-    elif not failed_url:
-        decision = "missing_failed_url_to_incident"
-        reason = "missing_failed_url"
-        status = "missing_failed_url"
-        terminal = False
-
-        next_commands = [
-            {
-                "capability": "incident_router",
-                "priority": 1,
-                "input": _base_downstream_input(
-                    next_step_index=step_index + 1,
-                    goal_value="incident_missing_failed_url",
-                    reason_value="missing_failed_url",
-                ),
-            }
-        ]
-
-    # 3) erreur non retryable -> incident direct
-    elif not should_retry:
-        decision = "non_retryable_to_incident"
-        reason = f"non_retryable:{retry_reason or 'unknown'}"
-        status = "non_retryable_failure"
-        terminal = False
-
-        next_commands = [
-            {
-                "capability": "incident_router",
-                "priority": 1,
-                "input": _base_downstream_input(
-                    next_step_index=step_index + 1,
-                    goal_value="incident_non_retryable_http_failure",
-                    reason_value=retry_reason or "non_retryable_failure",
-                ),
-            }
-        ]
-
-    # 4) retry possible -> on relance la capability métier
-    elif retry_count < retry_max:
-        next_retry_count = retry_count + 1
-        retry_delay_seconds = min(60, 2 ** retry_count)
-
-        decision = "retry_http_exec"
-        reason = f"{retry_reason}_retry_{next_retry_count}_of_{retry_max}"
-        status = "retry_scheduled"
-        terminal = False
-
-        effective_retry_count = next_retry_count
-        effective_retry_max = retry_max
-
-        next_commands = [
-            {
-                "capability": original_capability or "http_exec",
-                "priority": 2,
-                "input": {
-                    "url": failed_url,
-                    "http_target": failed_url,
-                    "method": failed_method,
-                    "flow_id": flow_id,
-                    "root_event_id": root_event_id,
-                    "workspace_id": workspace_id,
-                    "step_index": step_index + 1,
-                    "goal": failed_goal or "retry_after_http_failure",
-                    "reason": reason,
-                    "retry_reason": retry_reason,
-                    "origin_reason": retry_reason,
-                    "original_capability": original_capability or "http_exec",
-                    "source_capability": original_capability or "http_exec",
-                    "failed_capability": original_capability or "http_exec",
-                    "original_input": (
-                        payload.get("original_input")
-                        if isinstance(payload.get("original_input"), dict)
-                        else {
-                            "url": failed_url,
-                            "http_target": failed_url,
-                            "method": failed_method,
-                            "flow_id": flow_id,
-                            "root_event_id": root_event_id,
-                            "workspace_id": workspace_id,
-                        }
-                    ),
-                    "retry_count": next_retry_count,
-                    "retry_max": retry_max,
-                    "retry_delay_seconds": retry_delay_seconds,
-                    "http_status": http_status,
-                    "status_code": http_status,
-                    "error": error_text,
-                    "failed_url": failed_url,
-                    "failed_method": failed_method,
-                    "failed_goal": failed_goal or "retry_after_http_failure",
-                    "run_record_id": run_record_id,
-                    # alias legacy / tolérance
-                    "flowid": flow_id,
-                    "rooteventid": root_event_id,
-                    "stepindex": step_index + 1,
-                    "body": {
-                        "flow_id": flow_id,
-                        "root_event_id": root_event_id,
-                        "workspace_id": workspace_id,
-                        "retry_count": next_retry_count,
-                        "retry_max": retry_max,
-                        "origin_reason": retry_reason,
-                        "retry_delay_seconds": retry_delay_seconds,
-                        "run_record_id": run_record_id,
-                    },
-                },
-            }
-        ]
-
-    # 5) retry épuisé -> incident
-    else:
-        decision = "retry_exhausted_to_incident"
-        reason = "retry_limit_reached"
-        status = "retry_exhausted"
-        terminal = False
-
-        effective_retry_count = retry_count
-        effective_retry_max = retry_max
-
-        next_commands = [
-            {
-                "capability": "incident_router",
-                "priority": 3,
-                "input": _base_downstream_input(
-                    next_step_index=step_index + 1,
-                    goal_value="incident_after_retry_exhausted",
-                    reason_value="retry_exhausted",
-                ),
-            }
-        ]
-
-    _append_flow_step_safe(
-        flow_id=flow_id,
-        workspace_id=workspace_id,
-        step_obj={
-            "step_index": step_index,
+    if not isinstance(result, dict):
+        result = {
+            "ok": False,
             "capability": "retry_router",
-            "status": status,
-            "decision": decision,
-            "reason": reason,
-            "retry_reason": retry_reason,
-            "retry_count": effective_retry_count,
-            "retry_max": effective_retry_max,
-            "retry_delay_seconds": retry_delay_seconds,
-            "failed_url": failed_url,
-            "failed_goal": failed_goal,
-            "failed_method": failed_method,
-            "original_capability": original_capability,
-            "http_status": http_status,
-            "error": error_text,
+            "status": "error",
+            "error": "retry_router_non_dict_result",
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
+            "source_event_id": source_event_id,
+            "workspace_id": workspace_id,
             "run_record_id": run_record_id,
-        },
-    )
+            "linked_run": run_record_id,
+            "next_commands": [],
+            "terminal": True,
+        }
 
-    _update_flow_registry_safe(
-        flow_id=flow_id,
-        workspace_id=workspace_id,
-        status="Running" if decision != "no_retry_needed" else "Completed",
-        current_step=step_index,
-        last_decision=decision,
-        memory_obj={
-            "retry_count": effective_retry_count,
-            "retry_max": effective_retry_max,
-            "retry_delay_seconds": retry_delay_seconds,
-            "failed_url": failed_url,
-            "failed_goal": failed_goal,
-            "failed_method": failed_method,
-            "original_capability": original_capability,
-            "http_status": http_status,
-            "last_reason": reason,
-            "retry_reason": retry_reason,
-            "error": error_text,
-        },
-        result_obj={
-            "retry_router_result": {
-                "decision": decision,
-                "reason": reason,
-                "retry_reason": retry_reason,
-                "retry_count": effective_retry_count,
-                "retry_max": effective_retry_max,
-                "retry_delay_seconds": retry_delay_seconds,
-                "failed_url": failed_url,
-                "failed_goal": failed_goal,
-                "failed_method": failed_method,
-                "original_capability": original_capability,
-                "http_status": http_status,
-                "error": error_text,
-            }
-        },
-        linked_run=[run_record_id],
-    )
+    result.setdefault("capability", "retry_router")
+    result.setdefault("flow_id", flow_id)
+    result.setdefault("root_event_id", root_event_id)
+    result.setdefault("source_event_id", source_event_id)
+    result.setdefault("workspace_id", workspace_id)
+    result.setdefault("run_record_id", run_record_id)
+    result.setdefault("linked_run", run_record_id)
+    result.setdefault("step_index", step_index)
 
-    return {
-        "ok": True,
-        "capability": "retry_router",
-        "status": status,
-        "flow_id": flow_id,
-        "root_event_id": root_event_id,
-        "workspace_id": workspace_id,
-        "decision": decision,
-        "reason": reason,
-        "retry_reason": retry_reason,
-        "retry_count": effective_retry_count,
-        "retry_max": effective_retry_max,
-        "retry_delay_seconds": retry_delay_seconds,
-        "failed_url": failed_url,
-        "failed_goal": failed_goal,
-        "failed_method": failed_method,
-        "original_capability": original_capability,
-        "http_status": http_status,
-        "error": error_text,
-        "next_commands": next_commands,
-        "terminal": terminal,
-        "run_record_id": run_record_id,
-    }
+    if "next_commands" not in result or not isinstance(result.get("next_commands"), list):
+        result["next_commands"] = []
+
+    if "terminal" not in result:
+        result["terminal"] = not bool(result["next_commands"])
+
+    try:
+        _append_flow_step_safe(
+            flow_id=result.get("flow_id") or flow_id,
+            workspace_id=workspace_id,
+            step_obj={
+                "step_index": step_index,
+                "capability": "retry_router",
+                "status": result.get("status"),
+                "decision": result.get("decision"),
+                "reason": result.get("reason"),
+                "retry_reason": result.get("retry_reason"),
+                "retry_count": result.get("retry_count"),
+                "retry_max": result.get("retry_max"),
+                "run_record_id": run_record_id,
+            },
+        )
+    except Exception:
+        pass
+
+    try:
+        _update_flow_registry_safe(
+            flow_id=result.get("flow_id") or flow_id,
+            workspace_id=workspace_id,
+            status="Running" if not result.get("terminal") else "Completed",
+            current_step=step_index,
+            last_decision=result.get("decision", ""),
+            memory_obj={
+                "retry_reason": result.get("retry_reason"),
+                "retry_count": result.get("retry_count"),
+                "retry_max": result.get("retry_max"),
+                "status": result.get("status"),
+            },
+            result_obj=result,
+            linked_run=[run_record_id],
+        )
+    except Exception:
+        pass
+
+    return result
     
 def capability_sla_router(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
