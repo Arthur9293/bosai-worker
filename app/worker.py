@@ -1993,8 +1993,19 @@ def airtable_update_by_field(
             f"Airtable update_by_field missing record id table={table} field={field} value={value}"
         )
 
-    return airtable_update(table, record_id, fields)
+    safe_fields = dict(fields or {})
 
+    # SAFE PATCH ciblé uniquement pour Monitored_Endpoints
+    if table == "Monitored_Endpoints":
+        safe_fields = _normalize_monitored_endpoints_fields(safe_fields)
+
+    print(
+        f"[airtable_update_by_field] table={table} field={field} value={value} safe_fields={safe_fields}",
+        flush=True,
+    )
+
+    return airtable_update(table, record_id, safe_fields)
+    
 def _normalize_monitored_endpoints_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(fields, dict):
         return {}
