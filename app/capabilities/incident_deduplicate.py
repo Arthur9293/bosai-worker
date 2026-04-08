@@ -584,8 +584,6 @@ def _normalize_decision_block(data: Dict[str, Any]) -> Dict[str, Any]:
         data.get("reason"),
     ).lower()
 
-    sla_status = _pick_text(data.get("sla_status")).lower()
-
     response_obj = data.get("response") if isinstance(data.get("response"), dict) else {}
 
     http_status = _pick_int(
@@ -595,6 +593,8 @@ def _normalize_decision_block(data: Dict[str, Any]) -> Dict[str, Any]:
         data.get("statuscode"),
         response_obj.get("status_code"),
     )
+
+    sla_status = _pick_text(data.get("sla_status")).lower()
 
     input_final_failure = _to_bool(
         data.get("final_failure")
@@ -757,19 +757,24 @@ def _canonical_incident_context(
     next_depth: int,
     decision_block: Dict[str, Any],
 ) -> Dict[str, Any]:
-    original_input = data.get("original_input") if isinstance(data.get("original_input"), dict) else {}
+    # Garde-fou: on parse aussi les JSON sérialisés
+    raw_original_input = _json_load_maybe(data.get("original_input"))
+    original_input = raw_original_input if isinstance(raw_original_input, dict) else {}
     original_input = _normalize_keys_deep(original_input)
     original_input = _unwrap_command_payload(original_input)
     original_input = _normalize_flow_keys(original_input)
 
-    # on récupère request/response aussi depuis original_input si absents en top-level
-    request_obj = data.get("request") if isinstance(data.get("request"), dict) else {}
+    raw_request = _json_load_maybe(data.get("request"))
+    request_obj = raw_request if isinstance(raw_request, dict) else {}
     if not request_obj:
-        request_obj = original_input.get("request") if isinstance(original_input.get("request"), dict) else {}
+        raw_request_from_original = _json_load_maybe(original_input.get("request"))
+        request_obj = raw_request_from_original if isinstance(raw_request_from_original, dict) else {}
 
-    response_obj = data.get("response") if isinstance(data.get("response"), dict) else {}
+    raw_response = _json_load_maybe(data.get("response"))
+    response_obj = raw_response if isinstance(raw_response, dict) else {}
     if not response_obj:
-        response_obj = original_input.get("response") if isinstance(original_input.get("response"), dict) else {}
+        raw_response_from_original = _json_load_maybe(original_input.get("response"))
+        response_obj = raw_response_from_original if isinstance(raw_response_from_original, dict) else {}
 
     flow_id = _pick_text(
         meta.get("flow_id"),
@@ -1148,6 +1153,9 @@ def _find_existing_incident(
     incident_key: str,
     airtable_list_filtered,
 ) -> Optional[Dict[str, Any]]:
+    if not callable(airtable_list_filtered):
+        return None
+
     try:
         safe_key = _escape_airtable_formula_value(incident_key)
         recs = airtable_list_filtered(
@@ -1171,6 +1179,13 @@ def _update_existing_incident_best_effort(
     meta: Dict[str, Any],
     data: Dict[str, Any],
 ) -> Dict[str, Any]:
+    if not callable(airtable_update):
+        return {
+            "ok": False,
+            "attempts": [],
+            "error": "airtable_update_not_callable",
+        }
+
     now_ts = _now_ts()
 
     run_record_id = _pick_text(meta.get("run_record_id"))
@@ -1263,12 +1278,16 @@ def run(
     incidents_table_name: str,
     **kwargs: Any,
 ) -> Dict[str, Any]:
-    payload = getattr(req, "input", {}) if hasattr(req, "input") else req or {}
-    payload = _normalize_keys_deep(payload if isinstance(payload, dict) else {})
+    raw_payload = getattr(req, "input", {}) if hasattr(req, "input") else req or {}
+    raw_payload = _json_load_maybe(raw_payload)
+    payload = raw_payload if isinstance(raw_payload, dict) else {}
+    payload = _normalize_keys_deep(payload)
     payload = _unwrap_command_payload(payload)
     payload = _normalize_flow_keys(payload)
 
-    data = _extract_input(payload)
+    raw_data = _extract_input(payload)
+    raw_data = _json_load_maybe(raw_data)
+    data = raw_data if isinstance(raw_data, dict) else {}
     data = _normalize_keys_deep(data)
     data = _unwrap_command_payload(data)
     data = _normalize_flow_keys(data)
