@@ -5334,7 +5334,11 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
         payload["linked_run"] = run_record_id
 
     try:
+        print("[retry_router wrapper] req.input =", repr(req.input), flush=True)
+        print("[retry_router wrapper] normalized payload =", repr(payload), flush=True)
+        
         result = capability_retry_router_run(payload=payload)
+        
     except Exception as e:
         return {
             "ok": False,
