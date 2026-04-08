@@ -59,6 +59,16 @@ def _pick(payload: Dict[str, Any], *keys: str, default: Any = None) -> Any:
     return default
 
 
+def _pick_multi(dicts: List[Dict[str, Any]], *keys: str, default: Any = None) -> Any:
+    for data in dicts:
+        if not isinstance(data, dict):
+            continue
+        value = _pick(data, *keys, default=None)
+        if value not in (None, ""):
+            return value
+    return default
+
+
 def _coerce_payload(payload: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Dict[str, Any]:
     if isinstance(payload, dict):
         return payload
@@ -88,6 +98,37 @@ def _unwrap_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             return merged
 
     return payload
+
+
+def _extract_nested_sources(payload: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    original_input = _unwrap_payload(
+        _to_dict(
+            _pick(
+                payload,
+                "original_input",
+                "originalinput",
+                "target_input",
+                "targetinput",
+                default={},
+            )
+        )
+    )
+
+    body = _unwrap_payload(
+        _to_dict(_pick(payload, "body", default={}))
+    )
+
+    request = _to_dict(_pick(payload, "request", default={}))
+    response = _to_dict(_pick(payload, "response", default={}))
+
+    fallback_original_input = original_input if original_input else body
+
+    return {
+        "original_input": fallback_original_input if isinstance(fallback_original_input, dict) else {},
+        "body": body if isinstance(body, dict) else {},
+        "request": request if isinstance(request, dict) else {},
+        "response": response if isinstance(response, dict) else {},
+    }
 
 
 def _normalize_method(value: Any) -> str:
@@ -129,41 +170,47 @@ def _pick_business_capability(*values: Any, fallback: str = "http_exec") -> str:
 
 
 def _extract_flow_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
+    nested = _extract_nested_sources(payload)
+    search = [payload, nested["body"], nested["original_input"]]
+
     flow_id = _safe_str(
-        _pick(payload, "flow_id", "flowid", default="")
+        _pick_multi(search, "flow_id", "flowid", default="")
     ).strip()
 
     root_event_id = _safe_str(
-        _pick(payload, "root_event_id", "rooteventid", "event_id", default="")
+        _pick_multi(search, "root_event_id", "rooteventid", "event_id", "eventid", default="")
     ).strip()
 
     source_event_id = _safe_str(
-        _pick(payload, "source_event_id", "sourceeventid", "event_id", "eventid", default="")
+        _pick_multi(search, "source_event_id", "sourceeventid", "event_id", "eventid", default="")
     ).strip()
 
     workspace_id = _safe_str(
-        _pick(payload, "workspace_id", "workspaceid", default="")
+        _pick_multi(search, "workspace_id", "workspaceid", default="")
     ).strip()
 
     parent_command_id = _safe_str(
-        _pick(payload, "parent_command_id", "parentcommandid", default="")
+        _pick_multi(search, "parent_command_id", "parentcommandid", default="")
     ).strip()
 
     command_id = _safe_str(
-        _pick(payload, "command_id", "commandid", default="")
+        _pick_multi(search, "command_id", "commandid", default="")
     ).strip()
 
     linked_run = _safe_str(
-        _pick(payload, "linked_run", "linkedrun", "run_record_id", "runrecordid", default="")
+        _pick_multi(search, "linked_run", "linkedrun", "run_record_id", "runrecordid", default="")
     ).strip()
 
     run_record_id = _safe_str(
-        _pick(payload, "run_record_id", "runrecordid", "linked_run", "linkedrun", default="")
+        _pick_multi(search, "run_record_id", "runrecordid", "linked_run", "linkedrun", default="")
     ).strip()
 
     incident_record_id = _safe_str(
-        _pick(payload, "incident_record_id", "incidentrecordid", default="")
+        _pick_multi(search, "incident_record_id", "incidentrecordid", default="")
     ).strip()
+
+    if not root_event_id:
+        root_event_id = flow_id
 
     if not source_event_id:
         source_event_id = root_event_id or flow_id
@@ -182,24 +229,34 @@ def _extract_flow_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _extract_retry_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
-    retry_count = _to_int(_pick(payload, "retry_count", "retrycount", default=0), 0)
+    nested = _extract_nested_sources(payload)
+    search = [payload, nested["body"], nested["original_input"]]
+
+    retry_count = _to_int(
+        _pick_multi(search, "retry_count", "retrycount", default=0),
+        0,
+    )
     retry_max = _to_int(
-        _pick(payload, "retry_max", "retrymax", default=DEFAULT_RETRY_MAX),
+        _pick_multi(search, "retry_max", "retrymax", default=DEFAULT_RETRY_MAX),
         DEFAULT_RETRY_MAX,
     )
     retry_delay_seconds = _to_int(
-        _pick(
-            payload,
+        _pick_multi(
+            search,
             "retry_delay_seconds",
             "retrydelayseconds",
             "retry_delay",
+            "effective_retry_delay_seconds",
             default=DEFAULT_RETRY_DELAY_SECONDS,
         ),
         DEFAULT_RETRY_DELAY_SECONDS,
     )
-    step_index = _to_int(_pick(payload, "step_index", "stepindex", default=0), 0)
+    step_index = _to_int(
+        _pick_multi(search, "step_index", "stepindex", default=0),
+        0,
+    )
     max_depth = _to_int(
-        _pick(payload, "max_depth", "maxdepth", default=DEFAULT_MAX_DEPTH),
+        _pick_multi(search, "max_depth", "maxdepth", default=DEFAULT_MAX_DEPTH),
         DEFAULT_MAX_DEPTH,
     )
 
@@ -213,94 +270,96 @@ def _extract_retry_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _extract_target_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
-    original_input = _to_dict(
-        _pick(
-            payload,
-            "original_input",
-            "originalinput",
-            "target_input",
-            "targetinput",
-            default={},
-        )
-    )
+    nested = _extract_nested_sources(payload)
+    original_input = nested["original_input"]
+    body = nested["body"]
+    request = nested["request"]
 
-    original_input = _unwrap_payload(original_input)
+    search = [payload, body, original_input]
 
     target_capability = _pick_business_capability(
-        _pick(payload, "target_capability", "targetcapability", default=""),
-        _pick(payload, "failed_capability", "failedcapability", default=""),
-        _pick(payload, "source_capability", "sourcecapability", default=""),
-        _pick(payload, "original_capability", "originalcapability", default=""),
-        _pick(original_input, "target_capability", "targetcapability", default=""),
-        _pick(original_input, "failed_capability", "failedcapability", default=""),
-        _pick(original_input, "source_capability", "sourcecapability", default=""),
-        _pick(original_input, "original_capability", "originalcapability", default=""),
+        _pick_multi(search, "target_capability", "targetcapability", default=""),
+        _pick_multi(search, "failed_capability", "failedcapability", default=""),
+        _pick_multi(search, "source_capability", "sourcecapability", default=""),
+        _pick_multi(search, "original_capability", "originalcapability", default=""),
         fallback="http_exec",
     )
 
     url_value = _safe_str(
-        _pick(
-            original_input,
+        _pick_multi(
+            [payload, body, original_input, request],
             "url",
             "http_target",
             "failed_url",
             "target_url",
             "URL",
-            default=_pick(
-                payload,
-                "url",
-                "http_target",
-                "failed_url",
-                "target_url",
-                "URL",
-                default="",
-            ),
+            default="",
         )
     ).strip()
 
     method_value = _normalize_method(
-        _pick(
-            original_input,
+        _pick_multi(
+            [payload, body, original_input, request],
             "method",
             "failed_method",
             "HTTP_Method",
             "HTTPMethod",
-            default=_pick(
-                payload,
-                "method",
-                "failed_method",
-                "HTTP_Method",
-                "HTTPMethod",
-                default="GET",
-            ),
+            default="GET",
         )
     )
 
     return {
         "target_capability": target_capability,
-        "original_input": original_input,
+        "original_input": original_input if isinstance(original_input, dict) else {},
         "url": url_value,
         "method": method_value,
     }
 
 
 def _extract_error_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
-    response_obj = _to_dict(_pick(payload, "response", default={}))
+    nested = _extract_nested_sources(payload)
+    body = nested["body"]
+    original_input = nested["original_input"]
+    response_obj = nested["response"]
+
+    search = [payload, body, original_input]
 
     retry_reason = _safe_str(
-        _pick(payload, "retry_reason", "retryreason", "reason", default="")
+        _pick_multi(
+            search,
+            "retry_reason",
+            "retryreason",
+            "reason",
+            "origin_reason",
+            "incident_code",
+            default="",
+        )
     ).strip()
 
     error_type = _safe_str(
-        _pick(payload, "error_type", "errortype", "error", default=retry_reason)
+        _pick_multi(
+            search,
+            "error_type",
+            "errortype",
+            "error",
+            default=retry_reason,
+        )
     ).strip()
 
     request_error = _safe_str(
-        _pick(payload, "request_error", "requesterror", "error_message", "last_error", default="")
+        _pick_multi(
+            search,
+            "request_error",
+            "requesterror",
+            "error_message",
+            "last_error",
+            "incident_message",
+            default="",
+        )
     ).strip()
 
-    http_status_raw = _pick(
-        payload,
+    http_status_raw = _pick_multi(
+        search,
         "http_status",
         "httpstatus",
         "status_code",
@@ -314,6 +373,9 @@ def _extract_error_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
             http_status = int(http_status_raw)
         except Exception:
             http_status = None
+
+    if not retry_reason and http_status is not None and 500 <= http_status <= 599:
+        retry_reason = "http_status_error"
 
     return {
         "retry_reason": retry_reason,
@@ -350,6 +412,7 @@ def _is_retryable(payload: Dict[str, Any], error_meta: Dict[str, Any]) -> bool:
         "http_409",
         "http_425",
         "http_status_error",
+        "http_failure",
     }
 
     return retry_reason in retryable_reasons or error_type in retryable_reasons
@@ -366,7 +429,7 @@ def _compute_priority(error_meta: Dict[str, Any]) -> int:
     if http_status is not None and 500 <= http_status <= 599:
         return 2
 
-    if reason in {"timeout", "network_error", "connection_error", "request_exception", "http_status_error"}:
+    if reason in {"timeout", "network_error", "connection_error", "request_exception", "http_status_error", "http_failure"}:
         return 2
 
     return DEFAULT_PRIORITY
