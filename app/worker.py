@@ -1161,26 +1161,27 @@ def _json_load_maybe(val: Any) -> Dict[str, Any]:
     if not s:
         return {}
 
-    # 1er parse
+    # 1) JSON normal
     try:
         parsed = json.loads(s)
 
         if isinstance(parsed, dict):
             return parsed
 
-        # Cas critique : JSON double-encodé
+        # cas JSON double-encodé
         if isinstance(parsed, str):
             inner = parsed.strip()
             if inner:
                 try:
                     parsed2 = json.loads(inner)
-                    return parsed2 if isinstance(parsed2, dict) else {}
+                    if isinstance(parsed2, dict):
+                        return parsed2
                 except Exception:
                     pass
     except Exception:
         pass
 
-    # 2e tentative : quotes échappées
+    # 2) JSON avec quotes échappées
     try:
         parsed = json.loads(s.replace('\\"', '"'))
 
@@ -1192,13 +1193,14 @@ def _json_load_maybe(val: Any) -> Dict[str, Any]:
             if inner:
                 try:
                     parsed2 = json.loads(inner)
-                    return parsed2 if isinstance(parsed2, dict) else {}
+                    if isinstance(parsed2, dict):
+                        return parsed2
                 except Exception:
                     pass
     except Exception:
         pass
 
-    # 3e tentative : unicode_escape
+    # 3) unicode_escape
     try:
         fixed = bytes(s, "utf-8").decode("unicode_escape")
         parsed = json.loads(fixed)
@@ -1211,9 +1213,18 @@ def _json_load_maybe(val: Any) -> Dict[str, Any]:
             if inner:
                 try:
                     parsed2 = json.loads(inner)
-                    return parsed2 if isinstance(parsed2, dict) else {}
+                    if isinstance(parsed2, dict):
+                        return parsed2
                 except Exception:
                     pass
+    except Exception:
+        pass
+
+    # 4) fallback SAFE pour dict Python sérialisé avec quotes simples
+    try:
+        parsed = ast.literal_eval(s)
+        if isinstance(parsed, dict):
+            return parsed
     except Exception:
         pass
 
