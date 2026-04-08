@@ -1995,7 +1995,34 @@ def airtable_update_by_field(
 
     return airtable_update(table, record_id, fields)
 
+def _normalize_monitored_endpoints_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(fields, dict):
+        return {}
 
+    mapping = {
+        "last_check_at": "last_check_at",
+        "last_error": "last_error",
+        "last_status": "Last_Status",
+        "last_response_time_ms": "Last_Response_Time_ms",
+        "last_run_id": "Last_Run_ID",
+        "last_incident_id": "Last_Incident_ID",
+
+        # tolérance si un autre bloc envoie déjà une autre casse
+        "Last_Check_At": "last_check_at",
+        "Last_Error": "last_error",
+        "Last_Status": "Last_Status",
+        "Last_Response_Time_ms": "Last_Response_Time_ms",
+        "Last_Run_ID": "Last_Run_ID",
+        "Last_Incident_ID": "Last_Incident_ID",
+    }
+
+    normalized: Dict[str, Any] = {}
+    for k, v in fields.items():
+        key = str(k).strip()
+        normalized[mapping.get(key, key)] = v
+
+    return normalized
+    
 def _monitoring_endpoint_to_api(record: Dict[str, Any]) -> Dict[str, Any]:
     fields = record.get("fields", {}) if isinstance(record, dict) else {}
     if not isinstance(fields, dict):
