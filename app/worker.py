@@ -1,6 +1,7 @@
 # app/worker.py — BOSAI Worker rebuilt
 import hashlib
 import hmac
+import ast
 import json
 import os
 import threading
