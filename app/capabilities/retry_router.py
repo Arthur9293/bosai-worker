@@ -88,7 +88,11 @@ def _unwrap_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
 
-    for key in ("command_input", "commandinput", "input", "body"):
+    # SAFE:
+    # on unwrap uniquement les enveloppes d’orchestration.
+    # on ne touche PAS à "body", sinon on écrase le contexte erreur
+    # top-level venant de http_exec.
+    for key in ("command_input", "commandinput", "input"):
         nested = payload.get(key)
         if isinstance(nested, dict):
             merged = dict(nested)
@@ -97,34 +101,38 @@ def _unwrap_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
                     merged[k] = v
             return merged
 
-    return payload
+    return dict(payload)
+
+
+def _merge_preserving_top_level(raw_payload: Dict[str, Any], unwrapped_payload: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(raw_payload or {})
+
+    for k, v in (unwrapped_payload or {}).items():
+        if k not in merged or merged.get(k) in (None, "", {}, []):
+            merged[k] = v
+
+    return merged
 
 
 def _extract_nested_sources(payload: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    original_input = _unwrap_payload(
-        _to_dict(
-            _pick(
-                payload,
-                "original_input",
-                "originalinput",
-                "target_input",
-                "targetinput",
-                default={},
-            )
+    original_input = _to_dict(
+        _pick(
+            payload,
+            "original_input",
+            "originalinput",
+            "target_input",
+            "targetinput",
+            default={},
         )
     )
+    original_input = _unwrap_payload(original_input) if isinstance(original_input, dict) else {}
 
-    body = _unwrap_payload(
-        _to_dict(_pick(payload, "body", default={}))
-    )
-
+    body = _to_dict(_pick(payload, "body", default={}))
     request = _to_dict(_pick(payload, "request", default={}))
     response = _to_dict(_pick(payload, "response", default={}))
 
-    fallback_original_input = original_input if original_input else body
-
     return {
-        "original_input": fallback_original_input if isinstance(fallback_original_input, dict) else {},
+        "original_input": original_input if isinstance(original_input, dict) else {},
         "body": body if isinstance(body, dict) else {},
         "request": request if isinstance(request, dict) else {},
         "response": response if isinstance(response, dict) else {},
@@ -171,7 +179,7 @@ def _pick_business_capability(*values: Any, fallback: str = "http_exec") -> str:
 
 def _extract_flow_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
     nested = _extract_nested_sources(payload)
-    search = [payload, nested["body"], nested["original_input"]]
+    search = [payload, nested["original_input"], nested["body"]]
 
     flow_id = _safe_str(
         _pick_multi(search, "flow_id", "flowid", default="")
@@ -230,7 +238,7 @@ def _extract_flow_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def _extract_retry_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
     nested = _extract_nested_sources(payload)
-    search = [payload, nested["body"], nested["original_input"]]
+    search = [payload, nested["original_input"], nested["body"]]
 
     retry_count = _to_int(
         _pick_multi(search, "retry_count", "retrycount", default=0),
@@ -275,7 +283,7 @@ def _extract_target_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
     body = nested["body"]
     request = nested["request"]
 
-    search = [payload, body, original_input]
+    search = [payload, original_input, body]
 
     target_capability = _pick_business_capability(
         _pick_multi(search, "target_capability", "targetcapability", default=""),
@@ -287,7 +295,7 @@ def _extract_target_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     url_value = _safe_str(
         _pick_multi(
-            [payload, body, original_input, request],
+            [payload, original_input, body, request],
             "url",
             "http_target",
             "failed_url",
@@ -299,7 +307,7 @@ def _extract_target_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     method_value = _normalize_method(
         _pick_multi(
-            [payload, body, original_input, request],
+            [payload, original_input, body, request],
             "method",
             "failed_method",
             "HTTP_Method",
@@ -308,9 +316,21 @@ def _extract_target_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
         )
     )
 
+    original_input_seed = dict(original_input or {})
+    if url_value and _pick(original_input_seed, "url", "http_target", "target_url", default="") in (None, ""):
+        original_input_seed["url"] = url_value
+        original_input_seed["http_target"] = url_value
+
+    if _pick(original_input_seed, "method", default="") in (None, ""):
+        original_input_seed["method"] = method_value
+
+    goal_value = _pick_multi([payload, original_input, body], "goal", "failed_goal", default="")
+    if goal_value and _pick(original_input_seed, "goal", default="") in (None, ""):
+        original_input_seed["goal"] = goal_value
+
     return {
         "target_capability": target_capability,
-        "original_input": original_input if isinstance(original_input, dict) else {},
+        "original_input": original_input_seed,
         "url": url_value,
         "method": method_value,
     }
@@ -318,11 +338,11 @@ def _extract_target_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def _extract_error_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
     nested = _extract_nested_sources(payload)
-    body = nested["body"]
     original_input = nested["original_input"]
+    body = nested["body"]
     response_obj = nested["response"]
 
-    search = [payload, body, original_input]
+    search = [payload, original_input, body]
 
     retry_reason = _safe_str(
         _pick_multi(
@@ -377,6 +397,9 @@ def _extract_error_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not retry_reason and http_status is not None and 500 <= http_status <= 599:
         retry_reason = "http_status_error"
 
+    if not error_type and retry_reason:
+        error_type = retry_reason
+
     return {
         "retry_reason": retry_reason,
         "error_type": error_type,
@@ -429,7 +452,14 @@ def _compute_priority(error_meta: Dict[str, Any]) -> int:
     if http_status is not None and 500 <= http_status <= 599:
         return 2
 
-    if reason in {"timeout", "network_error", "connection_error", "request_exception", "http_status_error", "http_failure"}:
+    if reason in {
+        "timeout",
+        "network_error",
+        "connection_error",
+        "request_exception",
+        "http_status_error",
+        "http_failure",
+    }:
         return 2
 
     return DEFAULT_PRIORITY
@@ -453,7 +483,7 @@ def _compose_retry_input(
     target_meta: Dict[str, Any],
     error_meta: Dict[str, Any],
 ) -> Dict[str, Any]:
-    original_input = dict(target_meta["original_input"])
+    original_input = dict(target_meta["original_input"] or {})
 
     next_retry_count = retry_meta["retry_count"] + 1
     next_step_index = retry_meta["step_index"] + 1
@@ -487,6 +517,7 @@ def _compose_retry_input(
         "original_capability": target_meta["target_capability"],
         "source_capability": target_meta["target_capability"],
         "failed_capability": target_meta["target_capability"],
+        "target_capability": target_meta["target_capability"],
     }
 
     if target_meta["url"]:
@@ -512,6 +543,7 @@ def _compose_retry_input(
     if error_meta["request_error"]:
         retry_input["request_error"] = error_meta["request_error"]
         retry_input["error_message"] = error_meta["request_error"]
+        retry_input["last_error"] = error_meta["request_error"]
 
     return retry_input
 
@@ -556,8 +588,9 @@ def _build_log(
 
 
 def run(payload: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Dict[str, Any]:
-    payload = _coerce_payload(payload, **kwargs)
-    payload = _unwrap_payload(payload)
+    raw_payload = _coerce_payload(payload, **kwargs)
+    unwrapped_payload = _unwrap_payload(raw_payload)
+    payload = _merge_preserving_top_level(raw_payload, unwrapped_payload)
 
     flow_meta = _extract_flow_meta(payload)
     retry_meta = _extract_retry_meta(payload)
