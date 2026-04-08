@@ -5305,6 +5305,9 @@ def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, A
 
 
 def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
+    
+    print("[retry_router wrapper] req.input =", repr(req.input), flush=True)
+    
     payload = _normalize_flow_keys(req.input or {})
     workspace_id = _resolve_workspace_id(req=req)
     flow_id, root_event_id = _resolve_flow_ids(payload)
