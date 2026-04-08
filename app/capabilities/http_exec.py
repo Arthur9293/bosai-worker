@@ -90,6 +90,20 @@ def _trim_text(value: Any, limit: int = 2000) -> str:
     return text[:limit] + "…"
 
 
+def _pick_text(*values: Any) -> str:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _pick_dict(value: Any) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
 def _normalize_method(value: Any) -> str:
     method = str(value or "GET").strip().upper()
     if method not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
@@ -169,6 +183,7 @@ def _extract_retry_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
         payload.get("workspace_id")
         or payload.get("workspaceId")
         or payload.get("Workspace_ID")
+        or payload.get("workspace")
         or ""
     )
 
@@ -176,6 +191,21 @@ def _extract_retry_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
         payload.get("parent_command_id")
         or payload.get("parent_id")
         or payload.get("linked_command_id")
+        or payload.get("parentCommandId")
+        or ""
+    )
+
+    command_id = str(
+        payload.get("command_id")
+        or payload.get("commandid")
+        or ""
+    )
+
+    linked_run = str(
+        payload.get("linked_run")
+        or payload.get("linkedrun")
+        or payload.get("run_record_id")
+        or payload.get("runrecordid")
         or ""
     )
 
@@ -193,6 +223,8 @@ def _extract_retry_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
         "source_event_id": source_event_id,
         "workspace_id": workspace_id,
         "parent_command_id": parent_command_id,
+        "command_id": command_id,
+        "linked_run": linked_run,
         "step_index": step_index,
         "retry_count": retry_count,
         "retry_max": retry_max,
@@ -393,6 +425,177 @@ def _build_incident_router_command(
     }
 
 
+def _prune_original_input_for_retry(value: Dict[str, Any]) -> Dict[str, Any]:
+    clean = deepcopy(value or {})
+    for noisy_key in (
+        "next_commands",
+        "spawn_summary",
+        "terminal",
+        "retry_planned",
+        "next_retry_at",
+        "request",
+        "response",
+        "error",
+        "error_message",
+        "incident_message",
+        "status",
+        "ok",
+        "ts",
+    ):
+        clean.pop(noisy_key, None)
+    return clean
+
+
+def _build_retry_router_input(
+    *,
+    original_payload: Dict[str, Any],
+    meta: Dict[str, Any],
+    run_record_id: str,
+    retry_count_after_failure: int,
+    next_retry_at: str,
+    error_code: str,
+    error_message: str,
+    http_status: Optional[int],
+    request_summary: Dict[str, Any],
+    response_summary: Optional[Dict[str, Any]],
+    request_error_value: str = "",
+) -> Dict[str, Any]:
+    retry_input = deepcopy(original_payload)
+
+    flow_id = _pick_text(
+        retry_input.get("flow_id"),
+        meta.get("flow_id"),
+        run_record_id and f"flow_run_{run_record_id}",
+    )
+    root_event_id = _pick_text(
+        retry_input.get("root_event_id"),
+        meta.get("root_event_id"),
+        retry_input.get("event_id"),
+        flow_id,
+    )
+    source_event_id = _pick_text(
+        retry_input.get("source_event_id"),
+        retry_input.get("sourceEventId"),
+        retry_input.get("event_id"),
+        retry_input.get("eventId"),
+        meta.get("source_event_id"),
+        root_event_id,
+        flow_id,
+    )
+    workspace_id = _pick_text(
+        retry_input.get("workspace_id"),
+        retry_input.get("workspaceId"),
+        retry_input.get("Workspace_ID"),
+        retry_input.get("workspace"),
+        meta.get("workspace_id"),
+    )
+    linked_run = _pick_text(
+        run_record_id,
+        retry_input.get("linked_run"),
+        retry_input.get("linkedrun"),
+        retry_input.get("run_record_id"),
+        retry_input.get("runrecordid"),
+        meta.get("linked_run"),
+    )
+    command_id = _pick_text(
+        retry_input.get("command_id"),
+        retry_input.get("commandid"),
+        meta.get("command_id"),
+        retry_input.get("parent_command_id"),
+        retry_input.get("parentCommandId"),
+        meta.get("parent_command_id"),
+    )
+    parent_command_id = _pick_text(
+        retry_input.get("parent_command_id"),
+        retry_input.get("parentCommandId"),
+        command_id,
+        meta.get("parent_command_id"),
+    )
+
+    failed_url = _pick_text(
+        retry_input.get("failed_url"),
+        retry_input.get("target_url"),
+        retry_input.get("url"),
+        retry_input.get("http_target"),
+        request_summary.get("url"),
+    )
+    failed_method = _pick_text(
+        retry_input.get("failed_method"),
+        retry_input.get("method"),
+        request_summary.get("method"),
+        "GET",
+    ).upper()
+
+    goal = _pick_text(
+        retry_input.get("goal"),
+        retry_input.get("failed_goal"),
+    )
+    failed_goal = _pick_text(
+        retry_input.get("failed_goal"),
+        retry_input.get("goal"),
+        goal,
+    )
+
+    original_input = _pick_dict(retry_input.get("original_input"))
+    if not original_input:
+        original_input = _prune_original_input_for_retry(original_payload)
+
+    retry_input["flow_id"] = flow_id
+    retry_input["root_event_id"] = root_event_id
+    retry_input["source_event_id"] = source_event_id
+    retry_input["event_id"] = source_event_id
+    retry_input["workspace_id"] = workspace_id
+    retry_input["workspace"] = workspace_id
+    retry_input["run_record_id"] = linked_run
+    retry_input["linked_run"] = linked_run
+    retry_input["parent_command_id"] = parent_command_id
+    retry_input["command_id"] = command_id or parent_command_id
+    retry_input["retry_count"] = retry_count_after_failure
+    retry_input["retry_max"] = _to_int(original_payload.get("retry_max"), meta.get("retry_max", DEFAULT_RETRY_MAX))
+    retry_input["retry_delay_seconds"] = _to_int(
+        original_payload.get("retry_delay_seconds"),
+        _to_int(original_payload.get("retry_delay_sec"), meta.get("retry_delay_seconds", DEFAULT_RETRY_DELAY_SECONDS)),
+    )
+    retry_input["next_retry_at"] = next_retry_at
+    retry_input["_depth"] = _increment_depth(original_payload)
+
+    retry_input["original_capability"] = "http_exec"
+    retry_input["source_capability"] = "http_exec"
+    retry_input["failed_capability"] = "http_exec"
+
+    retry_input["goal"] = goal
+    retry_input["failed_goal"] = failed_goal
+
+    retry_input["retry_reason"] = error_code
+    retry_input["reason"] = error_code
+    retry_input["incident_code"] = error_code
+    retry_input["error"] = error_code
+    retry_input["error_message"] = error_message
+    retry_input["incident_message"] = error_message
+    retry_input["last_error"] = error_message
+
+    if request_error_value:
+        retry_input["request_error"] = request_error_value
+
+    retry_input["failed_url"] = failed_url
+    retry_input["target_url"] = failed_url
+    retry_input["url"] = failed_url
+    retry_input["http_target"] = failed_url
+
+    retry_input["failed_method"] = failed_method
+    retry_input["method"] = failed_method
+
+    retry_input["request"] = deepcopy(request_summary) if isinstance(request_summary, dict) else {}
+    retry_input["response"] = deepcopy(response_summary) if isinstance(response_summary, dict) else {}
+    retry_input["original_input"] = original_input
+
+    if http_status is not None:
+        retry_input["http_status"] = http_status
+        retry_input["status_code"] = http_status
+
+    return retry_input
+
+
 def _update_monitored_endpoint_best_effort(
     *,
     original_payload: Dict[str, Any],
@@ -529,6 +732,7 @@ def capability_http_exec(
         runtime_context.get("run_record_id")
         or original_payload.get("run_record_id")
         or original_payload.get("linked_run")
+        or meta.get("linked_run")
         or ""
     ).strip()
 
@@ -754,31 +958,19 @@ def capability_http_exec(
             delay_seconds = _compute_backoff_seconds(original_payload, retry_count_after_failure)
             next_retry_at = _build_next_retry_at(delay_seconds)
 
-            retry_input = deepcopy(original_payload)
-            retry_input["retry_count"] = retry_count_after_failure
-            retry_input["next_retry_at"] = next_retry_at
-            retry_input["_depth"] = _increment_depth(original_payload)
-
-            if meta["flow_id"] and not str(retry_input.get("flow_id") or "").strip():
-                retry_input["flow_id"] = meta["flow_id"]
-
-            if meta["root_event_id"] and not str(retry_input.get("root_event_id") or "").strip():
-                retry_input["root_event_id"] = meta["root_event_id"]
-
-            if meta["source_event_id"] and not str(retry_input.get("source_event_id") or "").strip():
-                retry_input["source_event_id"] = meta["source_event_id"]
-
-            if meta["source_event_id"] and not str(retry_input.get("event_id") or "").strip():
-                retry_input["event_id"] = meta["source_event_id"]
-
-            if meta["workspace_id"] and not str(retry_input.get("workspace_id") or "").strip():
-                retry_input["workspace_id"] = meta["workspace_id"]
-
-            if run_record_id and not str(retry_input.get("run_record_id") or "").strip():
-                retry_input["run_record_id"] = run_record_id
-
-            if run_record_id and not str(retry_input.get("linked_run") or "").strip():
-                retry_input["linked_run"] = run_record_id
+            retry_input = _build_retry_router_input(
+                original_payload=original_payload,
+                meta=meta,
+                run_record_id=run_record_id,
+                retry_count_after_failure=retry_count_after_failure,
+                next_retry_at=next_retry_at,
+                error_code="http_status_error",
+                error_message=f"HTTP request failed with status {response.status_code}",
+                http_status=int(response.status_code),
+                request_summary=request_summary,
+                response_summary=response_payload,
+                request_error_value="",
+            )
 
             result["retry_planned"] = True
             result["next_retry_at"] = next_retry_at
@@ -810,6 +1002,7 @@ def capability_http_exec(
         elapsed_ms = int((time.time() - started_at) * 1000)
         retry_count_after_failure = meta["retry_count"] + 1
         retry_allowed = retry_count_after_failure <= meta["retry_max"]
+        error_message = _trim_text(str(exc), 1000) or "Request timeout"
 
         result = {
             "ok": False,
@@ -828,7 +1021,7 @@ def capability_http_exec(
             "status_code": None,
             "http_status": None,
             "error": "timeout",
-            "error_message": _trim_text(str(exc), 1000) or "Request timeout",
+            "error_message": error_message,
             "retry_count": retry_count_after_failure,
             "retry_max": meta["retry_max"],
             "retry_planned": False,
@@ -848,31 +1041,19 @@ def capability_http_exec(
             delay_seconds = _compute_backoff_seconds(original_payload, retry_count_after_failure)
             next_retry_at = _build_next_retry_at(delay_seconds)
 
-            retry_input = deepcopy(original_payload)
-            retry_input["retry_count"] = retry_count_after_failure
-            retry_input["next_retry_at"] = next_retry_at
-            retry_input["_depth"] = _increment_depth(original_payload)
-
-            if meta["flow_id"] and not str(retry_input.get("flow_id") or "").strip():
-                retry_input["flow_id"] = meta["flow_id"]
-
-            if meta["root_event_id"] and not str(retry_input.get("root_event_id") or "").strip():
-                retry_input["root_event_id"] = meta["root_event_id"]
-
-            if meta["source_event_id"] and not str(retry_input.get("source_event_id") or "").strip():
-                retry_input["source_event_id"] = meta["source_event_id"]
-
-            if meta["source_event_id"] and not str(retry_input.get("event_id") or "").strip():
-                retry_input["event_id"] = meta["source_event_id"]
-
-            if meta["workspace_id"] and not str(retry_input.get("workspace_id") or "").strip():
-                retry_input["workspace_id"] = meta["workspace_id"]
-
-            if run_record_id and not str(retry_input.get("run_record_id") or "").strip():
-                retry_input["run_record_id"] = run_record_id
-
-            if run_record_id and not str(retry_input.get("linked_run") or "").strip():
-                retry_input["linked_run"] = run_record_id
+            retry_input = _build_retry_router_input(
+                original_payload=original_payload,
+                meta=meta,
+                run_record_id=run_record_id,
+                retry_count_after_failure=retry_count_after_failure,
+                next_retry_at=next_retry_at,
+                error_code="timeout",
+                error_message=error_message,
+                http_status=None,
+                request_summary=request_summary,
+                response_summary=result["response"],
+                request_error_value=error_message,
+            )
 
             result["retry_planned"] = True
             result["next_retry_at"] = next_retry_at
@@ -889,7 +1070,7 @@ def capability_http_exec(
             original_payload=original_payload,
             meta=meta,
             error_code="timeout",
-            error_message=_trim_text(str(exc), 1000) or "Request timeout",
+            error_message=error_message,
             http_status=None,
             request_summary=request_summary,
             response_summary=result["response"],
@@ -903,6 +1084,7 @@ def capability_http_exec(
         elapsed_ms = int((time.time() - started_at) * 1000)
         retry_count_after_failure = meta["retry_count"] + 1
         retry_allowed = retry_count_after_failure <= meta["retry_max"]
+        error_message = _trim_text(str(exc), 1000) or exc.__class__.__name__
 
         result = {
             "ok": False,
@@ -921,7 +1103,7 @@ def capability_http_exec(
             "status_code": None,
             "http_status": None,
             "error": "request_exception",
-            "error_message": _trim_text(str(exc), 1000) or exc.__class__.__name__,
+            "error_message": error_message,
             "retry_count": retry_count_after_failure,
             "retry_max": meta["retry_max"],
             "retry_planned": False,
@@ -941,31 +1123,19 @@ def capability_http_exec(
             delay_seconds = _compute_backoff_seconds(original_payload, retry_count_after_failure)
             next_retry_at = _build_next_retry_at(delay_seconds)
 
-            retry_input = deepcopy(original_payload)
-            retry_input["retry_count"] = retry_count_after_failure
-            retry_input["next_retry_at"] = next_retry_at
-            retry_input["_depth"] = _increment_depth(original_payload)
-
-            if meta["flow_id"] and not str(retry_input.get("flow_id") or "").strip():
-                retry_input["flow_id"] = meta["flow_id"]
-
-            if meta["root_event_id"] and not str(retry_input.get("root_event_id") or "").strip():
-                retry_input["root_event_id"] = meta["root_event_id"]
-
-            if meta["source_event_id"] and not str(retry_input.get("source_event_id") or "").strip():
-                retry_input["source_event_id"] = meta["source_event_id"]
-
-            if meta["source_event_id"] and not str(retry_input.get("event_id") or "").strip():
-                retry_input["event_id"] = meta["source_event_id"]
-
-            if meta["workspace_id"] and not str(retry_input.get("workspace_id") or "").strip():
-                retry_input["workspace_id"] = meta["workspace_id"]
-
-            if run_record_id and not str(retry_input.get("run_record_id") or "").strip():
-                retry_input["run_record_id"] = run_record_id
-
-            if run_record_id and not str(retry_input.get("linked_run") or "").strip():
-                retry_input["linked_run"] = run_record_id
+            retry_input = _build_retry_router_input(
+                original_payload=original_payload,
+                meta=meta,
+                run_record_id=run_record_id,
+                retry_count_after_failure=retry_count_after_failure,
+                next_retry_at=next_retry_at,
+                error_code="request_exception",
+                error_message=error_message,
+                http_status=None,
+                request_summary=request_summary,
+                response_summary=result["response"],
+                request_error_value=error_message,
+            )
 
             result["retry_planned"] = True
             result["next_retry_at"] = next_retry_at
@@ -982,7 +1152,7 @@ def capability_http_exec(
             original_payload=original_payload,
             meta=meta,
             error_code="request_exception",
-            error_message=_trim_text(str(exc), 1000) or exc.__class__.__name__,
+            error_message=error_message,
             http_status=None,
             request_summary=request_summary,
             response_summary=result["response"],
@@ -996,6 +1166,7 @@ def capability_http_exec(
         elapsed_ms = int((time.time() - started_at) * 1000)
         retry_count_after_failure = meta["retry_count"] + 1
         retry_allowed = retry_count_after_failure <= meta["retry_max"]
+        error_message = _trim_text(f"{exc.__class__.__name__}: {exc}", 1000)
 
         result = {
             "ok": False,
@@ -1014,7 +1185,7 @@ def capability_http_exec(
             "status_code": None,
             "http_status": None,
             "error": "unexpected_exception",
-            "error_message": _trim_text(f"{exc.__class__.__name__}: {exc}", 1000),
+            "error_message": error_message,
             "retry_count": retry_count_after_failure,
             "retry_max": meta["retry_max"],
             "retry_planned": False,
@@ -1034,31 +1205,19 @@ def capability_http_exec(
             delay_seconds = _compute_backoff_seconds(original_payload, retry_count_after_failure)
             next_retry_at = _build_next_retry_at(delay_seconds)
 
-            retry_input = deepcopy(original_payload)
-            retry_input["retry_count"] = retry_count_after_failure
-            retry_input["next_retry_at"] = next_retry_at
-            retry_input["_depth"] = _increment_depth(original_payload)
-
-            if meta["flow_id"] and not str(retry_input.get("flow_id") or "").strip():
-                retry_input["flow_id"] = meta["flow_id"]
-
-            if meta["root_event_id"] and not str(retry_input.get("root_event_id") or "").strip():
-                retry_input["root_event_id"] = meta["root_event_id"]
-
-            if meta["source_event_id"] and not str(retry_input.get("source_event_id") or "").strip():
-                retry_input["source_event_id"] = meta["source_event_id"]
-
-            if meta["source_event_id"] and not str(retry_input.get("event_id") or "").strip():
-                retry_input["event_id"] = meta["source_event_id"]
-
-            if meta["workspace_id"] and not str(retry_input.get("workspace_id") or "").strip():
-                retry_input["workspace_id"] = meta["workspace_id"]
-
-            if run_record_id and not str(retry_input.get("run_record_id") or "").strip():
-                retry_input["run_record_id"] = run_record_id
-
-            if run_record_id and not str(retry_input.get("linked_run") or "").strip():
-                retry_input["linked_run"] = run_record_id
+            retry_input = _build_retry_router_input(
+                original_payload=original_payload,
+                meta=meta,
+                run_record_id=run_record_id,
+                retry_count_after_failure=retry_count_after_failure,
+                next_retry_at=next_retry_at,
+                error_code="unexpected_exception",
+                error_message=error_message,
+                http_status=None,
+                request_summary=request_summary,
+                response_summary=result["response"],
+                request_error_value=error_message,
+            )
 
             result["retry_planned"] = True
             result["next_retry_at"] = next_retry_at
@@ -1075,7 +1234,7 @@ def capability_http_exec(
             original_payload=original_payload,
             meta=meta,
             error_code="unexpected_exception",
-            error_message=_trim_text(f"{exc.__class__.__name__}: {exc}", 1000),
+            error_message=error_message,
             http_status=None,
             request_summary=request_summary,
             response_summary=result["response"],
