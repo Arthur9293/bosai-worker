@@ -5314,6 +5314,39 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
     workspace_id = _resolve_workspace_id(req=req)
     step_index = _resolve_flow_step_index(payload, 0)
 
+    orchestration_capabilities = {
+        "retry_router",
+        "decision_router",
+        "incident_router",
+        "incident_router_v2",
+        "incident_deduplicate",
+        "incident_create",
+        "internal_escalate",
+        "resolve_incident",
+        "complete_flow_incident",
+        "complete_flow",
+        "complete_flow_demo",
+    }
+
+    def _pick_business_capability(*values: Any, fallback: str = "http_exec") -> str:
+        first_non_empty = ""
+
+        for value in values:
+            text = str(value or "").strip()
+            if not text:
+                continue
+
+            if not first_non_empty:
+                first_non_empty = text
+
+            if text not in orchestration_capabilities:
+                return text
+
+        if first_non_empty and first_non_empty not in orchestration_capabilities:
+            return first_non_empty
+
+        return fallback
+
     failed_url = str(
         payload.get("failed_url")
         or payload.get("url")
@@ -5333,10 +5366,17 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
         or "GET"
     ).strip().upper()
 
-    original_capability = str(
-        payload.get("original_capability")
-        or "http_exec"
-    ).strip()
+    original_input = payload.get("original_input") if isinstance(payload.get("original_input"), dict) else {}
+
+    original_capability = _pick_business_capability(
+        payload.get("failed_capability"),
+        payload.get("source_capability"),
+        payload.get("original_capability"),
+        original_input.get("failed_capability") if isinstance(original_input, dict) else "",
+        original_input.get("source_capability") if isinstance(original_input, dict) else "",
+        original_input.get("original_capability") if isinstance(original_input, dict) else "",
+        fallback="http_exec",
+    )
 
     error_text = str(
         payload.get("error")
@@ -5424,6 +5464,8 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
             "status_code": http_status,
             "error": error_text,
             "original_capability": original_capability,
+            "source_capability": original_capability,
+            "failed_capability": original_capability,
             "failed_goal": failed_goal,
             "failed_url": failed_url,
             "failed_method": failed_method,
@@ -5503,7 +5545,7 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
             }
         ]
 
-    # 4) retry possible -> on relance http_exec une seule fois
+    # 4) retry possible -> on relance la capability métier
     elif retry_count < retry_max:
         next_retry_count = retry_count + 1
         retry_delay_seconds = min(60, 2 ** retry_count)
@@ -5533,6 +5575,8 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
                     "retry_reason": retry_reason,
                     "origin_reason": retry_reason,
                     "original_capability": original_capability or "http_exec",
+                    "source_capability": original_capability or "http_exec",
+                    "failed_capability": original_capability or "http_exec",
                     "original_input": (
                         payload.get("original_input")
                         if isinstance(payload.get("original_input"), dict)
