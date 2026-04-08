@@ -704,6 +704,32 @@ def _normalize_decision_block(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _empty_decision_block() -> Dict[str, Any]:
+    return {
+        "decision_status": "",
+        "decision_reason": "",
+        "next_action": "",
+        "auto_executable": False,
+        "priority_score": 0,
+        "normalized_final_failure": False,
+    }
+
+
+def _recompute_decision_from_canonical(canonical: Dict[str, Any]) -> Dict[str, Any]:
+    decision_input = dict(canonical)
+
+    for key in (
+        "decision_status",
+        "decision_reason",
+        "next_action",
+        "auto_executable",
+        "priority_score",
+    ):
+        decision_input.pop(key, None)
+
+    return _normalize_decision_block(decision_input)
+
+
 def _strip_runtime_keys(value: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(value, dict):
         return {}
@@ -897,7 +923,12 @@ def _canonical_incident_context(
         "auto_executable": decision_block["auto_executable"],
         "priority_score": decision_block["priority_score"],
         "category": _pick_text(data.get("category"), original_input.get("category")),
-        "reason": _pick_text(data.get("reason"), data.get("retry_reason"), original_input.get("reason"), original_input.get("retry_reason")),
+        "reason": _pick_text(
+            data.get("reason"),
+            data.get("retry_reason"),
+            original_input.get("reason"),
+            original_input.get("retry_reason"),
+        ),
         "severity": _pick_text(data.get("severity"), original_input.get("severity")),
         "final_failure": _to_bool(
             data.get("final_failure")
@@ -1181,17 +1212,57 @@ def run(
     parent_command_id = _pick_text(meta.get("parent_command_id"), current_command_id)
     current_step_index = _to_int(meta.get("step_index"), 0)
 
-    decision_block = _normalize_decision_block(data)
+    # Seed depuis le payload entrant
+    seed_decision_block = _normalize_decision_block(data)
 
+    # Canonicalisation d’abord
     incident_payload = _canonical_incident_context(
         data=data,
         meta=meta,
         runtime_run_record_id=effective_run_record_id,
         next_step_index=current_step_index + 1,
         next_depth=depth + 1,
-        decision_block=decision_block,
+        decision_block=seed_decision_block,
         incident_record_id="",
     )
+
+    # Recompute défensif sur le contexte canonique enrichi
+    canonical_decision_block = _recompute_decision_from_canonical(incident_payload)
+
+    explicit_decision_present = bool(
+        _pick_text(
+            data.get("decision_status"),
+            data.get("decisionstatus"),
+            data.get("next_action"),
+            data.get("nextaction"),
+            data.get("decision_reason"),
+            data.get("decisionreason"),
+        )
+    )
+
+    decision_block = seed_decision_block if explicit_decision_present else canonical_decision_block
+
+    # Promotion sécurisée si le seed est trop faible mais le canonique voit un cas sévère
+    if (
+        decision_block.get("next_action") in {"", "complete_flow_incident"}
+        and canonical_decision_block.get("next_action") in {"internal_escalate", "resolve_incident"}
+    ):
+        decision_block = canonical_decision_block
+
+    incident_payload = dict(incident_payload)
+    incident_payload["decision_status"] = decision_block["decision_status"]
+    incident_payload["decision_reason"] = decision_block["decision_reason"]
+    incident_payload["next_action"] = decision_block["next_action"]
+    incident_payload["auto_executable"] = decision_block["auto_executable"]
+    incident_payload["priority_score"] = decision_block["priority_score"]
+    incident_payload["final_failure"] = (
+        _to_bool(incident_payload.get("final_failure"), False)
+        or _to_bool(decision_block.get("normalized_final_failure"), False)
+    )
+
+    incident_payload = _normalize_keys_deep(incident_payload)
+    incident_payload = _unwrap_command_payload(incident_payload)
+    incident_payload = _normalize_flow_keys(incident_payload)
 
     incident_fields_candidates = _build_incident_fields_candidates(
         incident_record_payload=incident_payload,
@@ -1261,6 +1332,7 @@ def run(
         run_record_id=effective_run_record_id,
         linked_run=linked_run or effective_run_record_id,
         parent_command_id=next_parent_command_id,
+        command_id=next_parent_command_id,
         step_index=current_step_index + 1,
         _depth=depth + 1,
     )
