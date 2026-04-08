@@ -1511,18 +1511,64 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
                 target[k] = v
         return target
 
+    def _extract_scalar(value: Any) -> Any:
+        current = value
+        for _ in range(3):
+            if isinstance(current, list):
+                next_value = None
+                for item in current:
+                    if item not in (None, "", {}, []):
+                        next_value = item
+                        break
+                current = next_value
+                continue
+            if isinstance(current, tuple):
+                current = list(current)
+                continue
+            break
+        return current
+
+    def _textify(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, bytes):
+            try:
+                return value.decode("utf-8", errors="ignore").strip()
+            except Exception:
+                return str(value).strip()
+        return str(value).strip()
+
     def _parse_candidate(raw_val: Any, source_key: str) -> Dict[str, Any]:
+        if raw_val is None:
+            return {}
+
+        raw_val = _extract_scalar(raw_val)
         if raw_val is None:
             return {}
 
         if isinstance(raw_val, dict):
             parsed = raw_val
         else:
-            raw_text = str(raw_val).strip()
+            raw_text = _textify(raw_val)
             if not raw_text:
                 return {}
 
             parsed = _json_load_maybe(raw_text)
+
+            if (not isinstance(parsed, dict) or not parsed):
+                try:
+                    literal = ast.literal_eval(raw_text)
+                    literal = _extract_scalar(literal)
+
+                    if isinstance(literal, dict):
+                        parsed = literal
+                    else:
+                        literal_text = _textify(literal)
+                        if literal_text:
+                            parsed = _json_load_maybe(literal_text)
+                except Exception:
+                    pass
+
             if not isinstance(parsed, dict) or not parsed:
                 parse_errors.append(
                     {
@@ -1742,20 +1788,92 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     if url_value and not _pick(base.get("failed_url")):
         base["failed_url"] = url_value
 
+    # Enrich from original_input if present
+    original_input_obj = base.get("original_input")
+    if isinstance(original_input_obj, dict) and original_input_obj:
+        original_input_obj = _normalize_keys_deep(original_input_obj)
+        original_input_obj = _unwrap_command_payload(original_input_obj)
+        original_input_obj = _normalize_flow_keys(original_input_obj)
+
+        for k in (
+            "goal",
+            "failed_goal",
+            "retry_reason",
+            "reason",
+            "failed_url",
+            "failed_method",
+            "original_capability",
+            "source_capability",
+            "failed_capability",
+            "target_capability",
+            "http_status",
+            "status_code",
+            "error",
+            "error_message",
+            "last_error",
+        ):
+            if base.get(k) in (None, "", {}, []) and original_input_obj.get(k) not in (None, "", {}, []):
+                base[k] = original_input_obj.get(k)
+
+    # Enrich from request / response
+    if isinstance(request_obj, dict) and request_obj:
+        if base.get("url") in (None, "", {}, []):
+            req_url = _pick(request_obj.get("url"), request_obj.get("http_target"), request_obj.get("target_url"))
+            if req_url:
+                base["url"] = req_url
+                base["http_target"] = req_url
+                if not _pick(base.get("target_url")):
+                    base["target_url"] = req_url
+
+        if base.get("method") in (None, "", {}, []):
+            req_method = _pick(request_obj.get("method"), "GET").upper()
+            base["method"] = req_method
+
+    if isinstance(response_obj, dict) and response_obj:
+        resp_status = response_obj.get("status_code")
+        if base.get("http_status") in (None, "", {}, []) and resp_status not in (None, ""):
+            base["http_status"] = resp_status
+        if base.get("status_code") in (None, "", {}, []) and resp_status not in (None, ""):
+            base["status_code"] = resp_status
+
     field_alias_map = {
         "goal": ("goal", "Goal", "failed_goal", "failedgoal", "Failed_Goal"),
-        "reason": ("reason", "Reason", "retry_reason", "retryreason"),
-        "retry_reason": ("retry_reason", "retryreason", "reason", "Reason"),
+        "reason": ("reason", "Reason", "retry_reason", "retryreason", "incident_code"),
+        "retry_reason": ("retry_reason", "retryreason", "reason", "Reason", "incident_code"),
         "retry_count": ("retry_count", "retrycount", "Retry_Count"),
         "retry_max": ("retry_max", "retrymax", "Retry_Max"),
         "failed_goal": ("failed_goal", "failedgoal", "Failed_Goal", "goal", "Goal"),
         "failed_url": ("failed_url", "failedurl", "Failed_URL", "url", "URL", "http_target"),
         "failed_method": ("failed_method", "failedmethod", "Failed_Method", "method", "HTTP_Method"),
-        "http_status": ("http_status", "httpstatus", "status_code", "statuscode", "HTTP_Status"),
-        "status_code": ("status_code", "statuscode", "http_status", "httpstatus", "HTTP_Status"),
-        "error": ("error", "Error", "last_error", "Last_Error", "Error_Message"),
+        "http_status": ("http_status", "httpstatus", "status_code", "statuscode", "HTTP_Status", "Response_Status"),
+        "status_code": ("status_code", "statuscode", "http_status", "httpstatus", "HTTP_Status", "Response_Status"),
+        "error": ("error", "Error", "last_error", "Last_Error", "Error_Message", "incident_code"),
         "error_message": ("error_message", "Error_Message", "Last_Error", "error"),
-        "original_capability": ("original_capability", "originalcapability", "source_capability", "Capability"),
+        # IMPORTANT: ne plus fallback vers Capability ici
+        "original_capability": (
+            "original_capability",
+            "originalcapability",
+            "source_capability",
+            "sourcecapability",
+            "failed_capability",
+            "failedcapability",
+        ),
+        "source_capability": (
+            "source_capability",
+            "sourcecapability",
+            "original_capability",
+            "originalcapability",
+            "failed_capability",
+            "failedcapability",
+        ),
+        "failed_capability": (
+            "failed_capability",
+            "failedcapability",
+            "source_capability",
+            "sourcecapability",
+            "original_capability",
+            "originalcapability",
+        ),
         "target_capability": ("target_capability", "targetcapability", "Mapped_Capability"),
         "incident_record_id": ("incident_record_id", "incidentrecordid", "Incident_Record_ID"),
     }
@@ -1769,6 +1887,12 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
             if value is not None and str(value).strip() != "":
                 base[target_key] = value
                 break
+
+    # Dernier fallback SAFE uniquement pour target_capability
+    if base.get("target_capability") in (None, "", {}, []):
+        cap_value = fields.get("Capability")
+        if cap_value is not None and str(cap_value).strip():
+            base["target_capability"] = str(cap_value).strip()
 
     for legacy_key in (
         "flowid",
@@ -1812,9 +1936,9 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     base = _sanitize_payload_for_airtable(base)
 
     if parse_errors:
-        print(f"[compose_command_input] parse_errors={json.dumps(parse_errors, ensure_ascii=False)}")
+        print(f"[compose_command_input] parse_errors={json.dumps(parse_errors, ensure_ascii=False)}", flush=True)
 
-    print(f"[compose_command_input] final_base={json.dumps(base, ensure_ascii=False)}")
+    print(f"[compose_command_input] final_base={json.dumps(base, ensure_ascii=False)}", flush=True)
     return base
     
 def airtable_create(table_name: str, fields: Dict[str, Any]) -> Dict[str, Any]:
