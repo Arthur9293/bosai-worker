@@ -1157,64 +1157,69 @@ def _json_load_maybe(val: Any) -> Any:
     if not s:
         return {}
 
-    candidates = [s]
+    candidates = []
 
-    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
-        inner = s[1:-1].strip()
-        if inner:
-            candidates.append(inner)
+    def _add(x: Any) -> None:
+        if x is None:
+            return
+        text = str(x).strip()
+        if text:
+            candidates.append(text)
 
-    try:
-        decoded = bytes(s, "utf-8").decode("unicode_escape").strip()
-        if decoded:
-            candidates.append(decoded)
-    except Exception:
-        pass
+    _add(s)
 
-    fixed = s.replace('\\"', '"').strip()
-    if fixed:
-        candidates.append(fixed)
+    current = s
+    for _ in range(4):
+        if len(current) >= 2 and current[0] == current[-1] and current[0] in ("'", '"'):
+            current = current[1:-1].strip()
+            _add(current)
 
-    def _unwrap_string_json(parsed: Any) -> Any:
-        current = parsed
-        for _ in range(3):
-            if isinstance(current, (dict, list)):
-                return current
-            if not isinstance(current, str):
-                return {}
-            inner = current.strip()
-            if not inner:
-                return {}
-            try:
-                current = json.loads(inner)
-                continue
-            except Exception:
-                pass
-            try:
-                current = ast.literal_eval(inner)
-                continue
-            except Exception:
-                return {}
-        return current if isinstance(current, (dict, list)) else {}
+        try:
+            decoded = bytes(current, "utf-8").decode("unicode_escape").strip()
+            if decoded and decoded != current:
+                _add(decoded)
+                current = decoded
+        except Exception:
+            pass
+
+        fixed = (
+            current
+            .replace('\\"', '"')
+            .replace("\\'", "'")
+            .strip()
+        )
+        if fixed and fixed != current:
+            _add(fixed)
+            current = fixed
 
     seen = set()
 
     for candidate in candidates:
-        candidate = candidate.strip()
-        if not candidate or candidate in seen:
+        if candidate in seen:
             continue
         seen.add(candidate)
 
-        for parser in (json.loads, ast.literal_eval):
+        current = candidate
+
+        for _ in range(5):
             try:
-                parsed = parser(candidate)
-                out = _unwrap_string_json(parsed)
-                if out not in ({}, [], None):
-                    return out
-                if isinstance(parsed, (dict, list)):
-                    return parsed
+                parsed = json.loads(current)
             except Exception:
-                pass
+                try:
+                    parsed = ast.literal_eval(current)
+                except Exception:
+                    break
+
+            if isinstance(parsed, (dict, list)):
+                return parsed
+
+            if isinstance(parsed, str):
+                current = parsed.strip()
+                if not current:
+                    break
+                continue
+
+            break
 
     print("[_json_load_maybe] JSON PARSE FAILED:", s[:1000], flush=True)
     return {}
