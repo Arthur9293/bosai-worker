@@ -1742,7 +1742,7 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
                     if isinstance(literal, dict):
                         parsed = dict(literal)
                     else:
-                        literal_text = _textify(literal) 
+                        literal_text = _textify(literal)
                         if literal_text:
                             parsed = _json_load_maybe(literal_text)
                 except Exception:
@@ -1750,17 +1750,17 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
 
             if not isinstance(parsed, dict) or not parsed:
                 rescue = _extract_retry_fields_from_text(raw_text)
-            if rescue:
-                parsed = rescue
+                if rescue:
+                    parsed = rescue
             else:
                 parse_errors.append(
-                {
-                    "source": source_key,
-                    "error": "json_parse_failed",
-                    "raw_preview": raw_text[:500],
-                }
-            )
-            return {}
+                    {
+                        "source": source_key,
+                        "error": "json_parse_failed",
+                        "raw_preview": raw_text[:500],
+                    }
+                )
+                return {}
 
     parsed = _normalize_keys_deep(parsed)
     parsed = _unwrap_command_payload(parsed)
