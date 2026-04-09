@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import ast
 import json
+import re
 import os
 import threading
 import time
@@ -1296,6 +1297,72 @@ def _json_load_maybe(val: Any) -> Dict[str, Any]:
 
     print("[_json_load_maybe] JSON PARSE FAILED repr =", repr(s[:1000]), flush=True)
     return {}
+
+def _extract_retry_fields_from_text(raw_text: str) -> Dict[str, Any]:
+    if not raw_text:
+        return {}
+
+    def _get_str(*keys: str) -> str:
+        for key in keys:
+            m = re.search(rf'"{re.escape(key)}"\s*:\s*"([^"]*)"', raw_text)
+            if m:
+                return str(m.group(1) or "").strip()
+        return ""
+
+    def _get_int(*keys: str) -> Optional[int]:
+        for key in keys:
+            m = re.search(rf'"{re.escape(key)}"\s*:\s*(-?\d+)', raw_text)
+            if m:
+                try:
+                    return int(m.group(1))
+                except Exception:
+                    pass
+        return None
+
+    out: Dict[str, Any] = {}
+
+    # flow / context
+    out["flow_id"] = _get_str("flow_id", "flowid")
+    out["root_event_id"] = _get_str("root_event_id", "rooteventid", "event_id", "eventid")
+    out["source_event_id"] = _get_str("source_event_id", "sourceeventid", "event_id", "eventid")
+    out["workspace_id"] = _get_str("workspace_id", "workspaceid", "workspace")
+    out["run_record_id"] = _get_str("run_record_id", "runrecordid")
+    out["linked_run"] = _get_str("linked_run", "linkedrun")
+    out["command_id"] = _get_str("command_id", "commandid")
+    out["parent_command_id"] = _get_str("parent_command_id", "parentcommandid")
+
+    # http / retry
+    out["url"] = _get_str("url", "URL", "http_target", "httptarget", "failed_url", "failedurl", "target_url", "targeturl")
+    out["http_target"] = _get_str("http_target", "httptarget", "url", "URL")
+    out["method"] = _get_str("method", "HTTPMethod", "httpmethod", "failed_method", "failedmethod")
+    out["failed_method"] = _get_str("failed_method", "failedmethod", "method", "HTTPMethod")
+
+    out["retry_count"] = _get_int("retry_count", "retrycount")
+    out["retry_max"] = _get_int("retry_max", "retrymax")
+    out["retry_delay_seconds"] = _get_int("retry_delay_seconds", "retrydelayseconds")
+    out["http_status"] = _get_int("http_status", "httpstatus", "status_code", "statuscode")
+    out["status_code"] = _get_int("status_code", "statuscode", "http_status", "httpstatus")
+    out["_depth"] = _get_int("_depth", "depth")
+    out["step_index"] = _get_int("step_index", "stepindex")
+    out["max_depth"] = _get_int("max_depth", "maxdepth")
+
+    out["goal"] = _get_str("goal")
+    out["failed_goal"] = _get_str("failed_goal", "failedgoal", "goal")
+    out["retry_reason"] = _get_str("retry_reason", "retryreason", "reason")
+    out["reason"] = _get_str("reason", "retry_reason", "retryreason")
+    out["error"] = _get_str("error")
+    out["error_message"] = _get_str("error_message", "errormessage", "last_error", "lasterror")
+    out["request_error"] = _get_str("request_error", "requesterror", "error_message", "errormessage")
+    out["incident_code"] = _get_str("incident_code", "incidentcode")
+
+    out["original_capability"] = _get_str("original_capability", "originalcapability")
+    out["source_capability"] = _get_str("source_capability", "sourcecapability")
+    out["failed_capability"] = _get_str("failed_capability", "failedcapability")
+    out["target_capability"] = _get_str("target_capability", "targetcapability")
+
+    out["next_retry_at"] = _get_str("next_retry_at", "nextretryat")
+
+    return {k: v for k, v in out.items() if v not in (None, "", {}, [])}
 
 def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
