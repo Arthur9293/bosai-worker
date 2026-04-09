@@ -1145,8 +1145,13 @@ def capability_send_lead_email(req: RunRequest, run_record_id: str) -> Dict[str,
         "terminal": True,
         "run_record_id": run_record_id,
     }
+    
+print("WORKER_JSON_LOAD_MAYBE_V4_ACTIVE", flush=True)
 
 def _json_load_maybe(val: Any) -> Dict[str, Any]:
+
+    print("[_json_load_maybe V4] called", flush=True)
+    
     if val is None:
         return {}
 
