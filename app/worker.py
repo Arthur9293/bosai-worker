@@ -1974,6 +1974,8 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         if raw_val is None:
             return {}
 
+        parsed: Dict[str, Any] = {}
+
         if isinstance(raw_val, dict):
             parsed = dict(raw_val)
         else:
@@ -2001,7 +2003,8 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
                 rescue = _extract_retry_fields_from_text(raw_text)
                 if rescue:
                     parsed = rescue
-            else:
+
+            if not isinstance(parsed, dict) or not parsed:
                 parse_errors.append(
                     {
                         "source": source_key,
@@ -2011,14 +2014,14 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 return {}
 
-    parsed = _normalize_keys_deep(parsed)
-    parsed = _unwrap_command_payload(parsed)
+        parsed = _normalize_keys_deep(parsed)
+        parsed = _unwrap_command_payload(parsed)
 
-    if isinstance(parsed.get("input"), dict) and parsed.get("input"):
-        nested = dict(parsed.get("input") or {})
-        for k, v in parsed.items():
-            if k != "input" and k not in nested:
-                nested[k] = v
+        if isinstance(parsed.get("input"), dict) and parsed.get("input"):
+            nested = dict(parsed.get("input") or {})
+            for k, v in parsed.items():
+                if k != "input" and k not in nested:
+                    nested[k] = v
             parsed = nested
 
         parsed = _normalize_keys_deep(parsed)
