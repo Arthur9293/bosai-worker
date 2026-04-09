@@ -23,6 +23,72 @@ ORCHESTRATION_CAPABILITIES = {
     "decision_router",
 }
 
+KEY_ALIAS_MAP = {
+    "flowid": "flow_id",
+    "rooteventid": "root_event_id",
+    "sourceeventid": "source_event_id",
+    "eventid": "event_id",
+    "workspaceid": "workspace_id",
+    "runrecordid": "run_record_id",
+    "linkedrun": "linked_run",
+    "parentcommandid": "parent_command_id",
+    "commandid": "command_id",
+    "incidentrecordid": "incident_record_id",
+    "retrycount": "retry_count",
+    "retrymax": "retry_max",
+    "retrydelayseconds": "retry_delay_seconds",
+    "retrydelay": "retry_delay",
+    "effectiveretrydelayseconds": "effective_retry_delay_seconds",
+    "nextretryat": "next_retry_at",
+    "stepindex": "step_index",
+    "maxdepth": "max_depth",
+    "targetcapability": "target_capability",
+    "failedcapability": "failed_capability",
+    "sourcecapability": "source_capability",
+    "originalcapability": "original_capability",
+    "retryreason": "retry_reason",
+    "errortype": "error_type",
+    "requesterror": "request_error",
+    "httpstatus": "http_status",
+    "statuscode": "status_code",
+    "incidentcode": "incident_code",
+    "incidentmessage": "incident_message",
+    "failedurl": "failed_url",
+    "targeturl": "target_url",
+    "httpmethod": "HTTP_Method",
+    "failedmethod": "failed_method",
+    "originalinput": "original_input",
+    "targetinput": "target_input",
+    "commandinput": "command_input",
+}
+
+VALUE_CANONICAL_MAP = {
+    "httpexec": "http_exec",
+    "retryrouter": "retry_router",
+    "incidentrouter": "incident_router",
+    "incidentrouterv2": "incident_router_v2",
+    "incidentdeduplicate": "incident_deduplicate",
+    "incidentcreate": "incident_create",
+    "internalescalate": "internal_escalate",
+    "resolveincident": "resolve_incident",
+    "completeflowincident": "complete_flow_incident",
+    "completeflow": "complete_flow",
+    "completeflowdemo": "complete_flow_demo",
+    "decisionrouter": "decision_router",
+    "httpstatuserror": "http_status_error",
+    "requestexception": "request_exception",
+    "connectionerror": "connection_error",
+    "networkerror": "network_error",
+    "maxdepthexceeded": "max_depth_exceeded",
+    "http5xx": "http_5xx",
+    "http429": "http_429",
+    "http425": "http_425",
+    "http409": "http_409",
+    "http408": "http_408",
+    "httpfailure": "http_failure",
+    "dnresolutionfailed": "dns_resolution_failed",
+}
+
 
 def _now_ts() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -48,6 +114,47 @@ def _safe_str(value: Any) -> str:
 
 def _to_dict(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _compact_token(value: Any) -> str:
+    text = _safe_str(value).strip().lower()
+    return "".join(ch for ch in text if ch.isalnum())
+
+
+def _canonical_key(key: Any) -> str:
+    raw = _safe_str(key)
+    compact = _compact_token(raw)
+    return KEY_ALIAS_MAP.get(compact, raw)
+
+
+def _canonicalize_compact_value(value: Any) -> str:
+    raw = _safe_str(value).strip()
+    if not raw:
+        return ""
+    compact = _compact_token(raw)
+    return VALUE_CANONICAL_MAP.get(compact, raw)
+
+
+def _augment_normalized_keys(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_augment_normalized_keys(item) for item in value]
+
+    if not isinstance(value, dict):
+        return value
+
+    result: Dict[str, Any] = {}
+    for raw_key, raw_val in value.items():
+        raw_key_text = _safe_str(raw_key)
+        normalized_val = _augment_normalized_keys(raw_val)
+
+        if raw_key_text not in result:
+            result[raw_key_text] = normalized_val
+
+        canonical = _canonical_key(raw_key_text)
+        if canonical not in result or result.get(canonical) in (None, "", {}, []):
+            result[canonical] = normalized_val
+
+    return result
 
 
 def _pick(payload: Dict[str, Any], *keys: str, default: Any = None) -> Any:
@@ -88,20 +195,17 @@ def _unwrap_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
 
-    # SAFE:
-    # on unwrap uniquement les enveloppes d’orchestration.
-    # on ne touche PAS à "body", sinon on écrase le contexte erreur
-    # top-level venant de http_exec.
     for key in ("command_input", "commandinput", "input"):
         nested = payload.get(key)
         if isinstance(nested, dict):
+            nested = _augment_normalized_keys(nested)
             merged = dict(nested)
             for k, v in payload.items():
                 if k != key and k not in merged:
                     merged[k] = v
-            return merged
+            return _augment_normalized_keys(merged)
 
-    return dict(payload)
+    return _augment_normalized_keys(dict(payload))
 
 
 def _merge_preserving_top_level(raw_payload: Dict[str, Any], unwrapped_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -111,7 +215,7 @@ def _merge_preserving_top_level(raw_payload: Dict[str, Any], unwrapped_payload: 
         if k not in merged or merged.get(k) in (None, "", {}, []):
             merged[k] = v
 
-    return merged
+    return _augment_normalized_keys(merged)
 
 
 def _extract_nested_sources(payload: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -125,11 +229,12 @@ def _extract_nested_sources(payload: Dict[str, Any]) -> Dict[str, Dict[str, Any]
             default={},
         )
     )
+    original_input = _augment_normalized_keys(original_input) if isinstance(original_input, dict) else {}
     original_input = _unwrap_payload(original_input) if isinstance(original_input, dict) else {}
 
-    body = _to_dict(_pick(payload, "body", default={}))
-    request = _to_dict(_pick(payload, "request", default={}))
-    response = _to_dict(_pick(payload, "response", default={}))
+    body = _augment_normalized_keys(_to_dict(_pick(payload, "body", default={})))
+    request = _augment_normalized_keys(_to_dict(_pick(payload, "request", default={})))
+    response = _augment_normalized_keys(_to_dict(_pick(payload, "response", default={})))
 
     return {
         "original_input": original_input if isinstance(original_input, dict) else {},
@@ -149,7 +254,11 @@ def _normalize_method(value: Any) -> str:
 
 
 def _normalize_capability(value: Any) -> str:
-    return _safe_str(value).strip()
+    return _canonicalize_compact_value(value)
+
+
+def _normalize_reason_value(value: Any) -> str:
+    return _canonicalize_compact_value(value)
 
 
 def _is_orchestration_capability(value: Any) -> bool:
@@ -342,9 +451,9 @@ def _extract_error_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
     body = nested["body"]
     response_obj = nested["response"]
 
-    search = [payload, original_input, body]
+    search = [payload, original_input, body, response_obj]
 
-    retry_reason = _safe_str(
+    retry_reason = _normalize_reason_value(
         _pick_multi(
             search,
             "retry_reason",
@@ -356,7 +465,7 @@ def _extract_error_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
         )
     ).strip()
 
-    error_type = _safe_str(
+    error_type = _normalize_reason_value(
         _pick_multi(
             search,
             "error_type",
@@ -384,7 +493,7 @@ def _extract_error_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
         "httpstatus",
         "status_code",
         "statuscode",
-        default=_pick(response_obj, "status_code", default=None),
+        default=_pick(response_obj, "status_code", "statuscode", default=None),
     )
 
     http_status: Optional[int] = None
@@ -436,6 +545,7 @@ def _is_retryable(payload: Dict[str, Any], error_meta: Dict[str, Any]) -> bool:
         "http_425",
         "http_status_error",
         "http_failure",
+        "dns_resolution_failed",
     }
 
     return retry_reason in retryable_reasons or error_type in retryable_reasons
@@ -459,6 +569,7 @@ def _compute_priority(error_meta: Dict[str, Any]) -> int:
         "request_exception",
         "http_status_error",
         "http_failure",
+        "dns_resolution_failed",
     }:
         return 2
 
@@ -545,7 +656,7 @@ def _compose_retry_input(
         retry_input["error_message"] = error_meta["request_error"]
         retry_input["last_error"] = error_meta["request_error"]
 
-    return retry_input
+    return _augment_normalized_keys(retry_input)
 
 
 def _build_log(
@@ -588,13 +699,13 @@ def _build_log(
 
 
 def run(payload: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Dict[str, Any]:
-    raw_payload = _coerce_payload(payload, **kwargs)
+    raw_payload = _augment_normalized_keys(_coerce_payload(payload, **kwargs))
     print("[retry_router.run] raw_payload =", repr(raw_payload), flush=True)
 
-    unwrapped_payload = _unwrap_payload(raw_payload)
+    unwrapped_payload = _augment_normalized_keys(_unwrap_payload(raw_payload))
     print("[retry_router.run] unwrapped_payload =", repr(unwrapped_payload), flush=True)
 
-    payload = _merge_preserving_top_level(raw_payload, unwrapped_payload)
+    payload = _augment_normalized_keys(_merge_preserving_top_level(raw_payload, unwrapped_payload))
     print("[retry_router.run] merged_payload =", repr(payload), flush=True)
 
     flow_meta = _extract_flow_meta(payload)
@@ -760,6 +871,8 @@ def run(payload: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Dict[str, An
         target_meta=target_meta,
         error_meta=error_meta,
     )
+
+    print("[retry_router.run] retry_input =", repr(retry_input), flush=True)
 
     next_commands: List[Dict[str, Any]] = [
         {
