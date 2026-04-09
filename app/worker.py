@@ -1151,75 +1151,143 @@ def _json_load_maybe(val: Any) -> Dict[str, Any]:
         return {}
 
     if isinstance(val, dict):
-        return val
+        return dict(val)
 
     if isinstance(val, list):
-        if val and isinstance(val[0], dict):
-            return val[0]
+        for item in val:
+            if isinstance(item, dict):
+                return dict(item)
+        for item in val:
+            parsed = _json_load_maybe(item)
+            if parsed:
+                return parsed
         return {}
 
-    s = str(val).strip()
+    if isinstance(val, bytes):
+        try:
+            s = val.decode("utf-8", errors="ignore").strip()
+        except Exception:
+            s = str(val).strip()
+    else:
+        s = str(val).strip()
+
     if not s:
         return {}
 
     seen = set()
-    queue = [s]
+    queue: List[Any] = []
 
     def _push(x: Any) -> None:
         if x is None:
             return
+
+        if isinstance(x, dict):
+            queue.append(dict(x))
+            return
+
+        if isinstance(x, list):
+            for item in x:
+                if isinstance(item, dict):
+                    queue.append(dict(item))
+                else:
+                    text = str(item).strip()
+                    if text and text not in seen:
+                        queue.append(text)
+            return
+
         text = str(x).strip()
         if text and text not in seen:
             queue.append(text)
 
-    while queue:
+    _push(s)
+
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        _push(s[1:-1].strip())
+
+    try:
+        decoded = bytes(s, "utf-8").decode("unicode_escape").strip()
+        if decoded and decoded != s:
+            _push(decoded)
+    except Exception:
+        pass
+
+    _push(s.replace('\\"', '"'))
+    _push(s.replace("\\'", "'"))
+    _push(s.replace("\\\\", "\\"))
+
+    iterations = 0
+    max_iterations = 40
+
+    while queue and iterations < max_iterations:
+        iterations += 1
         current = queue.pop(0)
-        if not current or current in seen:
+
+        if isinstance(current, dict):
+            return current
+
+        if isinstance(current, list):
+            for item in current:
+                if isinstance(item, dict):
+                    return item
+                _push(item)
             continue
-        seen.add(current)
+
+        text = str(current).strip()
+        if not text:
+            continue
+
+        seen.add(text)
 
         # 1) JSON direct
         try:
-            parsed = json.loads(current)
+            parsed = json.loads(text)
             if isinstance(parsed, dict):
                 return parsed
-            if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
-                return parsed[0]
-            if isinstance(parsed, str):
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if isinstance(item, dict):
+                        return item
+                _push(parsed)
+            elif isinstance(parsed, str):
                 _push(parsed)
         except Exception:
             pass
 
         # 2) Python literal
         try:
-            parsed = ast.literal_eval(current)
+            parsed = ast.literal_eval(text)
             if isinstance(parsed, dict):
                 return parsed
-            if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
-                return parsed[0]
-            if isinstance(parsed, str):
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if isinstance(item, dict):
+                        return item
+                _push(parsed)
+            elif isinstance(parsed, str):
                 _push(parsed)
         except Exception:
             pass
 
-        # 3) Enlever quotes externes
-        if len(current) >= 2 and current[0] == current[-1] and current[0] in ("'", '"'):
-            _push(current[1:-1])
+        # 3) unwrap outer quotes
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+            inner = text[1:-1].strip()
+            if inner:
+                _push(inner)
 
-        # 4) Décodage unicode_escape
+        # 4) unicode_escape
         try:
-            decoded = bytes(current, "utf-8").decode("unicode_escape").strip()
-            if decoded and decoded != current:
+            decoded = bytes(text, "utf-8").decode("unicode_escape").strip()
+            if decoded and decoded != text:
                 _push(decoded)
         except Exception:
             pass
 
-        # 5) Réduction des backslashes
-        _push(current.replace("\\\\", "\\"))
-        _push(current.replace('\\"', '"'))
-        _push(current.replace("\\'", "'"))
-        _push(current.replace("\\\\\"", '\\"'))
-        _push(current.replace("\\\\'", "\\'"))
+        # 5) backslash reductions
+        _push(text.replace("\\\\", "\\"))
+        _push(text.replace('\\"', '"'))
+        _push(text.replace("\\'", "'"))
+        _push(text.replace("\\\\\"", '\\"'))
+        _push(text.replace("\\\\'", "\\'"))
 
     print("[_json_load_maybe] JSON PARSE FAILED repr =", repr(s[:1000]), flush=True)
     return {}
@@ -1489,6 +1557,23 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     base: Dict[str, Any] = {}
     parse_errors: List[Dict[str, Any]] = []
 
+    orchestration_capabilities = {
+        "retry_router",
+        "incident_router",
+        "incident_router_v2",
+        "incident_deduplicate",
+        "incident_create",
+        "internal_escalate",
+        "resolve_incident",
+        "complete_flow_incident",
+        "complete_flow",
+        "complete_flow_demo",
+        "decision_router",
+    }
+
+    def _is_empty(value: Any) -> bool:
+        return value in (None, "", {}, [])
+
     def _pick(*values: Any) -> str:
         for value in values:
             if value is None:
@@ -1508,7 +1593,7 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
 
     def _merge_if_missing(target: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, Any]:
         for k, v in source.items():
-            if k not in target or target.get(k) in ("", None, {}, []):
+            if k not in target or _is_empty(target.get(k)):
                 target[k] = v
         return target
 
@@ -1538,6 +1623,27 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
             except Exception:
                 return str(value).strip()
         return str(value).strip()
+
+    def _normalize_capability_name(value: Any) -> str:
+        return str(value or "").strip()
+
+    def _is_orchestration_capability(value: Any) -> bool:
+        cap = _normalize_capability_name(value)
+        return bool(cap) and cap in orchestration_capabilities
+
+    def _pick_business_capability(*values: Any, fallback: str = "http_exec") -> str:
+        first_non_empty = ""
+        for value in values:
+            cap = _normalize_capability_name(value)
+            if not cap:
+                continue
+            if not first_non_empty:
+                first_non_empty = cap
+            if not _is_orchestration_capability(cap):
+                return cap
+        if first_non_empty and not _is_orchestration_capability(first_non_empty):
+            return first_non_empty
+        return fallback
 
     def _parse_candidate(raw_val: Any, source_key: str) -> Dict[str, Any]:
         if raw_val is None:
@@ -1603,7 +1709,7 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
             for key in keys:
                 if key in data:
                     value = data.get(key)
-                    if value not in (None, "", {}, []):
+                    if not _is_empty(value):
                         return value
         return default
 
@@ -1655,10 +1761,12 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     request_obj = base.get("request") if isinstance(base.get("request"), dict) else {}
     if request_obj:
         request_obj = _normalize_keys_deep(dict(request_obj))
+        request_obj = _normalize_flow_keys(request_obj)
 
     response_obj = base.get("response") if isinstance(base.get("response"), dict) else {}
     if response_obj:
         response_obj = _normalize_keys_deep(dict(response_obj))
+        response_obj = _normalize_flow_keys(response_obj)
 
     search_dicts: List[Dict[str, Any]] = [
         base,
@@ -1892,17 +2000,17 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
             "next_retry_at",
             "max_depth",
         ):
-            if base.get(k) in (None, "", {}, []) and src.get(k) not in (None, "", {}, []):
+            if _is_empty(base.get(k)) and not _is_empty(src.get(k)):
                 base[k] = src.get(k)
 
     resp_status = None
     if isinstance(response_obj, dict) and response_obj:
         resp_status = response_obj.get("status_code")
 
-    if base.get("http_status") in (None, "", {}, []) and resp_status not in (None, ""):
+    if _is_empty(base.get("http_status")) and resp_status not in (None, ""):
         base["http_status"] = resp_status
 
-    if base.get("status_code") in (None, "", {}, []) and resp_status not in (None, ""):
+    if _is_empty(base.get("status_code")) and resp_status not in (None, ""):
         base["status_code"] = resp_status
 
     field_alias_map = {
@@ -1951,7 +2059,7 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     }
 
     for target_key, aliases in field_alias_map.items():
-        if target_key in base and base.get(target_key) not in (None, "", {}, []):
+        if target_key in base and not _is_empty(base.get(target_key)):
             continue
 
         for alias in aliases:
@@ -1960,12 +2068,24 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
                 base[target_key] = value
                 break
 
-    if base.get("target_capability") in (None, "", {}, []):
-        cap_value = fields.get("Capability")
-        if cap_value is not None and str(cap_value).strip():
-            base["target_capability"] = str(cap_value).strip()
+    resolved_target_capability = _pick_business_capability(
+        base.get("target_capability"),
+        base.get("failed_capability"),
+        base.get("source_capability"),
+        base.get("original_capability"),
+        fields.get("Target_Capability"),
+        fields.get("Failed_Capability"),
+        fields.get("Source_Capability"),
+        fields.get("Original_Capability"),
+        fallback="http_exec",
+    )
+    base["target_capability"] = resolved_target_capability
 
-    if base.get("retry_reason") in (None, "", {}, []):
+    for cap_key in ("original_capability", "source_capability", "failed_capability"):
+        if _is_empty(base.get(cap_key)):
+            base[cap_key] = resolved_target_capability
+
+    if _is_empty(base.get("retry_reason")):
         http_status = base.get("http_status")
         try:
             http_status_int = int(http_status) if http_status not in (None, "") else None
@@ -1975,10 +2095,10 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         if http_status_int is not None and 500 <= http_status_int <= 599:
             base["retry_reason"] = "http_status_error"
 
-    if base.get("error") in (None, "", {}, []) and base.get("retry_reason") not in (None, "", {}, []):
+    if _is_empty(base.get("error")) and not _is_empty(base.get("retry_reason")):
         base["error"] = base.get("retry_reason")
 
-    if base.get("reason") in (None, "", {}, []) and base.get("retry_reason") not in (None, "", {}, []):
+    if _is_empty(base.get("reason")) and not _is_empty(base.get("retry_reason")):
         base["reason"] = base.get("retry_reason")
 
     for legacy_key in (
