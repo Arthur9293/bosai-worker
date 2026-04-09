@@ -2158,6 +2158,352 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         flush=True,
     )
     return base
+
+# ============================================================
+# Incident identity / canonical incident key
+# ============================================================
+
+_INCIDENT_CHAIN_CAPABILITIES = {
+    "incident_router",
+    "incident_router_v2",
+    "incident_deduplicate",
+    "incident_create",
+    "internal_escalate",
+    "resolve_incident",
+    "complete_flow_incident",
+}
+
+_INCIDENT_ORCHESTRATION_CAPABILITIES = {
+    "retry_router",
+    "incident_router",
+    "incident_router_v2",
+    "incident_deduplicate",
+    "incident_create",
+    "internal_escalate",
+    "resolve_incident",
+    "complete_flow_incident",
+    "complete_flow",
+    "complete_flow_demo",
+    "decision_router",
+}
+
+
+def _incident_text(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        return str(value).strip()
+    except Exception:
+        return ""
+
+
+def _incident_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = _incident_text(value).lower()
+    return text in {"1", "true", "yes", "y", "on"}
+
+
+def _incident_pick(obj: Dict[str, Any], *keys: str, default: str = "") -> str:
+    if not isinstance(obj, dict):
+        return default
+    for key in keys:
+        if key in obj:
+            text = _incident_text(obj.get(key))
+            if text:
+                return text
+    return default
+
+
+def _incident_status_text(value: Any) -> str:
+    if value in (None, "", {}, []):
+        return "0"
+    try:
+        return str(int(value))
+    except Exception:
+        text = _incident_text(value)
+        return text if text else "0"
+
+
+def _incident_business_capability(*values: Any) -> str:
+    first_non_empty = ""
+
+    for value in values:
+        text = _incident_text(value)
+        if not text:
+            continue
+
+        if not first_non_empty:
+            first_non_empty = text
+
+        if text not in _INCIDENT_ORCHESTRATION_CAPABILITIES:
+            return text
+
+    return first_non_empty or "unknown"
+
+
+def _incident_build_origin(
+    payload: Optional[Dict[str, Any]],
+    inherited: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    current = payload if isinstance(payload, dict) else {}
+    parent = inherited if isinstance(inherited, dict) else {}
+
+    current_origin = current.get("incident_origin") if isinstance(current.get("incident_origin"), dict) else {}
+    parent_origin = parent.get("incident_origin") if isinstance(parent.get("incident_origin"), dict) else {}
+
+    flow_id = (
+        _incident_pick(current_origin, "flow_id")
+        or _incident_pick(parent_origin, "flow_id")
+        or _incident_pick(current, "flow_id", "flowid")
+        or _incident_pick(parent, "flow_id", "flowid")
+    )
+
+    root_event_id = (
+        _incident_pick(current_origin, "root_event_id")
+        or _incident_pick(parent_origin, "root_event_id")
+        or _incident_pick(current, "root_event_id", "rooteventid", "event_id", "eventid")
+        or _incident_pick(parent, "root_event_id", "rooteventid", "event_id", "eventid")
+        or flow_id
+    )
+
+    source_event_id = (
+        _incident_pick(current_origin, "source_event_id")
+        or _incident_pick(parent_origin, "source_event_id")
+        or _incident_pick(current, "source_event_id", "sourceeventid", "event_id", "eventid")
+        or _incident_pick(parent, "source_event_id", "sourceeventid", "event_id", "eventid")
+        or root_event_id
+        or flow_id
+    )
+
+    workspace_id = (
+        _incident_pick(current_origin, "workspace_id")
+        or _incident_pick(parent_origin, "workspace_id")
+        or _incident_pick(current, "workspace_id", "workspaceid", "workspace")
+        or _incident_pick(parent, "workspace_id", "workspaceid", "workspace")
+        or "production"
+    )
+
+    business_capability = _incident_business_capability(
+        current_origin.get("business_capability"),
+        parent_origin.get("business_capability"),
+        current.get("original_capability"),
+        current.get("failed_capability"),
+        current.get("source_capability"),
+        current.get("target_capability"),
+        parent.get("original_capability"),
+        parent.get("failed_capability"),
+        parent.get("source_capability"),
+        parent.get("target_capability"),
+    )
+
+    method = (
+        _incident_pick(current_origin, "method")
+        or _incident_pick(parent_origin, "method")
+        or _incident_pick(current, "failed_method", "method")
+        or _incident_pick(parent, "failed_method", "method")
+        or "GET"
+    ).upper()
+
+    failed_url = (
+        _incident_pick(current_origin, "failed_url")
+        or _incident_pick(parent_origin, "failed_url")
+        or _incident_pick(current, "failed_url", "target_url", "http_target", "url")
+        or _incident_pick(parent, "failed_url", "target_url", "http_target", "url")
+    )
+
+    http_status = _incident_status_text(
+        _incident_pick(current_origin, "http_status")
+        or _incident_pick(parent_origin, "http_status")
+        or _incident_pick(current, "http_status", "status_code")
+        or _incident_pick(parent, "http_status", "status_code")
+    )
+
+    incident_code = (
+        _incident_pick(current_origin, "incident_code")
+        or _incident_pick(parent_origin, "incident_code")
+        or _incident_pick(current, "incident_code", "retry_reason", "reason", "error")
+        or _incident_pick(parent, "incident_code", "retry_reason", "reason", "error")
+        or "incident"
+    )
+
+    decision_reason = (
+        _incident_pick(current_origin, "decision_reason")
+        or _incident_pick(parent_origin, "decision_reason")
+        or _incident_pick(current, "decision_reason", "reason", "retry_reason")
+        or _incident_pick(parent, "decision_reason", "reason", "retry_reason")
+        or incident_code
+    )
+
+    final_marker = (
+        _incident_pick(current_origin, "final_marker")
+        or _incident_pick(parent_origin, "final_marker")
+    )
+
+    if final_marker not in {"final", "not_final"}:
+        final_flag = (
+            _incident_bool(current_origin.get("final_failure"))
+            or _incident_bool(parent_origin.get("final_failure"))
+            or _incident_bool(current.get("final_failure"))
+            or _incident_bool(parent.get("final_failure"))
+        )
+        final_marker = "final" if final_flag else "not_final"
+
+    return {
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "source_event_id": source_event_id,
+        "workspace_id": workspace_id,
+        "business_capability": business_capability,
+        "method": method,
+        "failed_url": failed_url,
+        "http_status": http_status,
+        "incident_code": incident_code,
+        "decision_reason": decision_reason,
+        "final_marker": final_marker,
+        "final_failure": final_marker == "final",
+    }
+
+
+def _incident_key_from_origin(origin: Dict[str, Any]) -> str:
+    if not isinstance(origin, dict):
+        return ""
+
+    return "|".join(
+        [
+            _incident_text(origin.get("flow_id")),
+            _incident_text(origin.get("business_capability")),
+            _incident_text(origin.get("method")) or "GET",
+            _incident_text(origin.get("failed_url")),
+            _incident_status_text(origin.get("http_status")),
+            _incident_text(origin.get("incident_code")) or "incident",
+            _incident_text(origin.get("decision_reason")) or "incident",
+            _incident_text(origin.get("final_marker")) or "not_final",
+        ]
+    )
+
+
+def _ensure_incident_identity(
+    payload: Optional[Dict[str, Any]],
+    inherited: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+
+    out = dict(payload)
+    parent = inherited if isinstance(inherited, dict) else {}
+
+    capability = _incident_text(out.get("capability"))
+    target_capability = _incident_text(out.get("target_capability"))
+    parent_capability = _incident_text(parent.get("capability"))
+    parent_target_capability = _incident_text(parent.get("target_capability"))
+
+    has_incident_context = any(
+        [
+            capability in _INCIDENT_CHAIN_CAPABILITIES,
+            target_capability in _INCIDENT_CHAIN_CAPABILITIES,
+            parent_capability in _INCIDENT_CHAIN_CAPABILITIES,
+            parent_target_capability in _INCIDENT_CHAIN_CAPABILITIES,
+            isinstance(out.get("incident_origin"), dict),
+            isinstance(parent.get("incident_origin"), dict),
+            bool(_incident_text(out.get("incident_key"))),
+            bool(_incident_text(parent.get("incident_key"))),
+            bool(_incident_text(out.get("incident_code"))),
+            bool(_incident_text(out.get("incident_record_id"))),
+        ]
+    )
+
+    if not has_incident_context:
+        return out
+
+    origin = _incident_build_origin(out, parent)
+    incident_key = _incident_key_from_origin(origin)
+
+    out["incident_origin"] = origin
+    out["incident_key"] = incident_key
+
+    if origin.get("flow_id") and not _incident_text(out.get("flow_id")):
+        out["flow_id"] = origin["flow_id"]
+
+    if origin.get("root_event_id") and not _incident_text(out.get("root_event_id")):
+        out["root_event_id"] = origin["root_event_id"]
+
+    if origin.get("source_event_id") and not _incident_text(out.get("source_event_id")):
+        out["source_event_id"] = origin["source_event_id"]
+
+    if origin.get("workspace_id") and not _incident_text(out.get("workspace_id")):
+        out["workspace_id"] = origin["workspace_id"]
+        out["workspace"] = origin["workspace_id"]
+
+    if origin.get("failed_url") and not _incident_text(out.get("failed_url")):
+        out["failed_url"] = origin["failed_url"]
+
+    if origin.get("failed_url") and not _incident_text(out.get("url")):
+        out["url"] = origin["failed_url"]
+
+    if origin.get("failed_url") and not _incident_text(out.get("http_target")):
+        out["http_target"] = origin["failed_url"]
+
+    if origin.get("method") and not _incident_text(out.get("method")):
+        out["method"] = origin["method"]
+
+    if origin.get("method") and not _incident_text(out.get("failed_method")):
+        out["failed_method"] = origin["method"]
+
+    if origin.get("http_status") and _incident_text(out.get("http_status")) in {"", "0"}:
+        out["http_status"] = origin["http_status"]
+
+    if origin.get("http_status") and _incident_text(out.get("status_code")) in {"", "0"}:
+        out["status_code"] = origin["http_status"]
+
+    if origin.get("incident_code") and not _incident_text(out.get("incident_code")):
+        out["incident_code"] = origin["incident_code"]
+
+    if origin.get("decision_reason") and not _incident_text(out.get("decision_reason")):
+        out["decision_reason"] = origin["decision_reason"]
+
+    if origin.get("decision_reason") and not _incident_text(out.get("reason")):
+        out["reason"] = origin["decision_reason"]
+
+    if origin.get("incident_code") and not _incident_text(out.get("retry_reason")):
+        out["retry_reason"] = origin["incident_code"]
+
+    if origin.get("final_failure") and not _incident_bool(out.get("final_failure")):
+        out["final_failure"] = True
+
+    return out
+
+
+def _propagate_incident_identity(
+    result_obj: Optional[Dict[str, Any]],
+    parent_input: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    if not isinstance(result_obj, dict):
+        return {}
+
+    out = _ensure_incident_identity(result_obj, parent_input)
+
+    next_commands = out.get("next_commands")
+    if not isinstance(next_commands, list):
+        return out
+
+    fixed_next_commands: List[Dict[str, Any]] = []
+
+    for item in next_commands:
+        if not isinstance(item, dict):
+            continue
+
+        new_item = dict(item)
+        child_input = new_item.get("input")
+        if not isinstance(child_input, dict):
+            child_input = {}
+
+        child_input = _ensure_incident_identity(dict(child_input), out)
+        new_item["input"] = child_input
+        fixed_next_commands.append(new_item)
+
+    out["next_commands"] = fixed_next_commands
+    return out
     
 def airtable_create(table_name: str, fields: Dict[str, Any]) -> Dict[str, Any]:
     if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
