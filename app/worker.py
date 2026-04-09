@@ -4906,8 +4906,12 @@ def _command_mark_unsupported_best_effort(command_id: str, run_record_id: str, m
         ],
     )
 
-
-def _command_mark_retry_or_dead_best_effort(command_id: str, run_record_id: str, fields: Dict[str, Any], message: str) -> Dict[str, Any]:
+def _command_mark_retry_or_dead_best_effort(
+    command_id: str,
+    run_record_id: str,
+    fields: Dict[str, Any],
+    message: str,
+) -> Dict[str, Any]:
     now = utc_now_iso()
     payload = json.dumps({"error": message}, ensure_ascii=False)
 
@@ -4926,7 +4930,14 @@ def _command_mark_retry_or_dead_best_effort(command_id: str, run_record_id: str,
     elif retry_max <= 0:
         retry_max = 3
 
-    if retry_count < retry_max:
+    next_retry_count = retry_count + 1
+
+    # IMPORTANT:
+    # si Retry_Max = 3, on veut:
+    # 0 -> Retry 1
+    # 1 -> Retry 2
+    # 2 -> Dead/Error
+    if next_retry_count < retry_max:
         next_at = _compute_next_retry_at(fields)
         return _airtable_update_best_effort(
             COMMANDS_TABLE_NAME,
@@ -4934,7 +4945,7 @@ def _command_mark_retry_or_dead_best_effort(command_id: str, run_record_id: str,
             [
                 {
                     "Status_select": "Retry",
-                    "Retry_Count": retry_count + 1,
+                    "Retry_Count": next_retry_count,
                     "Next_Retry_At": next_at,
                     "Finished_At": now,
                     "Last_Error": message,
@@ -4948,7 +4959,7 @@ def _command_mark_retry_or_dead_best_effort(command_id: str, run_record_id: str,
                 },
                 {
                     "Status_select": "Retry",
-                    "Retry_Count": retry_count + 1,
+                    "Retry_Count": next_retry_count,
                     "Next_Retry_At": next_at,
                     "Linked_Run": [run_record_id],
                 },
@@ -4964,6 +4975,8 @@ def _command_mark_retry_or_dead_best_effort(command_id: str, run_record_id: str,
         [
             {
                 "Status_select": "Dead",
+                "Retry_Count": next_retry_count,
+                "Next_Retry_At": None,
                 "Finished_At": now,
                 "Last_Error": message,
                 "Error_Message": message,
@@ -4976,10 +4989,14 @@ def _command_mark_retry_or_dead_best_effort(command_id: str, run_record_id: str,
             },
             {
                 "Status_select": "Dead",
+                "Retry_Count": next_retry_count,
+                "Next_Retry_At": None,
                 "Linked_Run": [run_record_id],
             },
             {
                 "Status_select": "Error",
+                "Retry_Count": next_retry_count,
+                "Next_Retry_At": None,
                 "Linked_Run": [run_record_id],
             },
         ],
