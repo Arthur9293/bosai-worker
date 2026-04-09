@@ -1624,6 +1624,255 @@ def _safe_records_from_view(table_name: str, view_name: str, limit: int) -> Tupl
 def _read_command_status(fields: Dict[str, Any]) -> str:
     return str(fields.get("Status_select", fields.get("Status", "")) or "").strip()
 
+
+def _extract_retry_fields_from_text(raw_text: str) -> Dict[str, Any]:
+    if not raw_text:
+        return {}
+
+    text = str(raw_text)
+
+    def _pick_str(*patterns: str) -> str:
+        for pattern in patterns:
+            m = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+            if m:
+                value = m.group(1)
+                if value is not None:
+                    value = str(value).strip()
+                    if value:
+                        return value
+        return ""
+
+    def _pick_int(*patterns: str) -> Optional[int]:
+        for pattern in patterns:
+            m = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+            if m:
+                try:
+                    return int(str(m.group(1)).strip())
+                except Exception:
+                    pass
+        return None
+
+    flow_id = _pick_str(
+        r'"flow_id"\s*:\s*"([^"]+)"',
+        r'"flowid"\s*:\s*"([^"]+)"',
+    )
+
+    root_event_id = _pick_str(
+        r'"root_event_id"\s*:\s*"([^"]+)"',
+        r'"rooteventid"\s*:\s*"([^"]+)"',
+        r'"event_id"\s*:\s*"([^"]+)"',
+        r'"eventid"\s*:\s*"([^"]+)"',
+    ) or flow_id
+
+    source_event_id = _pick_str(
+        r'"source_event_id"\s*:\s*"([^"]+)"',
+        r'"sourceeventid"\s*:\s*"([^"]+)"',
+        r'"event_id"\s*:\s*"([^"]+)"',
+        r'"eventid"\s*:\s*"([^"]+)"',
+    ) or root_event_id or flow_id
+
+    workspace_id = _pick_str(
+        r'"workspace_id"\s*:\s*"([^"]+)"',
+        r'"workspaceid"\s*:\s*"([^"]+)"',
+        r'"workspace"\s*:\s*"([^"]+)"',
+    )
+
+    run_record_id = _pick_str(
+        r'"run_record_id"\s*:\s*"([^"]+)"',
+        r'"runrecordid"\s*:\s*"([^"]+)"',
+    )
+
+    linked_run = _pick_str(
+        r'"linked_run"\s*:\s*"([^"]+)"',
+        r'"linkedrun"\s*:\s*"([^"]+)"',
+    ) or run_record_id
+
+    parent_command_id = _pick_str(
+        r'"parent_command_id"\s*:\s*"([^"]+)"',
+        r'"parentcommandid"\s*:\s*"([^"]+)"',
+    )
+
+    command_id = _pick_str(
+        r'"command_id"\s*:\s*"([^"]+)"',
+        r'"commandid"\s*:\s*"([^"]+)"',
+    )
+
+    url_value = _pick_str(
+        r'"url"\s*:\s*"([^"]+)"',
+        r'"http_target"\s*:\s*"([^"]+)"',
+        r'"httptarget"\s*:\s*"([^"]+)"',
+        r'"target_url"\s*:\s*"([^"]+)"',
+        r'"targeturl"\s*:\s*"([^"]+)"',
+        r'"failed_url"\s*:\s*"([^"]+)"',
+        r'"failedurl"\s*:\s*"([^"]+)"',
+        r'"URL"\s*:\s*"([^"]+)"',
+    )
+
+    method_value = _pick_str(
+        r'"method"\s*:\s*"([^"]+)"',
+        r'"failed_method"\s*:\s*"([^"]+)"',
+        r'"failedmethod"\s*:\s*"([^"]+)"',
+        r'"HTTP_Method"\s*:\s*"([^"]+)"',
+        r'"HTTPMethod"\s*:\s*"([^"]+)"',
+    ).upper() or "GET"
+
+    goal_value = _pick_str(
+        r'"goal"\s*:\s*"([^"]+)"',
+        r'"failed_goal"\s*:\s*"([^"]+)"',
+        r'"failedgoal"\s*:\s*"([^"]+)"',
+    )
+
+    retry_reason = _pick_str(
+        r'"retry_reason"\s*:\s*"([^"]+)"',
+        r'"retryreason"\s*:\s*"([^"]+)"',
+        r'"reason"\s*:\s*"([^"]+)"',
+        r'"incident_code"\s*:\s*"([^"]+)"',
+        r'"incidentcode"\s*:\s*"([^"]+)"',
+    )
+
+    error_value = _pick_str(
+        r'"error"\s*:\s*"([^"]+)"',
+    )
+
+    error_message = _pick_str(
+        r'"error_message"\s*:\s*"([^"]+)"',
+        r'"errormessage"\s*:\s*"([^"]+)"',
+        r'"last_error"\s*:\s*"([^"]+)"',
+        r'"lasterror"\s*:\s*"([^"]+)"',
+        r'"incident_message"\s*:\s*"([^"]+)"',
+        r'"incidentmessage"\s*:\s*"([^"]+)"',
+    )
+
+    original_capability = _pick_str(
+        r'"original_capability"\s*:\s*"([^"]+)"',
+        r'"originalcapability"\s*:\s*"([^"]+)"',
+    )
+
+    source_capability = _pick_str(
+        r'"source_capability"\s*:\s*"([^"]+)"',
+        r'"sourcecapability"\s*:\s*"([^"]+)"',
+    )
+
+    failed_capability = _pick_str(
+        r'"failed_capability"\s*:\s*"([^"]+)"',
+        r'"failedcapability"\s*:\s*"([^"]+)"',
+    )
+
+    target_capability = _pick_str(
+        r'"target_capability"\s*:\s*"([^"]+)"',
+        r'"targetcapability"\s*:\s*"([^"]+)"',
+    ) or failed_capability or source_capability or original_capability
+
+    retry_count = _pick_int(
+        r'"retry_count"\s*:\s*(\d+)',
+        r'"retrycount"\s*:\s*(\d+)',
+    )
+
+    retry_max = _pick_int(
+        r'"retry_max"\s*:\s*(\d+)',
+        r'"retrymax"\s*:\s*(\d+)',
+    )
+
+    retry_delay_seconds = _pick_int(
+        r'"retry_delay_seconds"\s*:\s*(\d+)',
+        r'"retrydelayseconds"\s*:\s*(\d+)',
+    )
+
+    http_status = _pick_int(
+        r'"http_status"\s*:\s*(\d+)',
+        r'"httpstatus"\s*:\s*(\d+)',
+        r'"status_code"\s*:\s*(\d+)',
+        r'"statuscode"\s*:\s*(\d+)',
+    )
+
+    step_index = _pick_int(
+        r'"step_index"\s*:\s*(\d+)',
+        r'"stepindex"\s*:\s*(\d+)',
+    )
+
+    depth = _pick_int(
+        r'"_depth"\s*:\s*(\d+)',
+        r'"depth"\s*:\s*(\d+)',
+    )
+
+    out: Dict[str, Any] = {}
+
+    if flow_id:
+        out["flow_id"] = flow_id
+    if root_event_id:
+        out["root_event_id"] = root_event_id
+    if source_event_id:
+        out["source_event_id"] = source_event_id
+        out["event_id"] = source_event_id
+    if workspace_id:
+        out["workspace_id"] = workspace_id
+        out["workspace"] = workspace_id
+    if run_record_id:
+        out["run_record_id"] = run_record_id
+    if linked_run:
+        out["linked_run"] = linked_run
+    if parent_command_id:
+        out["parent_command_id"] = parent_command_id
+    if command_id:
+        out["command_id"] = command_id
+    if url_value:
+        out["url"] = url_value
+        out["http_target"] = url_value
+        out["target_url"] = url_value
+        out["failed_url"] = url_value
+    if method_value:
+        out["method"] = method_value
+        out["failed_method"] = method_value
+    if goal_value:
+        out["goal"] = goal_value
+        out["failed_goal"] = goal_value
+    if retry_reason:
+        out["retry_reason"] = retry_reason
+        out["reason"] = retry_reason
+    if error_value:
+        out["error"] = error_value
+    if error_message:
+        out["error_message"] = error_message
+        out["last_error"] = error_message
+        out["request_error"] = error_message
+    if original_capability:
+        out["original_capability"] = original_capability
+    if source_capability:
+        out["source_capability"] = source_capability
+    if failed_capability:
+        out["failed_capability"] = failed_capability
+    if target_capability:
+        out["target_capability"] = target_capability
+    if retry_count is not None:
+        out["retry_count"] = retry_count
+    if retry_max is not None:
+        out["retry_max"] = retry_max
+    if retry_delay_seconds is not None:
+        out["retry_delay_seconds"] = retry_delay_seconds
+    if http_status is not None:
+        out["http_status"] = http_status
+        out["status_code"] = http_status
+    if step_index is not None:
+        out["step_index"] = step_index
+    if depth is not None:
+        out["_depth"] = depth
+
+    if out:
+        out["original_input"] = {
+            "url": url_value,
+            "http_target": url_value,
+            "method": method_value,
+            "goal": goal_value,
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
+            "source_event_id": source_event_id,
+            "workspace_id": workspace_id,
+            "run_record_id": run_record_id,
+            "linked_run": linked_run,
+        }
+
+    return out
+    
 def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     parsed_sources: Dict[str, Dict[str, Any]] = {}
     base: Dict[str, Any] = {}
