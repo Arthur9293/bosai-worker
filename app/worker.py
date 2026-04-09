@@ -1146,17 +1146,12 @@ def capability_send_lead_email(req: RunRequest, run_record_id: str) -> Dict[str,
         "run_record_id": run_record_id,
     }
 
-def _json_load_maybe(val: Any) -> Dict[str, Any]:
+def _json_load_maybe(val: Any) -> Any:
     if val is None:
         return {}
 
-    if isinstance(val, dict):
+    if isinstance(val, (dict, list)):
         return val
-
-    if isinstance(val, list):
-        if val and isinstance(val[0], dict):
-            return val[0]
-        return {}
 
     s = str(val).strip()
     if not s:
@@ -1180,10 +1175,10 @@ def _json_load_maybe(val: Any) -> Dict[str, Any]:
     if fixed:
         candidates.append(fixed)
 
-    def _unwrap_string_json(parsed: Any) -> Dict[str, Any]:
+    def _unwrap_string_json(parsed: Any) -> Any:
         current = parsed
         for _ in range(3):
-            if isinstance(current, dict):
+            if isinstance(current, (dict, list)):
                 return current
             if not isinstance(current, str):
                 return {}
@@ -1200,7 +1195,7 @@ def _json_load_maybe(val: Any) -> Dict[str, Any]:
                 continue
             except Exception:
                 return {}
-        return current if isinstance(current, dict) else {}
+        return current if isinstance(current, (dict, list)) else {}
 
     seen = set()
 
@@ -1214,9 +1209,9 @@ def _json_load_maybe(val: Any) -> Dict[str, Any]:
             try:
                 parsed = parser(candidate)
                 out = _unwrap_string_json(parsed)
-                if out:
+                if out not in ({}, [], None):
                     return out
-                if isinstance(parsed, dict):
+                if isinstance(parsed, (dict, list)):
                     return parsed
             except Exception:
                 pass
