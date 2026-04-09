@@ -5576,6 +5576,12 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         except Exception:
             return default
 
+    def _json_dump_local(value: Any) -> str:
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except Exception:
+            return "{}"
+
     def _unwrap_command_input(value: Any) -> Dict[str, Any]:
         if not isinstance(value, dict):
             return {}
@@ -5843,6 +5849,107 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
 
         return fixed
 
+    def _failure_finalize_snapshot(
+        *,
+        capability: str,
+        result_obj: Dict[str, Any],
+        cmd_input: Dict[str, Any],
+        fields: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        next_commands = result_obj.get("next_commands")
+        if not isinstance(next_commands, list):
+            next_commands = []
+
+        next_caps: List[str] = []
+        for child in next_commands:
+            if not isinstance(child, dict):
+                continue
+            child_cap = _pick(child.get("capability"), child.get("Capability"))
+            if child_cap:
+                next_caps.append(child_cap)
+
+        has_retry_router_child = "retry_router" in next_caps
+        has_any_child = len(next_caps) > 0
+
+        retry_count = _to_int_local(
+            _pick(
+                result_obj.get("retry_count"),
+                cmd_input.get("retry_count"),
+                fields.get("Retry_Count"),
+                fields.get("retry_count"),
+            ),
+            0,
+        )
+        retry_max = _to_int_local(
+            _pick(
+                result_obj.get("retry_max"),
+                cmd_input.get("retry_max"),
+                fields.get("Retry_Max"),
+                fields.get("retry_max"),
+            ),
+            0,
+        )
+
+        final_failure = _is_truthy(result_obj.get("final_failure"))
+        terminal = _is_truthy(result_obj.get("terminal"))
+        retry_planned_flag = _is_truthy(result_obj.get("retry_planned"))
+
+        retries_exhausted = retry_max > 0 and retry_count >= retry_max
+        routed_elsewhere = has_any_child and not has_retry_router_child
+
+        force_error = (
+            final_failure
+            or terminal
+            or retries_exhausted
+            or routed_elsewhere
+        ) and not has_retry_router_child
+
+        return {
+            "capability": capability,
+            "retry_count": retry_count,
+            "retry_max": retry_max,
+            "final_failure": final_failure,
+            "terminal": terminal,
+            "retry_planned_flag": retry_planned_flag,
+            "next_caps": next_caps,
+            "has_retry_router_child": has_retry_router_child,
+            "routed_elsewhere": routed_elsewhere,
+            "retries_exhausted": retries_exhausted,
+            "force_error": force_error,
+        }
+
+    def _force_command_error_status(
+        *,
+        command_id: str,
+        error_message: str,
+        result_obj: Dict[str, Any],
+    ) -> None:
+        _airtable_update_best_effort(
+            COMMANDS_TABLE_NAME,
+            command_id,
+            [
+                {
+                    "Status_select": "Error",
+                    "Finished_At": utc_now_iso(),
+                    "Error_Message": error_message,
+                    "Result_JSON": _json_dump_local(result_obj),
+                    "Linked_Run": [run_record_id],
+                    "Next_Retry_At": None,
+                    "Is_Locked": False,
+                    "Lock_Expires_At": None,
+                    "Lock_Token": "",
+                },
+                {
+                    "Status_select": "Error",
+                    "Finished_At": utc_now_iso(),
+                    "Error_Message": error_message,
+                    "Next_Retry_At": None,
+                },
+                {"Status_select": "Error"},
+            ],
+        )
+        _release_command_lock_best_effort(command_id)
+
     try:
         cmds = airtable_list_filtered(
             COMMANDS_TABLE_NAME,
@@ -5949,7 +6056,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         raw_cmd_input = _normalize_keys_deep(raw_cmd_input)
         raw_cmd_input = _unwrap_command_input(raw_cmd_input)
         raw_cmd_input = _ensure_incident_identity(raw_cmd_input)
-        
+
         preserved_raw_cmd_input = dict(raw_cmd_input)
 
         cmd_ctx = _normalize_command_context(
@@ -5963,11 +6070,10 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             ),
             fallback_run_record_id=run_record_id,
         )
-        
+
         cmd_ctx = _ensure_incident_identity(cmd_ctx, raw_cmd_input)
         cmd_input = _inject_context_into_input(raw_cmd_input, cmd_ctx)
         cmd_input = _ensure_incident_identity(cmd_input, cmd_ctx)
-        
 
         print("[command_orchestrator] cmd_input capability =", capability, flush=True)
         print("[command_orchestrator] cmd_input payload =", cmd_input, flush=True)
@@ -6209,12 +6315,34 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                     result_obj.get("message"),
                     "capability_failed",
                 )
+
+                failure_snapshot = _failure_finalize_snapshot(
+                    capability=capability,
+                    result_obj=result_obj,
+                    cmd_input=cmd_input,
+                    fields=fields,
+                )
+                print("[command_orchestrator] failure_finalize_snapshot =", failure_snapshot, flush=True)
+
                 _command_mark_retry_or_dead_from_result_best_effort(
                     command_id=cid,
                     run_record_id=run_record_id,
                     fields=fields,
                     result_obj=result_obj,
                 )
+
+                if failure_snapshot.get("force_error"):
+                    print(
+                        "[command_orchestrator] force final Error status for command =",
+                        cid,
+                        flush=True,
+                    )
+                    _force_command_error_status(
+                        command_id=cid,
+                        error_message=error_message,
+                        result_obj=result_obj,
+                    )
+
                 failed += 1
                 errors.append(f"{cid}: {error_message}")
         except HTTPException as e:
