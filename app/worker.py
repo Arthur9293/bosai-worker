@@ -4906,12 +4906,7 @@ def _command_mark_unsupported_best_effort(command_id: str, run_record_id: str, m
         ],
     )
 
-def _command_mark_retry_or_dead_best_effort(
-    command_id: str,
-    run_record_id: str,
-    fields: Dict[str, Any],
-    message: str,
-) -> Dict[str, Any]:
+def _command_mark_retry_or_dead_best_effort(command_id: str, run_record_id: str, fields: Dict[str, Any], message: str) -> Dict[str, Any]:
     now = utc_now_iso()
     payload = json.dumps({"error": message}, ensure_ascii=False)
 
@@ -4930,14 +4925,7 @@ def _command_mark_retry_or_dead_best_effort(
     elif retry_max <= 0:
         retry_max = 3
 
-    next_retry_count = retry_count + 1
-
-    # IMPORTANT:
-    # si Retry_Max = 3, on veut:
-    # 0 -> Retry 1
-    # 1 -> Retry 2
-    # 2 -> Dead/Error
-    if next_retry_count < retry_max:
+    if retry_count < retry_max:
         next_at = _compute_next_retry_at(fields)
         return _airtable_update_best_effort(
             COMMANDS_TABLE_NAME,
@@ -4945,7 +4933,7 @@ def _command_mark_retry_or_dead_best_effort(
             [
                 {
                     "Status_select": "Retry",
-                    "Retry_Count": next_retry_count,
+                    "Retry_Count": retry_count + 1,
                     "Next_Retry_At": next_at,
                     "Finished_At": now,
                     "Last_Error": message,
@@ -4959,7 +4947,7 @@ def _command_mark_retry_or_dead_best_effort(
                 },
                 {
                     "Status_select": "Retry",
-                    "Retry_Count": next_retry_count,
+                    "Retry_Count": retry_count + 1,
                     "Next_Retry_At": next_at,
                     "Linked_Run": [run_record_id],
                 },
@@ -4975,8 +4963,6 @@ def _command_mark_retry_or_dead_best_effort(
         [
             {
                 "Status_select": "Dead",
-                "Retry_Count": next_retry_count,
-                "Next_Retry_At": None,
                 "Finished_At": now,
                 "Last_Error": message,
                 "Error_Message": message,
@@ -4989,14 +4975,10 @@ def _command_mark_retry_or_dead_best_effort(
             },
             {
                 "Status_select": "Dead",
-                "Retry_Count": next_retry_count,
-                "Next_Retry_At": None,
                 "Linked_Run": [run_record_id],
             },
             {
                 "Status_select": "Error",
-                "Retry_Count": next_retry_count,
-                "Next_Retry_At": None,
                 "Linked_Run": [run_record_id],
             },
         ],
@@ -5028,10 +5010,8 @@ def _command_mark_retry_or_dead_from_result_best_effort(
     elif retry_max <= 0:
         retry_max = 3
 
-    retry_count_after_failure = _to_int(
-        result_obj.get("retry_count"),
-        _to_int(retry_fields.get("Retry_Count"), 0) + 1,
-    )
+    current_retry_count = _to_int(retry_fields.get("Retry_Count"), 0)
+    retry_count_after_failure = current_retry_count + 1
 
     retry_delay_seconds = _to_int(
         result_obj.get("retry_delay_seconds"),
@@ -5047,10 +5027,10 @@ def _command_mark_retry_or_dead_from_result_best_effort(
     retry_fields["Retry_Backoff_Sec"] = retry_delay_seconds
 
     if retryable and not final_failure:
-        # helper existant incrémente déjà de +1
-        retry_fields["Retry_Count"] = max(0, retry_count_after_failure - 1)
+        # Le helper du dessous incrémente déjà de +1
+        retry_fields["Retry_Count"] = current_retry_count
     else:
-        # forcer le Dead
+        # Forcer le chemin terminal
         retry_fields["Retry_Count"] = max(retry_count_after_failure, retry_max)
 
     return _command_mark_retry_or_dead_best_effort(
