@@ -2145,6 +2145,7 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     ):
         base.pop(legacy_key, None)
 
+    base = _ensure_incident_identity(base)
     base = _sanitize_payload_for_airtable(base)
 
     if parse_errors:
