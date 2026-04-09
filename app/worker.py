@@ -1295,7 +1295,7 @@ def _json_load_maybe(val: Any) -> Dict[str, Any]:
         _push(text.replace("\\\\\"", '\\"'))
         _push(text.replace("\\\\'", "\\'"))
 
-    print("[_json_load_maybe] JSON PARSE FAILED repr =", repr(s[:1000]), flush=True)
+    
     return {}
 
 def _extract_retry_fields_from_text(raw_text: str) -> Dict[str, Any]:
