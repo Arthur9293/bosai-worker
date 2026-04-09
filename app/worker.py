@@ -1616,6 +1616,10 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
 
     for source_key in source_priority:
         parsed_sources[source_key] = _parse_candidate(fields.get(source_key), source_key)
+        print(
+            f"[compose_command_input] parsed_source[{source_key}] = {json.dumps(parsed_sources[source_key], ensure_ascii=False)}",
+            flush=True,
+        )
 
     for source_key in source_priority:
         candidate = parsed_sources.get(source_key) or {}
@@ -1667,6 +1671,21 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         parsed_sources.get("Command_JSON") or {},
         parsed_sources.get("Payload_JSON") or {},
     ]
+
+    print(
+        "[compose_command_input] search snapshot =",
+        json.dumps(
+            {
+                "base": base,
+                "original_input_obj": original_input_obj,
+                "body_obj": body_obj,
+                "request_obj": request_obj,
+                "response_obj": response_obj,
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
 
     flow_id = _pick(
         _pick_from_dicts(search_dicts, "flow_id", "flowid"),
@@ -1780,31 +1799,25 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         method_value = "GET"
 
     headers_obj = base.get("headers") if isinstance(base.get("headers"), dict) else {}
+    if not headers_obj and isinstance(request_obj.get("headers"), dict):
+        headers_obj = dict(request_obj.get("headers") or {})
     if not headers_obj:
-        headers_obj = request_obj.get("headers") if isinstance(request_obj.get("headers"), dict) else {}
-    if not headers_obj:
-        maybe_headers = _json_load_maybe(fields.get("HTTP_Headers_JSON"))
-        headers_obj = maybe_headers if isinstance(maybe_headers, dict) else {}
+        headers_obj = _json_load_maybe(fields.get("HTTP_Headers_JSON"))
 
     json_obj = base.get("json") if isinstance(base.get("json"), dict) else {}
     if not json_obj and isinstance(body_obj.get("json"), dict):
         json_obj = dict(body_obj.get("json") or {})
     if not json_obj:
-        maybe_json = _json_load_maybe(fields.get("JSON"))
-        json_obj = maybe_json if isinstance(maybe_json, dict) else {}
+        json_obj = _json_load_maybe(fields.get("JSON"))
 
     body_dict = body_obj if isinstance(body_obj, dict) else {}
     if not body_dict:
-        maybe_body = _json_load_maybe(fields.get("HTTP_Payload_JSON"))
-        body_dict = maybe_body if isinstance(maybe_body, dict) else {}
+        body_dict = _json_load_maybe(fields.get("HTTP_Payload_JSON"))
 
     if not request_obj:
-        maybe_request = _json_load_maybe(fields.get("Request_JSON"))
-        request_obj = maybe_request if isinstance(maybe_request, dict) else {}
-
+        request_obj = _json_load_maybe(fields.get("Request_JSON"))
     if not response_obj:
-        maybe_response = _json_load_maybe(fields.get("Response_JSON"))
-        response_obj = maybe_response if isinstance(maybe_response, dict) else {}
+        response_obj = _json_load_maybe(fields.get("Response_JSON"))
 
     base["flow_id"] = flow_id
     base["root_event_id"] = root_event_id
@@ -1985,7 +1998,7 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
         "workspaceId",
         "Workspace_ID",
         "runrecordid",
-        "Run_RecordId",
+        "runRecordId",
         "Run_Record_ID",
         "linkedrun",
         "Linked_Run",
