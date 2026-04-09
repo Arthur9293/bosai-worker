@@ -5625,6 +5625,8 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
 
         raw_cmd_input = _normalize_keys_deep(raw_cmd_input)
         raw_cmd_input = _unwrap_command_input(raw_cmd_input)
+        raw_cmd_input = _ensure_incident_identity(raw_cmd_input)
+        
         preserved_raw_cmd_input = dict(raw_cmd_input)
 
         cmd_ctx = _normalize_command_context(
@@ -5638,7 +5640,11 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             ),
             fallback_run_record_id=run_record_id,
         )
+        
+        cmd_ctx = _ensure_incident_identity(cmd_ctx, raw_cmd_input)
         cmd_input = _inject_context_into_input(raw_cmd_input, cmd_ctx)
+        cmd_input = _ensure_incident_identity(cmd_input, cmd_ctx)
+        
 
         print("[command_orchestrator] cmd_input capability =", capability, flush=True)
         print("[command_orchestrator] cmd_input payload =", cmd_input, flush=True)
