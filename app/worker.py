@@ -5610,7 +5610,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             ),
         )
 
-    def _normalize_command_context(
+def _normalize_command_context(
     *,
     command_id: str,
     fields: Dict[str, Any],
