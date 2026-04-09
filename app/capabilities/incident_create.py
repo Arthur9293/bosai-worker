@@ -1332,10 +1332,10 @@ def run(
         run_record_id=effective_run_record_id,
         linked_run=linked_run or effective_run_record_id,
         parent_command_id=next_parent_command_id,
-        command_id=next_parent_command_id,
         step_index=current_step_index + 1,
         _depth=depth + 1,
     )
+    next_input.pop("command_id", None)
 
     next_action = decision_block["next_action"]
     if next_action == "internal_escalate":
@@ -1347,6 +1347,16 @@ def run(
 
     print("[incident_create] next_capability =", next_capability, flush=True)
     print("[incident_create] next_input =", next_input, flush=True)
+    print(
+        "[incident_create] returning DONE",
+        {
+            "incident_record_id": incident_record_id,
+            "next_capability": next_capability,
+            "flow_id": _pick_text(next_input.get("flow_id")),
+            "root_event_id": _pick_text(next_input.get("root_event_id")),
+        },
+        flush=True,
+    )
 
     return {
         "ok": True,
