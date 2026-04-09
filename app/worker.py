@@ -5741,7 +5741,6 @@ def capability_decision_demo(req: RunRequest, run_record_id: str) -> Dict[str, A
         "root_event_id": root_event_id,
     }
 
-
 def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     raw_input = dict(req.input or {}) if isinstance(req.input, dict) else {}
 
@@ -5758,6 +5757,8 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
     for k, v in normalized.items():
         if k not in payload or payload.get(k) in (None, "", {}, []):
             payload[k] = v
+
+    print("[retry_router wrapper] normalized payload =", repr(normalized), flush=True)
 
     workspace_id = _resolve_workspace_id(req=req)
     flow_id, root_event_id = _resolve_flow_ids(payload)
@@ -5793,11 +5794,38 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
         payload["linked_run"] = run_record_id
 
     print("[retry_router wrapper] merged payload =", repr(payload), flush=True)
+    print(
+        "[retry_router wrapper] key snapshot =",
+        {
+            "flow_id": payload.get("flow_id"),
+            "root_event_id": payload.get("root_event_id"),
+            "source_event_id": payload.get("source_event_id"),
+            "workspace_id": payload.get("workspace_id"),
+            "run_record_id": payload.get("run_record_id"),
+            "linked_run": payload.get("linked_run"),
+            "retry_count": payload.get("retry_count"),
+            "retry_max": payload.get("retry_max"),
+            "retry_reason": payload.get("retry_reason"),
+            "error": payload.get("error"),
+            "error_message": payload.get("error_message"),
+            "http_status": payload.get("http_status"),
+            "status_code": payload.get("status_code"),
+            "url": payload.get("url"),
+            "method": payload.get("method"),
+            "target_capability": payload.get("target_capability"),
+            "original_capability": payload.get("original_capability"),
+            "source_capability": payload.get("source_capability"),
+            "failed_capability": payload.get("failed_capability"),
+        },
+        flush=True,
+    )
 
     try:
         result = capability_retry_router_run(payload=payload)
+        print("[retry_router wrapper] run result =", repr(result), flush=True)
 
     except Exception as e:
+        print("[retry_router wrapper] exception =", repr(e), flush=True)
         return {
             "ok": False,
             "capability": "retry_router",
@@ -5815,6 +5843,7 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
         }
 
     if not isinstance(result, dict):
+        print("[retry_router wrapper] non-dict result =", repr(result), flush=True)
         result = {
             "ok": False,
             "capability": "retry_router",
@@ -5844,6 +5873,24 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
 
     if "terminal" not in result:
         result["terminal"] = not bool(result["next_commands"])
+
+    print(
+        "[retry_router wrapper] final result snapshot =",
+        {
+            "status": result.get("status"),
+            "decision": result.get("decision"),
+            "retry_reason": result.get("retry_reason"),
+            "error_type": result.get("error_type"),
+            "http_status": result.get("http_status"),
+            "request_error": result.get("request_error"),
+            "target_capability": result.get("target_capability"),
+            "retry_count": result.get("retry_count"),
+            "retry_max": result.get("retry_max"),
+            "terminal": result.get("terminal"),
+            "next_commands_len": len(result.get("next_commands") or []),
+        },
+        flush=True,
+    )
 
     try:
         _append_flow_step_safe(
@@ -5884,6 +5931,7 @@ def capability_retry_router(req: RunRequest, run_record_id: str) -> Dict[str, An
         pass
 
     return result
+
     
 def capability_sla_router(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
