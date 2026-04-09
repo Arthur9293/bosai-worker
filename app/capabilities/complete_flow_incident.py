@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 def _now_ts() -> str:
@@ -58,6 +58,10 @@ def _json_load_maybe(value: Any) -> Any:
         return None
 
 
+def _is_empty(value: Any) -> bool:
+    return value in (None, "", {}, [])
+
+
 def _pick_text(*values: Any) -> str:
     for value in values:
         if value is None:
@@ -85,81 +89,160 @@ def _pick_text(*values: Any) -> str:
     return ""
 
 
+def _pick_value(*values: Any) -> Any:
+    for value in values:
+        if not _is_empty(value):
+            return value
+    return None
+
+
+def _pick_dict(*values: Any) -> Dict[str, Any]:
+    for value in values:
+        if isinstance(value, dict) and value:
+            return dict(value)
+    return {}
+
+
+def _merge_missing(target: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(target, dict):
+        target = {}
+    if not isinstance(source, dict):
+        return target
+
+    for key, value in source.items():
+        if key not in target or _is_empty(target.get(key)):
+            target[key] = value
+    return target
+
+
+def _extract_search_dicts(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+
+    if isinstance(payload, dict):
+        result.append(dict(payload))
+
+    for key in ("incident_result", "original_input", "body", "input", "command_input"):
+        nested = payload.get(key) if isinstance(payload, dict) else None
+
+        if isinstance(nested, str):
+            nested = _json_load_maybe(nested)
+
+        if isinstance(nested, dict) and nested:
+            result.append(dict(nested))
+
+    return result
+
+
+def _pick_text_from_dicts(dicts: List[Dict[str, Any]], *keys: str, default: str = "") -> str:
+    for data in dicts:
+        if not isinstance(data, dict):
+            continue
+        for key in keys:
+            if key in data:
+                text = _pick_text(data.get(key))
+                if text:
+                    return text
+    return default
+
+
+def _pick_value_from_dicts(dicts: List[Dict[str, Any]], *keys: str) -> Any:
+    for data in dicts:
+        if not isinstance(data, dict):
+            continue
+        for key in keys:
+            if key in data and not _is_empty(data.get(key)):
+                return data.get(key)
+    return None
+
+
 def _normalize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
 
     normalized = dict(payload)
 
-    # unwrap input / command_input if present
     for key in ("input", "command_input"):
         nested = normalized.get(key)
         if isinstance(nested, dict):
             merged = dict(normalized)
             merged.pop(key, None)
-            merged.update(nested)
+            merged = _merge_missing(merged, nested)
             normalized = merged
 
-    flow_id = _pick_text(
-        normalized.get("flow_id"),
-        normalized.get("flowid"),
-        normalized.get("flowId"),
+    search_dicts = _extract_search_dicts(normalized)
+
+    flow_id = _pick_text_from_dicts(
+        search_dicts,
+        "flow_id",
+        "flowid",
+        "flowId",
+        default="",
     )
 
-    root_event_id = _pick_text(
-        normalized.get("root_event_id"),
-        normalized.get("rooteventid"),
-        normalized.get("rootEventId"),
-        normalized.get("event_id"),
-        normalized.get("eventid"),
-        normalized.get("eventId"),
-        flow_id,
+    root_event_id = _pick_text_from_dicts(
+        search_dicts,
+        "root_event_id",
+        "rooteventid",
+        "rootEventId",
+        "event_id",
+        "eventid",
+        "eventId",
+        default=flow_id,
     )
 
-    source_event_id = _pick_text(
-        normalized.get("source_event_id"),
-        normalized.get("sourceeventid"),
-        normalized.get("sourceEventId"),
-        normalized.get("event_id"),
-        normalized.get("eventid"),
-        normalized.get("eventId"),
-        root_event_id,
-        flow_id,
+    source_event_id = _pick_text_from_dicts(
+        search_dicts,
+        "source_event_id",
+        "sourceeventid",
+        "sourceEventId",
+        "event_id",
+        "eventid",
+        "eventId",
+        default=root_event_id or flow_id,
     )
 
-    workspace_id = _pick_text(
-        normalized.get("workspace_id"),
-        normalized.get("workspaceid"),
-        normalized.get("workspaceId"),
-        normalized.get("workspace"),
-        "production",
+    workspace_id = _pick_text_from_dicts(
+        search_dicts,
+        "workspace_id",
+        "workspaceid",
+        "workspaceId",
+        "workspace",
+        default="production",
     )
 
-    run_record_id = _pick_text(
-        normalized.get("run_record_id"),
-        normalized.get("runrecordid"),
-        normalized.get("runRecordId"),
-        normalized.get("linked_run"),
-        normalized.get("linkedrun"),
+    run_record_id = _pick_text_from_dicts(
+        search_dicts,
+        "run_record_id",
+        "runrecordid",
+        "runRecordId",
+        "linked_run",
+        "linkedrun",
+        default="",
     )
 
-    linked_run = _pick_text(
-        normalized.get("linked_run"),
-        normalized.get("linkedrun"),
-        run_record_id,
+    linked_run = _pick_text_from_dicts(
+        search_dicts,
+        "linked_run",
+        "linkedrun",
+        "run_record_id",
+        "runrecordid",
+        default=run_record_id,
     )
 
-    command_id = _pick_text(
-        normalized.get("command_id"),
-        normalized.get("commandid"),
-        normalized.get("commandId"),
+    command_id = _pick_text_from_dicts(
+        search_dicts,
+        "command_id",
+        "commandid",
+        "commandId",
+        default="",
     )
 
-    parent_command_id = _pick_text(
-        normalized.get("parent_command_id"),
-        normalized.get("parentcommandid"),
-        normalized.get("parentCommandId"),
-        command_id,
+    parent_command_id = _pick_text_from_dicts(
+        search_dicts,
+        "parent_command_id",
+        "parentcommandid",
+        "parentCommandId",
+        default=command_id,
     )
 
     normalized["flow_id"] = flow_id
@@ -169,21 +252,15 @@ def _normalize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     normalized["workspace_id"] = workspace_id
     normalized["workspace"] = workspace_id
     normalized["run_record_id"] = run_record_id
-    normalized["linked_run"] = linked_run
+    normalized["linked_run"] = linked_run or run_record_id
     normalized["command_id"] = command_id
     normalized["parent_command_id"] = parent_command_id
     normalized["step_index"] = _to_int(
-        normalized.get("step_index")
-        if normalized.get("step_index") is not None
-        else normalized.get("stepindex")
-        if normalized.get("stepindex") is not None
-        else normalized.get("stepIndex"),
+        _pick_value_from_dicts(search_dicts, "step_index", "stepindex", "stepIndex"),
         0,
     )
     normalized["_depth"] = _to_int(
-        normalized.get("_depth")
-        if normalized.get("_depth") is not None
-        else normalized.get("depth"),
+        _pick_value_from_dicts(search_dicts, "_depth", "depth"),
         0,
     )
 
@@ -195,7 +272,6 @@ def run(
     run_record_id: str = "",
     **kwargs: Any,
 ) -> Dict[str, Any]:
-
     if req is not None and hasattr(req, "input"):
         payload = getattr(req, "input", {}) or {}
     elif isinstance(req, dict):
@@ -210,44 +286,86 @@ def run(
         payload = {}
 
     payload = _normalize_payload(payload)
+    search_dicts = _extract_search_dicts(payload)
 
-    flow_id = _pick_text(payload.get("flow_id"))
-    root_event_id = _pick_text(payload.get("root_event_id"), flow_id)
-    source_event_id = _pick_text(payload.get("source_event_id"), root_event_id, flow_id)
-    workspace_id = _pick_text(payload.get("workspace_id"), "production")
+    flow_id = _pick_text_from_dicts(search_dicts, "flow_id", default="")
+    root_event_id = _pick_text_from_dicts(search_dicts, "root_event_id", default=flow_id)
+    source_event_id = _pick_text_from_dicts(
+        search_dicts,
+        "source_event_id",
+        default=root_event_id or flow_id,
+    )
+    workspace_id = _pick_text_from_dicts(search_dicts, "workspace_id", "workspace", default="production")
 
-    incoming_run_record_id = _pick_text(payload.get("run_record_id"))
-    linked_run = _pick_text(payload.get("linked_run"), incoming_run_record_id, run_record_id)
-
-    # IMPORTANT:
-    # on garde le run hérité du flow en priorité,
-    # puis seulement en fallback le run local du capability courant
+    incoming_run_record_id = _pick_text_from_dicts(search_dicts, "run_record_id", default="")
+    linked_run = _pick_text_from_dicts(search_dicts, "linked_run", default=incoming_run_record_id or run_record_id)
     effective_run_record_id = _pick_text(incoming_run_record_id, linked_run, run_record_id)
 
-    command_id = _pick_text(payload.get("command_id"))
-    parent_command_id = _pick_text(payload.get("parent_command_id"), command_id)
-
-    incident_record_id = _pick_text(
-        payload.get("incident_record_id"),
-        payload.get("incidentrecordid"),
+    command_id = _pick_text_from_dicts(search_dicts, "command_id", default="")
+    parent_command_id = _pick_text_from_dicts(
+        search_dicts,
+        "parent_command_id",
+        default=command_id,
     )
 
-    severity = _pick_text(payload.get("severity")).strip().lower()
+    incident_record_id = _pick_text_from_dicts(
+        search_dicts,
+        "incident_record_id",
+        "incidentrecordid",
+        default="",
+    )
+
+    severity = _pick_text_from_dicts(search_dicts, "severity", default="").strip().lower()
+    category = _pick_text_from_dicts(search_dicts, "category", default="")
+    reason = _pick_text_from_dicts(search_dicts, "reason", default="")
+    retry_reason = _pick_text_from_dicts(search_dicts, "retry_reason", default="")
+    decision_status = _pick_text_from_dicts(search_dicts, "decision_status", default="")
+    decision_reason = _pick_text_from_dicts(search_dicts, "decision_reason", default="")
+    next_action = _pick_text_from_dicts(search_dicts, "next_action", default="")
+    source_capability = _pick_text_from_dicts(search_dicts, "source_capability", default="")
+    original_capability = _pick_text_from_dicts(search_dicts, "original_capability", default="")
+    failed_capability = _pick_text_from_dicts(search_dicts, "failed_capability", default="")
+    target_capability = _pick_text_from_dicts(search_dicts, "target_capability", default="")
+    failed_url = _pick_text_from_dicts(search_dicts, "failed_url", "target_url", "url", default="")
+    failed_method = _pick_text_from_dicts(search_dicts, "failed_method", "method", default="")
+    incident_code = _pick_text_from_dicts(search_dicts, "incident_code", default="")
+    error_message = _pick_text_from_dicts(search_dicts, "error_message", "error", default="")
+
+    http_status_value = _pick_value_from_dicts(search_dicts, "http_status", "status_code")
+    http_status: Optional[int]
+    try:
+        http_status = int(http_status_value) if http_status_value not in (None, "") else None
+    except Exception:
+        http_status = None
+
     final_failure = _to_bool(
-        payload.get("final_failure")
-        if payload.get("final_failure") is not None
-        else payload.get("finalfailure"),
+        _pick_value_from_dicts(search_dicts, "final_failure", "finalfailure"),
         False,
     )
 
-    current_step_index = _to_int(payload.get("step_index"), 0)
-    current_depth = _to_int(payload.get("_depth"), 0)
+    retry_count = _to_int(
+        _pick_value_from_dicts(search_dicts, "retry_count"),
+        0,
+    )
+    retry_max = _to_int(
+        _pick_value_from_dicts(search_dicts, "retry_max"),
+        0,
+    )
+
+    current_step_index = _to_int(
+        _pick_value_from_dicts(search_dicts, "step_index"),
+        0,
+    )
+    current_depth = _to_int(
+        _pick_value_from_dicts(search_dicts, "_depth"),
+        0,
+    )
 
     auto_resolve = False
-    decision = "keep_escalated"
-    next_commands = []
+    decision = _pick_text(payload.get("decision"), "keep_escalated")
+    next_commands: List[Dict[str, Any]] = []
 
-    next_input_base = {
+    next_input_base: Dict[str, Any] = {
         "flow_id": flow_id,
         "root_event_id": root_event_id,
         "source_event_id": source_event_id,
@@ -262,6 +380,23 @@ def run(
         "step_index": current_step_index + 1,
         "_depth": current_depth + 1,
         "severity": severity,
+        "category": category,
+        "reason": reason,
+        "retry_reason": retry_reason,
+        "decision_status": decision_status,
+        "decision_reason": decision_reason,
+        "next_action": next_action,
+        "source_capability": source_capability,
+        "original_capability": original_capability,
+        "failed_capability": failed_capability,
+        "target_capability": target_capability,
+        "failed_url": failed_url,
+        "failed_method": failed_method,
+        "incident_code": incident_code,
+        "error_message": error_message,
+        "http_status": http_status,
+        "retry_count": retry_count,
+        "retry_max": retry_max,
         "final_failure": final_failure,
     }
 
@@ -290,9 +425,27 @@ def run(
         "linked_run": linked_run or effective_run_record_id,
         "workspace_id": workspace_id,
         "command_id": command_id,
+        "parent_command_id": parent_command_id,
         "decision": decision,
+        "decision_status": decision_status,
+        "decision_reason": decision_reason,
+        "next_action": next_action,
         "auto_resolve": auto_resolve,
         "severity": severity,
+        "category": category,
+        "reason": reason,
+        "retry_reason": retry_reason,
+        "source_capability": source_capability,
+        "original_capability": original_capability,
+        "failed_capability": failed_capability,
+        "target_capability": target_capability,
+        "failed_url": failed_url,
+        "failed_method": failed_method,
+        "incident_code": incident_code,
+        "error_message": error_message,
+        "http_status": http_status,
+        "retry_count": retry_count,
+        "retry_max": retry_max,
         "final_failure": final_failure,
         "next_commands": next_commands,
         "terminal": len(next_commands) == 0,
