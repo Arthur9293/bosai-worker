@@ -1146,82 +1146,82 @@ def capability_send_lead_email(req: RunRequest, run_record_id: str) -> Dict[str,
         "run_record_id": run_record_id,
     }
 
-def _json_load_maybe(val: Any) -> Any:
+def _json_load_maybe(val: Any) -> Dict[str, Any]:
     if val is None:
         return {}
 
-    if isinstance(val, (dict, list)):
+    if isinstance(val, dict):
         return val
+
+    if isinstance(val, list):
+        if val and isinstance(val[0], dict):
+            return val[0]
+        return {}
 
     s = str(val).strip()
     if not s:
         return {}
 
-    candidates = []
+    seen = set()
+    queue = [s]
 
-    def _add(x: Any) -> None:
+    def _push(x: Any) -> None:
         if x is None:
             return
         text = str(x).strip()
-        if text:
-            candidates.append(text)
+        if text and text not in seen:
+            queue.append(text)
 
-    _add(s)
+    while queue:
+        current = queue.pop(0)
+        if not current or current in seen:
+            continue
+        seen.add(current)
 
-    current = s
-    for _ in range(4):
-        if len(current) >= 2 and current[0] == current[-1] and current[0] in ("'", '"'):
-            current = current[1:-1].strip()
-            _add(current)
-
+        # 1) JSON direct
         try:
-            decoded = bytes(current, "utf-8").decode("unicode_escape").strip()
-            if decoded and decoded != current:
-                _add(decoded)
-                current = decoded
+            parsed = json.loads(current)
+            if isinstance(parsed, dict):
+                return parsed
+            if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+                return parsed[0]
+            if isinstance(parsed, str):
+                _push(parsed)
         except Exception:
             pass
 
-        fixed = (
-            current
-            .replace('\\"', '"')
-            .replace("\\'", "'")
-            .strip()
-        )
-        if fixed and fixed != current:
-            _add(fixed)
-            current = fixed
-
-    seen = set()
-
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-
-        current = candidate
-
-        for _ in range(5):
-            try:
-                parsed = json.loads(current)
-            except Exception:
-                try:
-                    parsed = ast.literal_eval(current)
-                except Exception:
-                    break
-
-            if isinstance(parsed, (dict, list)):
+        # 2) Python literal
+        try:
+            parsed = ast.literal_eval(current)
+            if isinstance(parsed, dict):
                 return parsed
-
+            if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+                return parsed[0]
             if isinstance(parsed, str):
-                current = parsed.strip()
-                if not current:
-                    break
-                continue
+                _push(parsed)
+        except Exception:
+            pass
 
-            break
+        # 3) Enlever quotes externes
+        if len(current) >= 2 and current[0] == current[-1] and current[0] in ("'", '"'):
+            _push(current[1:-1])
 
-    print("[_json_load_maybe] JSON PARSE FAILED:", s[:1000], flush=True)
+        # 4) Décodage unicode_escape
+        try:
+            decoded = bytes(current, "utf-8").decode("unicode_escape").strip()
+            if decoded and decoded != current:
+                _push(decoded)
+        except Exception:
+            pass
+
+        # 5) Réduction des backslashes
+        _push(current.replace("\\\\", "\\"))
+        _push(current.replace('\\"', '"'))
+        _push(current.replace("\\'", "'"))
+        _push(current.replace("\\\\\"", '\\"'))
+        _push(current.replace("\\\\'", "\\'"))
+
+    print("[_json_load_maybe] JSON PARSE FAILED repr =", repr(s[:1000]), flush=True)
     return {}
 
 def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
