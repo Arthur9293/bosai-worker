@@ -397,7 +397,15 @@ WORKSPACE_DEFAULT_ID = os.getenv("BOSAI_DEFAULT_WORKSPACE_ID", "default").strip(
 WORKSPACE_API_KEYS_RAW = os.getenv("BOSAI_WORKSPACE_API_KEYS", "").strip()
 WORKSPACE_API_KEY_HEADER = "x-bosai-key"
 WORKSPACES_TABLE_NAME = os.getenv("WORKSPACES_TABLE_NAME", "Workspaces").strip()
+USAGE_LEDGER_TABLE_NAME = os.getenv("USAGE_LEDGER_TABLE_NAME", "Usage_Ledger").strip()"
 WORKSPACES_VIEW_NAME = os.getenv("WORKSPACES_VIEW_NAME", "").strip()
+USERS_TABLE_NAME = os.getenv("USERS_TABLE_NAME", "Users").strip()
+WORKSPACE_MEMBERSHIPS_TABLE_NAME = os.getenv(
+    "WORKSPACE_MEMBERSHIPS_TABLE_NAME", "Workspace_Memberships").strip()
+WORKSPACE_API_KEYS_TABLE_NAME = os.getenv(
+    "WORKSPACE_API_KEYS_TABLE_NAME", "Workspace_API_Keys"
+).strip()
+PLANS_TABLE_NAME = os.getenv("PLANS_TABLE_NAME", "Plans").strip()
 
 
 INCIDENTS_TABLE_NAME = os.getenv("INCIDENTS_TABLE_NAME", "Incidents").strip()
@@ -3332,6 +3340,364 @@ def _airtable_create_best_effort(table_name: str, candidates: List[Dict[str, Any
 # ============================================================
 # System runs
 # ============================================================
+def _safe_json_dumps(obj: Any) -> str:
+    try:
+        return json.dumps(obj, ensure_ascii=False)
+    except Exception:
+        return json.dumps({"value": str(obj)}, ensure_ascii=False)
+
+
+def _formula_escape(value: Any) -> str:
+    return str(value or "").replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        if isinstance(value, bool):
+            return int(value)
+        return int(float(value))
+    except Exception:
+        return default
+
+
+def _unwrap_airtable_record(record: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(record, dict):
+        return {}
+
+    fields = record.get("fields")
+    if isinstance(fields, dict):
+        merged = dict(fields)
+        for k, v in record.items():
+            if k != "fields":
+                merged[k] = v
+        return merged
+
+    return dict(record)
+
+
+def _get_airtable_record_by_record_id(
+    table_name: str,
+    record_id: str,
+) -> Optional[Dict[str, Any]]:
+    rid = str(record_id or "").strip()
+    if not rid:
+        return None
+
+    try:
+        return airtable_find_first(
+            table_name,
+            formula=f"RECORD_ID()='{_formula_escape(rid)}'",
+            max_records=1,
+        )
+    except Exception as e:
+        print(
+            f"[_get_airtable_record_by_record_id] table={table_name} rid={rid} err={repr(e)}",
+            flush=True,
+        )
+        return None
+
+
+def _find_workspace_record_by_workspace_id(
+    workspace_id: str,
+) -> Optional[Dict[str, Any]]:
+    wid = str(workspace_id or "").strip()
+    if not wid:
+        return None
+
+    try:
+        return airtable_find_first(
+            WORKSPACES_TABLE_NAME,
+            formula=f"{{Workspace_ID}}='{_formula_escape(wid)}'",
+            max_records=1,
+        )
+    except Exception as e:
+        print(
+            f"[_find_workspace_record_by_workspace_id] workspace_id={wid} err={repr(e)}",
+            flush=True,
+        )
+        return None
+
+
+def _pick_first_text(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _pick_first_int(*values: Any) -> int:
+    for value in values:
+        parsed = _safe_int(value, default=-1)
+        if parsed >= 0:
+            return parsed
+    return 0
+
+
+def _extract_usage_metrics(result_obj: Optional[Dict[str, Any]]) -> Dict[str, int]:
+    result = result_obj if isinstance(result_obj, dict) else {}
+
+    usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+    token_usage = (
+        result.get("token_usage") if isinstance(result.get("token_usage"), dict) else {}
+    )
+    llm_usage = (
+        result.get("llm_usage") if isinstance(result.get("llm_usage"), dict) else {}
+    )
+    model_usage = (
+        result.get("model_usage") if isinstance(result.get("model_usage"), dict) else {}
+    )
+
+    prompt_tokens = _pick_first_int(
+        result.get("prompt_tokens"),
+        usage.get("prompt_tokens"),
+        token_usage.get("prompt_tokens"),
+        llm_usage.get("prompt_tokens"),
+        model_usage.get("prompt_tokens"),
+        result.get("input_tokens"),
+        usage.get("input_tokens"),
+        token_usage.get("input_tokens"),
+        llm_usage.get("input_tokens"),
+        model_usage.get("input_tokens"),
+    )
+
+    completion_tokens = _pick_first_int(
+        result.get("completion_tokens"),
+        usage.get("completion_tokens"),
+        token_usage.get("completion_tokens"),
+        llm_usage.get("completion_tokens"),
+        model_usage.get("completion_tokens"),
+        result.get("output_tokens"),
+        usage.get("output_tokens"),
+        token_usage.get("output_tokens"),
+        llm_usage.get("output_tokens"),
+        model_usage.get("output_tokens"),
+    )
+
+    total_tokens = _pick_first_int(
+        result.get("total_tokens"),
+        usage.get("total_tokens"),
+        token_usage.get("total_tokens"),
+        llm_usage.get("total_tokens"),
+        model_usage.get("total_tokens"),
+    )
+
+    if prompt_tokens <= 0 and completion_tokens <= 0 and total_tokens > 0:
+        prompt_tokens = total_tokens
+
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens if total_tokens > 0 else (prompt_tokens + completion_tokens),
+    }
+
+
+def _load_system_run_context(record_id: str) -> Dict[str, Any]:
+    raw = _get_airtable_record_by_record_id(SYSTEM_RUNS_TABLE_NAME, record_id)
+    record = _unwrap_airtable_record(raw)
+
+    return {
+        "record_id": str(record.get("id") or record_id or "").strip(),
+        "run_id": _pick_first_text(record.get("Run_ID"), record.get("run_id")),
+        "workspace_id": _pick_first_text(
+            record.get("Workspace_ID"),
+            record.get("workspace_id"),
+        ),
+        "capability": _pick_first_text(
+            record.get("Capability"),
+            record.get("capability"),
+        ),
+        "dry_run": bool(record.get("Dry_Run") or record.get("dry_run") or False),
+        "flow_id": _pick_first_text(record.get("Flow_ID"), record.get("flow_id")),
+        "root_event_id": _pick_first_text(
+            record.get("Root_Event_ID"), record.get("root_event_id")
+        ),
+        "source_event_id": _pick_first_text(
+            record.get("Source_Event_ID"),
+            record.get("source_event_id"),
+        ),
+    }
+
+
+def _create_usage_ledger_row_best_effort(
+    workspace_airtable_record_id: str,
+    run_record_id: str,
+    run_id: str,
+    capability: str,
+    usage_type: str,
+    quantity: int,
+    unit: str,
+    billable: bool,
+) -> None:
+    if not USAGE_LEDGER_TABLE_NAME:
+        return
+
+    if not workspace_airtable_record_id:
+        return
+
+    if quantity <= 0:
+        return
+
+    fields: Dict[str, Any] = {
+        "Workspace": [workspace_airtable_record_id],
+        "Run_Record_ID": run_record_id,
+        "Run_ID": run_id,
+        "Capability": capability,
+        "Usage_Type": usage_type,
+        "Quantity": quantity,
+        "Unit": unit,
+        "Billable": bool(billable),
+    }
+
+    try:
+        _airtable_create(USAGE_LEDGER_TABLE_NAME, fields)
+    except Exception as e:
+        print(
+            f"[_create_usage_ledger_row_best_effort] usage_type={usage_type} err={repr(e)}",
+            flush=True,
+        )
+
+
+def _update_workspace_usage_counters_best_effort(
+    workspace_record: Optional[Dict[str, Any]],
+    add_runs: int = 0,
+    add_tokens: int = 0,
+    add_http_calls: int = 0,
+) -> None:
+    raw = _unwrap_airtable_record(workspace_record)
+    workspace_record_id = str(raw.get("id") or "").strip()
+
+    if not workspace_record_id:
+        return
+
+    now_iso = utc_now_iso()
+    current_period = datetime.now(timezone.utc).strftime("%Y-%m")
+    last_reset_at = _pick_first_text(
+        raw.get("Last_Usage_Reset_At"),
+        raw.get("last_usage_reset_at"),
+    )
+
+    same_period = bool(last_reset_at) and last_reset_at.startswith(current_period)
+
+    base_runs = _safe_int(raw.get("Usage_Runs_Current_Month"), 0) if same_period else 0
+    base_tokens = _safe_int(raw.get("Usage_Tokens_Current_Month"), 0) if same_period else 0
+    base_http = _safe_int(raw.get("Usage_HTTP_Calls_Current_Month"), 0) if same_period else 0
+
+    fields = {
+        "Usage_Runs_Current_Month": base_runs + max(0, add_runs),
+        "Usage_Tokens_Current_Month": base_tokens + max(0, add_tokens),
+        "Usage_HTTP_Calls_Current_Month": base_http + max(0, add_http_calls),
+        "Last_Usage_Reset_At": now_iso,
+    }
+
+    try:
+        airtable_update(WORKSPACES_TABLE_NAME, workspace_record_id, fields)
+    except Exception as e:
+        print(
+            f"[_update_workspace_usage_counters_best_effort] err={repr(e)}",
+            flush=True,
+        )
+
+
+def _post_run_accounting_best_effort(
+    system_run_record_id: str,
+    result_obj: Optional[Dict[str, Any]] = None,
+) -> None:
+    try:
+        run_ctx = _load_system_run_context(system_run_record_id)
+
+        workspace_id = str(run_ctx.get("workspace_id") or "").strip()
+        if not workspace_id:
+            print(
+                f"[_post_run_accounting_best_effort] missing workspace_id for run_record={system_run_record_id}",
+                flush=True,
+            )
+            return
+
+        workspace_record = _find_workspace_record_by_workspace_id(workspace_id)
+        workspace_row = _unwrap_airtable_record(workspace_record)
+        workspace_airtable_record_id = str(workspace_row.get("id") or "").strip()
+
+        if not workspace_airtable_record_id:
+            print(
+                f"[_post_run_accounting_best_effort] workspace not found for workspace_id={workspace_id}",
+                flush=True,
+            )
+            return
+
+        capability = str(run_ctx.get("capability") or "").strip()
+        run_id = str(run_ctx.get("run_id") or "").strip()
+        dry_run = bool(run_ctx.get("dry_run") or False)
+        billable = not dry_run
+
+        usage_metrics = _extract_usage_metrics(result_obj)
+
+        prompt_tokens = usage_metrics["prompt_tokens"]
+        completion_tokens = usage_metrics["completion_tokens"]
+        total_tokens = usage_metrics["total_tokens"]
+
+        http_calls = 1 if capability.lower() == "http_exec" else 0
+
+        _create_usage_ledger_row_best_effort(
+            workspace_airtable_record_id=workspace_airtable_record_id,
+            run_record_id=system_run_record_id,
+            run_id=run_id,
+            capability=capability,
+            usage_type="run",
+            quantity=1,
+            unit="count",
+            billable=billable,
+        )
+
+        if prompt_tokens > 0:
+            _create_usage_ledger_row_best_effort(
+                workspace_airtable_record_id=workspace_airtable_record_id,
+                run_record_id=system_run_record_id,
+                run_id=run_id,
+                capability=capability,
+                usage_type="token_input",
+                quantity=prompt_tokens,
+                unit="tokens",
+                billable=billable,
+            )
+
+        if completion_tokens > 0:
+            _create_usage_ledger_row_best_effort(
+                workspace_airtable_record_id=workspace_airtable_record_id,
+                run_record_id=system_run_record_id,
+                run_id=run_id,
+                capability=capability,
+                usage_type="token_output",
+                quantity=completion_tokens,
+                unit="tokens",
+                billable=billable,
+            )
+
+        if http_calls > 0:
+            _create_usage_ledger_row_best_effort(
+                workspace_airtable_record_id=workspace_airtable_record_id,
+                run_record_id=system_run_record_id,
+                run_id=run_id,
+                capability=capability,
+                usage_type="http_call",
+                quantity=http_calls,
+                unit="count",
+                billable=billable,
+            )
+
+        if billable:
+            _update_workspace_usage_counters_best_effort(
+                workspace_record=workspace_record,
+                add_runs=1,
+                add_tokens=total_tokens,
+                add_http_calls=http_calls,
+            )
+
+    except Exception as e:
+        print(f"[_post_run_accounting_best_effort] err={repr(e)}", flush=True)
+        
 def create_system_run(req: RunRequest) -> Tuple[str, str]:
     run_uuid = str(uuid.uuid4())
 
