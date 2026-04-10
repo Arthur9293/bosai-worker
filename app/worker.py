@@ -3770,61 +3770,49 @@ def _extract_system_run_link_fields(result_obj: Optional[Dict[str, Any]]) -> Dic
         if isinstance(result_obj.get("incident_result"), dict)
         else {}
     )
-    payload_result = (
-        result_obj.get("payload")
-        if isinstance(result_obj.get("payload"), dict)
-        else {}
-    )
-    input_result = (
-        result_obj.get("input")
-        if isinstance(result_obj.get("input"), dict)
-        else {}
-    )
 
-    sources = [result_obj, incident_result, payload_result, input_result]
-
-    def _pick(*keys: str) -> str:
-        for source in sources:
-            if not isinstance(source, dict):
-                continue
-            for key in keys:
-                value = source.get(key)
-                text = str(value or "").strip()
-                if text:
-                    return text
+    def _pick(*values: Any) -> str:
+        for value in values:
+            text = str(value or "").strip()
+            if text:
+                return text
         return ""
 
     fields: Dict[str, Any] = {}
 
     workspace_id = _pick(
-        "workspace_id",
-        "workspaceId",
-        "Workspace_ID",
-        "workspace",
-        "Workspace",
+        result_obj.get("workspace_id"),
+        result_obj.get("workspaceId"),
+        result_obj.get("Workspace_ID"),
     )
     flow_id = _pick(
-        "flow_id",
-        "flowId",
-        "Flow_ID",
-        "flowid",
+        result_obj.get("flow_id"),
+        result_obj.get("flowId"),
+        result_obj.get("Flow_ID"),
     )
     root_event_id = _pick(
-        "root_event_id",
-        "rootEventId",
-        "Root_Event_ID",
-        "rooteventid",
+        result_obj.get("root_event_id"),
+        result_obj.get("rootEventId"),
+        result_obj.get("Root_Event_ID"),
     )
     source_event_id = _pick(
-        "source_event_id",
-        "sourceEventId",
-        "Source_Event_ID",
-        "event_id",
-        "eventId",
-        "Event_ID",
-        "source_record_id",
-        "sourceRecordId",
-        "Source_Record_ID",
+        result_obj.get("source_event_id"),
+        result_obj.get("sourceEventId"),
+        result_obj.get("Source_Event_ID"),
+        result_obj.get("event_id"),
+        result_obj.get("eventId"),
+    )
+    linked_command = _pick(
+        result_obj.get("linked_command"),
+        result_obj.get("command_id"),
+        incident_result.get("linked_command"),
+        incident_result.get("command_id"),
+    )
+    linked_incident = _pick(
+        result_obj.get("linked_incident"),
+        result_obj.get("incident_id"),
+        incident_result.get("linked_incident"),
+        incident_result.get("incident_id"),
     )
 
     if workspace_id:
@@ -3835,6 +3823,10 @@ def _extract_system_run_link_fields(result_obj: Optional[Dict[str, Any]]) -> Dic
         fields["Root_Event_ID"] = root_event_id
     if source_event_id:
         fields["Source_Event_ID"] = source_event_id
+    if linked_command:
+        fields["Linked_Command"] = linked_command
+    if linked_incident:
+        fields["Linked_Incident"] = linked_incident
 
     return fields
 
@@ -3843,19 +3835,20 @@ def finish_system_run(record_id: str, status: str, result_obj: Dict[str, Any]) -
     base_fields = {
         "Status_select": status,
         "Finished_At": utc_now_iso(),
-        "Result_JSON": json.dumps(result_obj, ensure_ascii=False),
+        "Result_JSON": _safe_json_dumps(result_obj),
     }
 
     linked_fields = _extract_system_run_link_fields(result_obj)
+    enriched_fields = {
+        **base_fields,
+        **linked_fields,
+    }
 
     try:
         airtable_update(
             SYSTEM_RUNS_TABLE_NAME,
             record_id,
-            {
-                **base_fields,
-                **linked_fields,
-            },
+            enriched_fields,
         )
     except Exception as e:
         print("[finish_system_run] enriched update fallback =", repr(e), flush=True)
@@ -3864,6 +3857,11 @@ def finish_system_run(record_id: str, status: str, result_obj: Dict[str, Any]) -
             record_id,
             base_fields,
         )
+
+    _post_run_accounting_best_effort(
+        system_run_record_id=record_id,
+        result_obj=result_obj,
+    )
 
 
 def fail_system_run(
@@ -3879,19 +3877,20 @@ def fail_system_run(
     base_fields = {
         "Status_select": "Error",
         "Finished_At": utc_now_iso(),
-        "Result_JSON": json.dumps(result_payload, ensure_ascii=False),
+        "Result_JSON": _safe_json_dumps(result_payload),
     }
 
     linked_fields = _extract_system_run_link_fields(result_payload)
+    enriched_fields = {
+        **base_fields,
+        **linked_fields,
+    }
 
     try:
         airtable_update(
             SYSTEM_RUNS_TABLE_NAME,
             record_id,
-            {
-                **base_fields,
-                **linked_fields,
-            },
+            enriched_fields,
         )
     except Exception as e:
         print("[fail_system_run] enriched update fallback =", repr(e), flush=True)
@@ -3900,6 +3899,11 @@ def fail_system_run(
             record_id,
             base_fields,
         )
+
+    _post_run_accounting_best_effort(
+        system_run_record_id=record_id,
+        result_obj=result_payload,
+    )
 
 
 def idempotency_lookup(req: RunRequest) -> Optional[Dict[str, Any]]:
