@@ -3922,6 +3922,109 @@ def _workspace_usage_snapshot(
         "blocked": bool(block_reason),
         "block_reason": block_reason,
     }
+def _resolve_workspace_for_usage_or_raise(
+    request: Request,
+    workspace_id: str = "",
+) -> Tuple[str, Optional[Dict[str, Any]]]:
+    headers_lc = {k.lower(): v for k, v in request.headers.items()}
+
+    requested_workspace_id = _safe_str(
+        workspace_id
+        or request.query_params.get("workspace_id")
+        or request.headers.get("x-workspace-id")
+        or request.headers.get("x-bosai-workspace")
+    )
+
+    workspace_record = resolve_workspace_from_headers(headers_lc)
+
+    if workspace_record:
+        workspace_fields = workspace_record.get("fields", {}) or {}
+        token_workspace_id = _normalize_workspace_id(
+            workspace_fields.get("Workspace_ID")
+        )
+
+        if requested_workspace_id:
+            requested_workspace_id = _normalize_workspace_id(requested_workspace_id)
+            if requested_workspace_id != token_workspace_id:
+                raise HTTPException(status_code=403, detail="workspace_mismatch")
+
+        _enforce_workspace_access_for_run(
+            request=request,
+            headers_lc=headers_lc,
+            workspace_id=token_workspace_id,
+            capability_name="",
+            workspace_record=workspace_record,
+        )
+
+        return token_workspace_id, workspace_record
+
+    verify_request_auth_or_401(b"", headers_lc)
+
+    resolved_workspace_id = _normalize_workspace_id(
+        requested_workspace_id or WORKSPACE_DEFAULT_ID
+    )
+
+    _enforce_workspace_access_for_run(
+        request=request,
+        headers_lc=headers_lc,
+        workspace_id=resolved_workspace_id,
+        capability_name="",
+        workspace_record=None,
+    )
+
+    workspace_record = _find_workspace_record_by_workspace_id(resolved_workspace_id)
+    return resolved_workspace_id, workspace_record
+
+
+def _build_workspace_usage_response(
+    request: Request,
+    workspace_id: str = "",
+) -> Dict[str, Any]:
+    resolved_workspace_id, workspace_record = _resolve_workspace_for_usage_or_raise(
+        request=request,
+        workspace_id=workspace_id,
+    )
+
+    snapshot = _workspace_usage_snapshot(
+        workspace_id=resolved_workspace_id,
+        capability="",
+        input_obj=None,
+        project_requested_run=False,
+    )
+
+    if not snapshot.get("exists"):
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "workspace_not_found",
+                "workspace_id": resolved_workspace_id,
+            },
+        )
+
+    row = _unwrap_airtable_record(workspace_record)
+
+    return {
+        "ok": True,
+        "workspace": {
+            "record_id": str(row.get("id") or "").strip(),
+            "workspace_id": resolved_workspace_id,
+            "name": _workspace_limit_text(row, "Name"),
+            "slug": _workspace_limit_text(row, "Slug"),
+            "type": _workspace_limit_text(row, "Type"),
+            "plan_id": _workspace_limit_text(row, "Plan_ID_Text", "Plan_ID"),
+            "status": _workspace_limit_text(row, "Status_select", "Status", "status"),
+            "is_active": _workspace_is_active_record(row),
+            "last_usage_reset_at": _workspace_limit_text(row, "Last_Usage_Reset_At"),
+        },
+        "usage": snapshot.get("usage", {}),
+        "limits": snapshot.get("limits", {}),
+        "projected": snapshot.get("projected", {}),
+        "warnings": snapshot.get("warnings", []),
+        "blocked": bool(snapshot.get("blocked")),
+        "block_reason": str(snapshot.get("block_reason") or ""),
+        "ts": utc_now_iso(),
+    }
+
 def _workspace_allowed_capabilities_from_record(fields: Dict[str, Any]) -> List[str]:
     raw_json = fields.get("Allowed_Capabilities_JSON")
     raw_text = fields.get("Allowed_Capabilities")
@@ -10917,7 +11020,28 @@ def get_sla(limit: int = 50) -> Dict[str, Any]:
         "incidents": incidents,
         "ts": utc_now_iso(),
     }
+    
+@app.get("/workspace/usage")
+async def get_workspace_usage(
+    request: Request,
+    workspace_id: str = Query(default=""),
+) -> Dict[str, Any]:
+    return _build_workspace_usage_response(
+        request=request,
+        workspace_id=workspace_id,
+    )
 
+
+@app.get("/workspace/usage/{workspace_id}")
+async def get_workspace_usage_by_id(
+    workspace_id: str,
+    request: Request,
+) -> Dict[str, Any]:
+    return _build_workspace_usage_response(
+        request=request,
+        workspace_id=workspace_id,
+    )
+    
 @app.get("/events")
 def get_events(limit: int = 30) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=30, minimum=1, maximum=100)
