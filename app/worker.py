@@ -3743,6 +3743,230 @@ def _post_run_accounting_best_effort(
 
     except Exception as e:
         print(f"[_post_run_accounting_best_effort] err={repr(e)}", flush=True)
+
+# ============================================================
+# Workspace limits / quota enforcement
+# ============================================================
+
+def _workspace_limit_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        if isinstance(value, bool):
+            return int(value)
+        return int(float(str(value).strip().replace(",", ".")))
+    except Exception:
+        return default
+
+
+def _workspace_limit_text(fields: Dict[str, Any], *names: str) -> str:
+    for name in names:
+        if name not in fields:
+            continue
+
+        value = fields.get(name)
+
+        if isinstance(value, list):
+            for item in value:
+                text = str(item or "").strip()
+                if text:
+                    return text
+            continue
+
+        text = str(value or "").strip()
+        if text:
+            return text
+
+    return ""
+
+
+def _workspace_is_active_record(fields: Dict[str, Any]) -> bool:
+    raw_bool = fields.get("Is_Active")
+    if isinstance(raw_bool, bool):
+        return raw_bool
+
+    raw_text = str(raw_bool or "").strip().lower()
+    if raw_text in ("0", "false", "no", "off", "inactive", "disabled"):
+        return False
+
+    raw_status = _workspace_limit_text(fields, "Status_select", "Status", "status")
+    if raw_status and raw_status.lower() not in ("active", "enabled", "on"):
+        return False
+
+    return True
+
+
+def _workspace_usage_snapshot(
+    workspace_id: str,
+    capability: str = "",
+    input_obj: Optional[Dict[str, Any]] = None,
+    *,
+    project_requested_run: bool = True,
+) -> Dict[str, Any]:
+    workspace_record = _find_workspace_record_by_workspace_id(workspace_id)
+    row = _unwrap_airtable_record(workspace_record)
+
+    if not row:
+        return {
+            "ok": False,
+            "exists": False,
+            "workspace_id": workspace_id,
+            "blocked": True,
+            "block_reason": "workspace_not_found",
+            "warnings": [],
+            "usage": {},
+            "limits": {},
+            "projected": {},
+        }
+
+    current_runs = _workspace_limit_int(
+        row.get("Usage_Runs_Current_Month") or row.get("Usage_Runs_Month"),
+        0,
+    )
+    current_tokens = _workspace_limit_int(
+        row.get("Usage_Tokens_Current_Month") or row.get("Usage_Tokens_Month"),
+        0,
+    )
+    current_http_calls = _workspace_limit_int(
+        row.get("Usage_HTTP_Calls_Current_Month") or row.get("Usage_HTTP_Calls_Month"),
+        0,
+    )
+
+    soft_runs = _workspace_limit_int(row.get("Soft_Limit_Runs_Month"), 0)
+    hard_runs = _workspace_limit_int(row.get("Hard_Limit_Runs_Month"), 0)
+
+    soft_tokens = _workspace_limit_int(
+        row.get("Soft_Limit_Tokens_Month") or row.get("Soft_Limit_Tokens"),
+        0,
+    )
+    hard_tokens = _workspace_limit_int(
+        row.get("Hard_Limit_Tokens_Month") or row.get("Hard_Limit_Tokens"),
+        0,
+    )
+
+    soft_http_calls = _workspace_limit_int(row.get("Soft_Limit_HTTP_Calls_Month"), 0)
+    hard_http_calls = _workspace_limit_int(row.get("Hard_Limit_HTTP_Calls_Month"), 0)
+
+    estimated_tokens = 0
+    if isinstance(input_obj, dict):
+        estimated_tokens = _workspace_limit_int(
+            input_obj.get("estimated_tokens") or input_obj.get("estimated_token_count"),
+            0,
+        )
+
+    run_delta = 1 if project_requested_run else 0
+    http_delta = 1 if project_requested_run and str(capability or "").strip() == "http_exec" else 0
+    token_delta = estimated_tokens if project_requested_run else 0
+
+    projected_runs = current_runs + run_delta
+    projected_tokens = current_tokens + token_delta
+    projected_http_calls = current_http_calls + http_delta
+
+    warnings: List[str] = []
+    block_reason = ""
+
+    is_active = _workspace_is_active_record(row)
+    if not is_active:
+        block_reason = "workspace_inactive"
+
+    if not block_reason and hard_runs > 0 and projected_runs > hard_runs:
+        block_reason = "hard_limit_runs_month_reached"
+
+    if not block_reason and hard_http_calls > 0 and projected_http_calls > hard_http_calls:
+        block_reason = "hard_limit_http_calls_month_reached"
+
+    if not block_reason and hard_tokens > 0 and projected_tokens > hard_tokens:
+        block_reason = "hard_limit_tokens_month_reached"
+
+    if not block_reason and soft_runs > 0 and projected_runs > soft_runs:
+        warnings.append("soft_limit_runs_month_exceeded")
+
+    if not block_reason and soft_http_calls > 0 and projected_http_calls > soft_http_calls:
+        warnings.append("soft_limit_http_calls_month_exceeded")
+
+    if not block_reason and soft_tokens > 0 and projected_tokens > soft_tokens:
+        warnings.append("soft_limit_tokens_month_exceeded")
+
+    return {
+        "ok": True,
+        "exists": True,
+        "workspace_id": workspace_id,
+        "name": _workspace_limit_text(row, "Name"),
+        "slug": _workspace_limit_text(row, "Slug"),
+        "type": _workspace_limit_text(row, "Type"),
+        "plan_id": _workspace_limit_text(row, "Plan_ID_Text", "Plan_ID"),
+        "status": _workspace_limit_text(row, "Status_select", "Status", "status"),
+        "is_active": is_active,
+        "last_usage_reset_at": _workspace_limit_text(row, "Last_Usage_Reset_At"),
+        "capability": str(capability or "").strip(),
+        "usage": {
+            "runs_month": current_runs,
+            "tokens_month": current_tokens,
+            "http_calls_month": current_http_calls,
+        },
+        "limits": {
+            "soft_runs_month": soft_runs,
+            "hard_runs_month": hard_runs,
+            "soft_tokens_month": soft_tokens,
+            "hard_tokens_month": hard_tokens,
+            "soft_http_calls_month": soft_http_calls,
+            "hard_http_calls_month": hard_http_calls,
+        },
+        "projected": {
+            "runs_month": projected_runs,
+            "tokens_month": projected_tokens,
+            "http_calls_month": projected_http_calls,
+            "estimated_tokens_delta": token_delta,
+        },
+        "warnings": warnings,
+        "blocked": bool(block_reason),
+        "block_reason": block_reason,
+    }
+
+
+def _enforce_workspace_limits_or_raise(
+    workspace_id: str,
+    capability: str,
+    input_obj: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    snapshot = _workspace_usage_snapshot(
+        workspace_id=workspace_id,
+        capability=capability,
+        input_obj=input_obj,
+        project_requested_run=True,
+    )
+
+    if not snapshot.get("exists"):
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "workspace_not_found",
+                "workspace_id": workspace_id,
+                "workspace": snapshot,
+            },
+        )
+
+    if not snapshot.get("is_active", True):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "workspace_inactive",
+                "workspace_id": workspace_id,
+                "workspace": snapshot,
+            },
+        )
+
+    if snapshot.get("blocked"):
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": snapshot.get("block_reason") or "workspace_limit_blocked",
+                "workspace_id": workspace_id,
+                "workspace": snapshot,
+            },
+        )
+
+    return snapshot
         
 def create_system_run(req: RunRequest) -> Tuple[str, str]:
     run_uuid = str(uuid.uuid4())
@@ -11315,6 +11539,15 @@ async def run(request: Request, response: Response) -> RunResponse:
             result={"idempotent_replay": True, "previous": previous_result},
         )
 
+    # ------------------------------------------------------------
+    # Workspace quota / limits preflight
+    # ------------------------------------------------------------
+    preflight_usage_snapshot = _enforce_workspace_limits_or_raise(
+        workspace_id=workspace_id,
+        capability=req.capability,
+        input_obj=req.input if isinstance(req.input, dict) else {},
+    )
+
     run_record_id, run_uuid = create_system_run(req)
     response.headers["X-Run-Record-Id"] = run_record_id
     response.headers["X-Run-Id"] = run_uuid
@@ -11406,6 +11639,21 @@ async def run(request: Request, response: Response) -> RunResponse:
             _touch_workspace_last_seen(workspace_id)
         except Exception as touch_err:
             print(f"[workspace] touch skipped err={repr(touch_err)}", flush=True)
+
+        try:
+            result_obj["workspace_preflight"] = preflight_usage_snapshot
+        except Exception:
+            pass
+
+        try:
+            result_obj["workspace_usage"] = _workspace_usage_snapshot(
+                workspace_id=workspace_id,
+                capability=req.capability,
+                input_obj=req.input if isinstance(req.input, dict) else {},
+                project_requested_run=False,
+            )
+        except Exception as usage_err:
+            print(f"[workspace] usage snapshot skipped err={repr(usage_err)}", flush=True)
 
         return RunResponse(
             ok=True,
