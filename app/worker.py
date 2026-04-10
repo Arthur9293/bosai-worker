@@ -2996,6 +2996,49 @@ def resolve_workspace_from_headers(headers: Dict[str, str]) -> Optional[Dict[str
         return None
 
     return records[0]
+
+def _enforce_workspace_access_for_run(
+    request: Request,
+    headers_lc: Dict[str, str],
+    workspace_id: str,
+    capability_name: str,
+    workspace_record: Optional[Dict[str, Any]] = None,
+) -> None:
+    ws = _normalize_workspace_id(workspace_id)
+
+    provided_workspace_key = _safe_str(
+        headers_lc.get("x-bosai-key")
+        or headers_lc.get("x-api-key")
+        or headers_lc.get("x_api_key")
+    )
+
+    # Mode client explicite par API key workspace
+    # => enforcement complet : exists + active + capability allowed + key valid
+    if workspace_record or provided_workspace_key:
+        _validate_workspace_from_registry(
+            request=request,
+            workspace_id=ws,
+            capability=capability_name or None,
+        )
+        return
+
+    # Mode legacy interne / scheduler
+    # => on garde la compatibilité :
+    #    - si le workspace n'existe pas encore dans Workspaces, on n'échoue pas
+    #    - s'il existe, on enforce active + allowed_capabilities
+    config = _get_workspace_config(ws)
+    if not config.get("exists"):
+        return
+
+    if not _workspace_is_active(config):
+        raise HTTPException(status_code=403, detail=f"workspace not active: {ws}")
+
+    allowed = config.get("allowed_capabilities") or []
+    if capability_name and allowed and capability_name not in allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=f"capability not allowed for workspace: {capability_name}",
+        )
     
 def _verify_hmac_signature(raw_body: bytes, signature_header: Optional[str]) -> bool:
     if not RUN_SHARED_SECRET:
@@ -11155,39 +11198,7 @@ async def run(request: Request, response: Response) -> RunResponse:
         payload = {}
 
     # ------------------------------------------------------------
-    # Workspace auth (multi-tenant) OR fallback legacy auth
-    # ------------------------------------------------------------
-    workspace_record = resolve_workspace_from_headers(headers_lc)
-    print("[RUN DEBUG] workspace_record =", workspace_record, flush=True)
-
-    if workspace_record:
-        payload_input_for_auth = payload.get("input") or {}
-        if isinstance(payload_input_for_auth, str):
-            try:
-                payload_input_for_auth = json.loads(payload_input_for_auth)
-            except Exception:
-                payload_input_for_auth = {}
-        if not isinstance(payload_input_for_auth, dict):
-            payload_input_for_auth = {}
-
-        req_workspace_id = str(
-            payload_input_for_auth.get("workspace_id")
-            or payload.get("workspace_id")
-            or ""
-        ).strip()
-
-        workspace_id = str(
-            workspace_record.get("fields", {}).get("Workspace_ID") or ""
-        ).strip()
-
-        if req_workspace_id and req_workspace_id != workspace_id:
-            raise HTTPException(status_code=403, detail="workspace_mismatch")
-    else:
-        verify_request_auth_or_401(raw, headers_lc)
-        workspace_id = _extract_workspace_id(payload=payload, request=request)
-
-    # ------------------------------------------------------------
-    # Normalize / inject workspace ONLY inside input
+    # Normalize input early
     # ------------------------------------------------------------
     payload_input = payload.get("input") or {}
 
@@ -11200,6 +11211,64 @@ async def run(request: Request, response: Response) -> RunResponse:
     if not isinstance(payload_input, dict):
         payload_input = {}
 
+    capability_name = str(
+        payload.get("capability")
+        or payload.get("capacity")
+        or ""
+    ).strip()
+
+    # ------------------------------------------------------------
+    # Workspace auth / resolution
+    # ------------------------------------------------------------
+    workspace_record = resolve_workspace_from_headers(headers_lc)
+    print("[RUN DEBUG] workspace_record =", workspace_record, flush=True)
+
+    if workspace_record:
+        workspace_fields = workspace_record.get("fields", {}) or {}
+        workspace_id = _normalize_workspace_id(
+            workspace_fields.get("Workspace_ID")
+        )
+
+        requested_workspace_id = _safe_str(
+            payload_input.get("workspace_id")
+            or payload_input.get("workspaceId")
+            or payload_input.get("Workspace_ID")
+            or payload.get("workspace_id")
+            or payload.get("workspaceId")
+            or payload.get("Workspace_ID")
+        )
+
+        if requested_workspace_id:
+            requested_workspace_id = _normalize_workspace_id(requested_workspace_id)
+            if requested_workspace_id != workspace_id:
+                raise HTTPException(status_code=403, detail="workspace_mismatch")
+
+        _enforce_workspace_access_for_run(
+            request=request,
+            headers_lc=headers_lc,
+            workspace_id=workspace_id,
+            capability_name=capability_name,
+            workspace_record=workspace_record,
+        )
+
+    else:
+        verify_request_auth_or_401(raw, headers_lc)
+
+        workspace_id = _normalize_workspace_id(
+            _extract_workspace_id(payload=payload, request=request)
+        )
+
+        _enforce_workspace_access_for_run(
+            request=request,
+            headers_lc=headers_lc,
+            workspace_id=workspace_id,
+            capability_name=capability_name,
+            workspace_record=None,
+        )
+
+    # ------------------------------------------------------------
+    # Inject workspace ONLY inside input
+    # ------------------------------------------------------------
     payload_input = _inject_workspace(payload_input, workspace_id)
     payload["input"] = payload_input
 
@@ -11215,7 +11284,6 @@ async def run(request: Request, response: Response) -> RunResponse:
     # ------------------------------------------------------------
     # Auto idempotency_key if missing
     # ------------------------------------------------------------
-    capability_name = str(payload.get("capability") or "").strip()
     if not payload.get("idempotency_key"):
         flow_id = str(payload_input.get("flow_id") or "").strip()
         root_event_id = str(payload_input.get("root_event_id") or "").strip()
@@ -11273,9 +11341,6 @@ async def run(request: Request, response: Response) -> RunResponse:
         print("[RUN] result_obj type =", type(result_obj).__name__, flush=True)
         print("[RUN] result_obj repr =", repr(result_obj), flush=True)
 
-        # ------------------------------------------------------------
-        # GUARD CRITIQUE
-        # ------------------------------------------------------------
         if not isinstance(result_obj, dict):
             print(
                 "[RUN WARNING] capability returned non-dict -> forcing safe result",
@@ -11371,6 +11436,7 @@ async def run(request: Request, response: Response) -> RunResponse:
             traceback.print_exc()
 
         raise HTTPException(status_code=500, detail=repr(e))
+        
 # ============================================================
 # Incidents / graphs / details
 # ============================================================
