@@ -400,8 +400,13 @@ WORKSPACES_TABLE_NAME = os.getenv("WORKSPACES_TABLE_NAME", "Workspaces").strip()
 USAGE_LEDGER_TABLE_NAME = os.getenv("USAGE_LEDGER_TABLE_NAME", "Usage_Ledger").strip()"m
 WORKSPACES_VIEW_NAME = os.getenv("WORKSPACES_VIEW_NAME", "").strip()
 USERS_TABLE_NAME = os.getenv("USERS_TABLE_NAME", "Users").strip()
+WORKSPACES_TABLE_NAME = os.getenv("WORKSPACES_TABLE_NAME", "Workspaces").strip()
+USAGE_LEDGER_TABLE_NAME = os.getenv("USAGE_LEDGER_TABLE_NAME", "Usage_Ledger").strip()
+
+USERS_TABLE_NAME = os.getenv("USERS_TABLE_NAME", "Users").strip()
 WORKSPACE_MEMBERSHIPS_TABLE_NAME = os.getenv(
-    "WORKSPACE_MEMBERSHIPS_TABLE_NAME", "Workspace_Memberships").strip()
+    "WORKSPACE_MEMBERSHIPS_TABLE_NAME", "Workspace_Memberships"
+).strip()
 WORKSPACE_API_KEYS_TABLE_NAME = os.getenv(
     "WORKSPACE_API_KEYS_TABLE_NAME", "Workspace_API_Keys"
 ).strip()
