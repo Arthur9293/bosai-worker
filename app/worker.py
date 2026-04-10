@@ -393,15 +393,13 @@ EVENTS_VIEW_NAME = os.getenv("EVENTS_VIEW_NAME", "Queue").strip()
 EVENTS_DASHBOARD_VIEW_NAME = os.getenv("EVENTS_DASHBOARD_VIEW_NAME", EVENTS_VIEW_NAME or "Grid view").strip()
 
 
-WORKSPACE_DEFAULT_ID = os.getenv("BOSAI_DEFAULT_WORKSPACE_ID", "default").strip() or "default"
+WORKSPACE_DEFAULT_ID = os.getenv("BOSAI_DEFAULT_WORKSPACE_ID", "production").strip() or "production"
 WORKSPACE_API_KEYS_RAW = os.getenv("BOSAI_WORKSPACE_API_KEYS", "").strip()
 WORKSPACE_API_KEY_HEADER = "x-bosai-key"
-WORKSPACES_TABLE_NAME = os.getenv("WORKSPACES_TABLE_NAME", "Workspaces").strip()
-USAGE_LEDGER_TABLE_NAME = os.getenv("USAGE_LEDGER_TABLE_NAME", "Usage_Ledger").strip()"m
-WORKSPACES_VIEW_NAME = os.getenv("WORKSPACES_VIEW_NAME", "").strip()
-USERS_TABLE_NAME = os.getenv("USERS_TABLE_NAME", "Users").strip()
+
 WORKSPACES_TABLE_NAME = os.getenv("WORKSPACES_TABLE_NAME", "Workspaces").strip()
 USAGE_LEDGER_TABLE_NAME = os.getenv("USAGE_LEDGER_TABLE_NAME", "Usage_Ledger").strip()
+WORKSPACES_VIEW_NAME = os.getenv("WORKSPACES_VIEW_NAME", "Grid view").strip()
 
 USERS_TABLE_NAME = os.getenv("USERS_TABLE_NAME", "Users").strip()
 WORKSPACE_MEMBERSHIPS_TABLE_NAME = os.getenv(
