@@ -3922,7 +3922,89 @@ def _workspace_usage_snapshot(
         "blocked": bool(block_reason),
         "block_reason": block_reason,
     }
+def _workspace_allowed_capabilities_from_record(fields: Dict[str, Any]) -> List[str]:
+    raw_json = fields.get("Allowed_Capabilities_JSON")
+    raw_text = fields.get("Allowed_Capabilities")
 
+    if isinstance(raw_json, list):
+        return [str(x).strip() for x in raw_json if str(x).strip()]
+
+    if isinstance(raw_text, list):
+        return [str(x).strip() for x in raw_text if str(x).strip()]
+
+    for raw in (raw_json, raw_text):
+        if raw is None:
+            continue
+
+        text = str(raw).strip()
+        if not text:
+            continue
+
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return [str(x).strip() for x in parsed if str(x).strip()]
+        except Exception:
+            pass
+
+        return [part.strip() for part in text.split(",") if part.strip()]
+
+    return []
+
+
+def _enforce_workspace_access_for_run(
+    request: Request,
+    headers_lc: Dict[str, str],
+    workspace_id: str,
+    capability_name: str,
+    workspace_record: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    workspace_id = _normalize_workspace_id(workspace_id)
+
+    record = workspace_record
+    if not record:
+        record = _find_workspace_record_by_workspace_id(workspace_id)
+
+    row = _unwrap_airtable_record(record)
+
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "workspace_not_found",
+                "workspace_id": workspace_id,
+            },
+        )
+
+    if not _workspace_is_active_record(row):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "workspace_inactive",
+                "workspace_id": workspace_id,
+            },
+        )
+
+    allowed_capabilities = _workspace_allowed_capabilities_from_record(row)
+
+    if capability_name and allowed_capabilities:
+        if capability_name not in allowed_capabilities:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "capability_not_allowed_for_workspace",
+                    "workspace_id": workspace_id,
+                    "capability": capability_name,
+                    "allowed_capabilities": allowed_capabilities,
+                },
+            )
+
+    return {
+        "ok": True,
+        "workspace_id": workspace_id,
+        "allowed_capabilities": allowed_capabilities,
+        "status": _workspace_limit_text(row, "Status_select", "Status", "status"),
+    }
 
 def _enforce_workspace_limits_or_raise(
     workspace_id: str,
