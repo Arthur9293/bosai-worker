@@ -811,7 +811,81 @@ class EventCreate(BaseModel):
 # ============================================================
 # Utils
 # ============================================================
+def _airtable_formula_escape(value: Any) -> str:
+    text = str(value or "")
+    return text.replace("\\", "\\\\").replace("'", "\\'")
 
+
+def _list_usage_ledger_records_best_effort(
+    workspace_id: str,
+    *,
+    limit: int = 50,
+    status: str = "",
+    capability: str = "",
+    period_key: str = "",
+) -> Dict[str, Any]:
+    try:
+        if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+            return {
+                "ok": False,
+                "records": [],
+                "error": "missing_airtable_env",
+            }
+
+        safe_workspace_id = _airtable_formula_escape(workspace_id)
+        clauses = [f"{{Workspace_ID_Text}}='{safe_workspace_id}'"]
+
+        if str(status or "").strip():
+            clauses.append(
+                f"{{Status}}='{_airtable_formula_escape(status.strip())}'"
+            )
+
+        if str(capability or "").strip():
+            clauses.append(
+                f"{{Capability}}='{_airtable_formula_escape(capability.strip())}'"
+            )
+
+        if str(period_key or "").strip():
+            clauses.append(
+                f"{{Period_Key}}='{_airtable_formula_escape(period_key.strip())}'"
+            )
+
+        formula = "AND(" + ",".join(clauses) + ")"
+
+        params: Dict[str, Any] = {
+            "maxRecords": max(1, min(int(limit or 50), 100)),
+            "filterByFormula": formula,
+            "sort[0][field]": "Created_At",
+            "sort[0][direction]": "desc",
+        }
+
+        response = requests.get(
+            _airtable_url(USAGE_LEDGER_TABLE_NAME),
+            headers={
+                "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+                "Accept": "application/json",
+            },
+            params=params,
+            timeout=20,
+        )
+        response.raise_for_status()
+
+        payload = response.json()
+        records = payload.get("records", []) or []
+
+        return {
+            "ok": True,
+            "records": records,
+            "count": len(records),
+            "formula": formula,
+        }
+
+    except Exception as e:
+        return {
+            "ok": False,
+            "records": [],
+            "error": repr(e),
+        }
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -11711,6 +11785,95 @@ def get_workspace_detail(
             "resolved_plan_key": gate_info.get("resolved_plan_key", ""),
             "allowed_capabilities": gate_info.get("allowed_capabilities", []),
         },
+        "ts": utc_now_iso(),
+    }
+
+@app.get("/workspaces/{workspace_id}/usage-ledger")
+def get_workspace_usage_ledger(
+    request: Request,
+    workspace_id: str,
+    limit: int = 50,
+    status: str = "",
+    capability: str = "",
+    period_key: str = "",
+) -> Dict[str, Any]:
+    headers_lc = {k.lower(): v for k, v in request.headers.items()}
+
+    workspace_record = resolve_workspace_from_headers(headers_lc)
+    if not workspace_record:
+        verify_request_auth_or_401(b"", headers_lc)
+
+    requested_workspace_id = _normalize_workspace_id(workspace_id)
+
+    workspace_row = _find_workspace_record_by_workspace_id(requested_workspace_id)
+    if not _unwrap_airtable_record(workspace_row):
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "workspace_not_found",
+                "workspace_id": requested_workspace_id,
+            },
+        )
+
+    listed = _list_usage_ledger_records_best_effort(
+        requested_workspace_id,
+        limit=limit,
+        status=status,
+        capability=capability,
+        period_key=period_key,
+    )
+
+    if not listed.get("ok"):
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "usage_ledger_list_failed",
+                "workspace_id": requested_workspace_id,
+                "source": listed,
+            },
+        )
+
+    items: List[Dict[str, Any]] = []
+
+    for record in listed.get("records", []):
+        fields = record.get("fields", {}) or {}
+
+        items.append(
+            {
+                "record_id": str(record.get("id") or ""),
+                "usage_id": str(fields.get("Usage_ID") or ""),
+                "name": str(fields.get("Name") or ""),
+                "workspace_id": str(fields.get("Workspace_ID_Text") or requested_workspace_id),
+                "run_record_id": str(fields.get("Run_Record_ID") or ""),
+                "run_id": str(fields.get("Run_ID") or ""),
+                "capability": str(fields.get("Capability") or ""),
+                "usage_type": str(fields.get("Usage_Type") or ""),
+                "status": str(fields.get("Status") or ""),
+                "worker": str(fields.get("Worker") or ""),
+                "idempotency_key": str(fields.get("Idempotency_Key") or ""),
+                "quantity": fields.get("Quantity"),
+                "unit": str(fields.get("Unit") or ""),
+                "billable": bool(fields.get("Billable")) if fields.get("Billable") is not None else False,
+                "period_key": str(fields.get("Period_Key") or ""),
+                "runs_delta": fields.get("Runs_Delta", 0),
+                "tokens_delta": fields.get("Tokens_Delta", 0),
+                "http_calls_delta": fields.get("HTTP_Calls_Delta", 0),
+                "created_at": str(fields.get("Created_At") or ""),
+                "metadata_json": fields.get("Metadata_JSON") or "",
+            }
+        )
+
+    return {
+        "ok": True,
+        "workspace_id": requested_workspace_id,
+        "count": len(items),
+        "filters": {
+            "limit": max(1, min(int(limit or 50), 100)),
+            "status": str(status or "").strip(),
+            "capability": str(capability or "").strip(),
+            "period_key": str(period_key or "").strip(),
+        },
+        "items": items,
         "ts": utc_now_iso(),
     }
     
