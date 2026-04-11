@@ -3940,6 +3940,194 @@ def _resolve_workspace_plan_metadata(row: Dict[str, Any]) -> Dict[str, str]:
         "plan_code": plan_code,
         "plan_label": plan_label,
     }
+
+
+# ============================================================
+# Workspace monthly usage reset helpers
+# ============================================================
+
+def _current_usage_period_key() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m")
+
+
+def _period_key_from_datetime_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    if len(text) >= 7 and text[4:5] == "-":
+        candidate = text[:7]
+        if candidate.count("-") == 1:
+            return candidate
+
+    try:
+        normalized = text.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+        return dt.strftime("%Y-%m")
+    except Exception:
+        pass
+
+    try:
+        return text[:7]
+    except Exception:
+        return ""
+
+
+def _workspace_usage_period_fields(row: Dict[str, Any]) -> Dict[str, str]:
+    current_period = _current_usage_period_key()
+
+    stored_period = str(
+        row.get("Current_Usage_Period_Key")
+        or row.get("Usage_Period_Key")
+        or ""
+    ).strip()
+
+    derived_period = _period_key_from_datetime_text(
+        row.get("Last_Usage_Reset_At")
+        or row.get("Last Usage Reset At")
+        or row.get("Updated_At")
+        or ""
+    )
+
+    effective_period = stored_period or derived_period
+
+    return {
+        "current_period": current_period,
+        "stored_period": stored_period,
+        "derived_period": derived_period,
+        "effective_period": effective_period,
+    }
+
+
+def _workspace_usage_needs_reset(row: Dict[str, Any]) -> bool:
+    info = _workspace_usage_period_fields(row)
+    current_period = info["current_period"]
+    effective_period = info["effective_period"]
+
+    if not effective_period:
+        return True
+
+    return effective_period != current_period
+
+
+def _reset_workspace_usage_best_effort(
+    workspace_record: Any,
+    workspace_id: str,
+) -> Dict[str, Any]:
+    try:
+        record = _unwrap_airtable_record(workspace_record)
+        if not record:
+            return {
+                "ok": False,
+                "skipped": True,
+                "reason": "workspace_record_missing",
+                "workspace_id": workspace_id,
+            }
+
+        record_id = str(record.get("id") or "").strip()
+        fields = record.get("fields", {}) or {}
+        now_iso = utc_now_iso()
+        current_period = _current_usage_period_key()
+
+        update_fields: Dict[str, Any] = {
+            "Last_Usage_Reset_At": now_iso,
+            "Current_Usage_Period_Key": current_period,
+        }
+
+        canonical_counters = [
+            "Usage_Runs_Current_Month",
+            "Usage_Tokens_Current_Month",
+            "Usage_HTTP_Calls_Current_Month",
+        ]
+
+        legacy_counters = [
+            "Usage_Runs_Month",
+            "Usage_Tokens_Month",
+            "Usage_HTTP_Calls_Month",
+        ]
+
+        for field_name in canonical_counters:
+            if field_name in fields:
+                update_fields[field_name] = 0
+
+        for field_name in legacy_counters:
+            if field_name in fields:
+                update_fields[field_name] = 0
+
+        if not any(name in update_fields for name in canonical_counters):
+            update_fields["Usage_Runs_Current_Month"] = 0
+            update_fields["Usage_Tokens_Current_Month"] = 0
+            update_fields["Usage_HTTP_Calls_Current_Month"] = 0
+
+        airtable_update(
+            WORKSPACES_TABLE_NAME,
+            record_id,
+            update_fields,
+        )
+
+        return {
+            "ok": True,
+            "workspace_id": workspace_id,
+            "record_id": record_id,
+            "current_period": current_period,
+            "updated_fields": sorted(list(update_fields.keys())),
+        }
+
+    except Exception as e:
+        print(f"[workspace.reset] skipped err={repr(e)}", flush=True)
+        return {
+            "ok": False,
+            "workspace_id": workspace_id,
+            "error": repr(e),
+        }
+
+
+def _ensure_workspace_usage_period_current(
+    workspace_id: str,
+    workspace_record: Any = None,
+) -> Dict[str, Any]:
+    record = workspace_record
+    if not record:
+        record = _find_workspace_record_by_workspace_id(workspace_id)
+
+    unwrapped = _unwrap_airtable_record(record)
+    if not unwrapped:
+        return {
+            "ok": False,
+            "exists": False,
+            "workspace_id": workspace_id,
+            "reset_applied": False,
+            "reason": "workspace_not_found",
+        }
+
+    row = unwrapped.get("fields", {}) or {}
+    period_info = _workspace_usage_period_fields(row)
+    needs_reset = _workspace_usage_needs_reset(row)
+
+    if not needs_reset:
+        return {
+            "ok": True,
+            "exists": True,
+            "workspace_id": workspace_id,
+            "reset_applied": False,
+            "current_period": period_info["current_period"],
+            "effective_period": period_info["effective_period"],
+        }
+
+    reset_result = _reset_workspace_usage_best_effort(
+        workspace_record=record,
+        workspace_id=workspace_id,
+    )
+
+    return {
+        "ok": bool(reset_result.get("ok")),
+        "exists": True,
+        "workspace_id": workspace_id,
+        "reset_applied": bool(reset_result.get("ok")),
+        "current_period": period_info["current_period"],
+        "effective_period_before_reset": period_info["effective_period"],
+        "reset_result": reset_result,
+    }
     
 def _workspace_usage_snapshot(
     workspace_id: str,
