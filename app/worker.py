@@ -11683,6 +11683,8 @@ def get_workspaces(
         if not workspace_id:
             continue
 
+        plan_meta = _resolve_workspace_plan_metadata(fields)
+
         snapshot = _workspace_usage_snapshot(
             workspace_id=workspace_id,
             capability="",
@@ -11690,11 +11692,47 @@ def get_workspaces(
             project_requested_run=False,
         )
 
-        plan_meta = _resolve_workspace_plan_metadata(fields)
+        # Fallback safe:
+        # si le workspace est déjà listé par Airtable mais que le re-lookup
+        # détaillé échoue, on n’affiche pas "workspace_not_found" dans la liste.
+        if not snapshot.get("exists"):
+            current_runs = _workspace_limit_int(
+                fields.get("Usage_Runs_Current_Month") or fields.get("Usage_Runs_Month"),
+                0,
+            )
+            current_tokens = _workspace_limit_int(
+                fields.get("Usage_Tokens_Current_Month") or fields.get("Usage_Tokens_Month"),
+                0,
+            )
+            current_http_calls = _workspace_limit_int(
+                fields.get("Usage_HTTP_Calls_Current_Month") or fields.get("Usage_HTTP_Calls_Month"),
+                0,
+            )
 
-        items.append(
-            {
-                "record_id": str(record.get("id") or ""),
+            soft_runs = _workspace_limit_int(fields.get("Soft_Limit_Runs_Month"), 0)
+            hard_runs = _workspace_limit_int(fields.get("Hard_Limit_Runs_Month"), 0)
+
+            soft_tokens = _workspace_limit_int(
+                fields.get("Soft_Limit_Tokens_Month") or fields.get("Soft_Limit_Tokens"),
+                0,
+            )
+            hard_tokens = _workspace_limit_int(
+                fields.get("Hard_Limit_Tokens_Month") or fields.get("Hard_Limit_Tokens"),
+                0,
+            )
+
+            soft_http_calls = _workspace_limit_int(
+                fields.get("Soft_Limit_HTTP_Calls_Month"),
+                0,
+            )
+            hard_http_calls = _workspace_limit_int(
+                fields.get("Hard_Limit_HTTP_Calls_Month"),
+                0,
+            )
+
+            snapshot = {
+                "ok": True,
+                "exists": True,
                 "workspace_id": workspace_id,
                 "name": _workspace_limit_text(fields, "Name"),
                 "slug": _workspace_limit_text(fields, "Slug"),
@@ -11704,6 +11742,43 @@ def get_workspaces(
                 "plan_label": plan_meta.get("plan_label", ""),
                 "status": _workspace_limit_text(fields, "Status_select", "Status", "status"),
                 "is_active": _workspace_is_active_record(fields),
+                "last_usage_reset_at": _workspace_limit_text(fields, "Last_Usage_Reset_At"),
+                "current_usage_period_key": _workspace_limit_text(fields, "Current_Usage_Period_Key"),
+                "usage": {
+                    "runs_month": current_runs,
+                    "tokens_month": current_tokens,
+                    "http_calls_month": current_http_calls,
+                },
+                "limits": {
+                    "soft_runs_month": soft_runs,
+                    "hard_runs_month": hard_runs,
+                    "soft_tokens_month": soft_tokens,
+                    "hard_tokens_month": hard_tokens,
+                    "soft_http_calls_month": soft_http_calls,
+                    "hard_http_calls_month": hard_http_calls,
+                },
+                "blocked": False,
+                "block_reason": "",
+                "warnings": [],
+                "usage_period_reset": {
+                    "ok": False,
+                    "fallback": True,
+                    "reason": "snapshot_lookup_failed_but_record_listed",
+                },
+            }
+
+        items.append(
+            {
+                "record_id": str(record.get("id") or ""),
+                "workspace_id": workspace_id,
+                "name": snapshot.get("name") or _workspace_limit_text(fields, "Name"),
+                "slug": snapshot.get("slug") or _workspace_limit_text(fields, "Slug"),
+                "type": snapshot.get("type") or _workspace_limit_text(fields, "Type"),
+                "plan_id": snapshot.get("plan_id") or plan_meta.get("plan_id", ""),
+                "plan_code": snapshot.get("plan_code") or plan_meta.get("plan_code", ""),
+                "plan_label": snapshot.get("plan_label") or plan_meta.get("plan_label", ""),
+                "status": snapshot.get("status") or _workspace_limit_text(fields, "Status_select", "Status", "status"),
+                "is_active": bool(snapshot.get("is_active", _workspace_is_active_record(fields))),
                 "last_usage_reset_at": snapshot.get("last_usage_reset_at", ""),
                 "current_usage_period_key": snapshot.get("current_usage_period_key", ""),
                 "usage": snapshot.get("usage", {}),
