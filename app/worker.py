@@ -12225,6 +12225,156 @@ async def create_workspace(request: Request):
         },
         "api_key": api_key,
     }
+# ============================================================
+# Capability gating by plan
+# ============================================================
+
+PLAN_CAPABILITY_MATRIX: Dict[str, set[str]] = {
+    "plan_free": {
+        "health_tick",
+        "state_get",
+        "state_put",
+    },
+    "monitor": {
+        "health_tick",
+        "state_get",
+        "state_put",
+        "commands_tick",
+    },
+    "control": {
+        "health_tick",
+        "state_get",
+        "state_put",
+        "commands_tick",
+        "incident_router_v2",
+        "incident_deduplicate",
+        "incident_create",
+        "resolve_incident",
+    },
+    "orchestrate": {
+        "health_tick",
+        "state_get",
+        "state_put",
+        "commands_tick",
+        "incident_router_v2",
+        "incident_deduplicate",
+        "incident_create",
+        "resolve_incident",
+        "http_exec",
+        "internal_escalate",
+        "complete_flow_incident",
+        "decision_router",
+    },
+}
+
+PLAN_KEY_ALIASES: Dict[str, str] = {
+    "free": "plan_free",
+    "plan_free": "plan_free",
+
+    "monitor": "monitor",
+    "plan_monitor": "monitor",
+
+    "control": "control",
+    "plan_control": "control",
+
+    "orchestrate": "orchestrate",
+    "plan_orchestrate": "orchestrate",
+}
+
+
+def _normalize_plan_key_value(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    text = text.replace("-", "_").replace(" ", "_")
+    return PLAN_KEY_ALIASES.get(text, text)
+
+
+def _workspace_plan_gate_info(row: Dict[str, Any]) -> Dict[str, Any]:
+    plan_meta = _resolve_workspace_plan_metadata(row)
+
+    plan_code_raw = str(plan_meta.get("plan_code") or "").strip()
+    plan_label_raw = str(plan_meta.get("plan_label") or "").strip()
+    plan_id_raw = str(plan_meta.get("plan_id") or "").strip()
+
+    normalized_plan_code = _normalize_plan_key_value(plan_code_raw)
+    normalized_plan_label = _normalize_plan_key_value(plan_label_raw)
+    normalized_plan_id = _normalize_plan_key_value(plan_id_raw)
+
+    resolved_plan_key = (
+        normalized_plan_code
+        or normalized_plan_label
+        or normalized_plan_id
+        or "plan_free"
+    )
+
+    allowed_capabilities = sorted(
+        list(PLAN_CAPABILITY_MATRIX.get(resolved_plan_key, set()))
+    )
+
+    return {
+        "plan_id": plan_id_raw,
+        "plan_code": plan_code_raw,
+        "plan_label": plan_label_raw,
+        "resolved_plan_key": resolved_plan_key,
+        "allowed_capabilities": allowed_capabilities,
+    }
+
+
+def _is_capability_allowed_for_workspace(
+    workspace_id: str,
+    capability_name: str,
+    workspace_record: Any = None,
+) -> Dict[str, Any]:
+    record = workspace_record
+    if not record:
+        record = _find_workspace_record_by_workspace_id(workspace_id)
+
+    unwrapped = _unwrap_airtable_record(record)
+    if not unwrapped:
+        return {
+            "ok": False,
+            "exists": False,
+            "workspace_id": workspace_id,
+            "allowed": False,
+            "reason": "workspace_not_found",
+            "resolved_plan_key": "",
+            "allowed_capabilities": [],
+        }
+
+    row = (
+        unwrapped.get("fields", {})
+        if isinstance(unwrapped, dict) and isinstance(unwrapped.get("fields"), dict)
+        else unwrapped
+    ) or {}
+
+    plan_info = _workspace_plan_gate_info(row)
+    resolved_plan_key = str(plan_info.get("resolved_plan_key") or "").strip()
+    allowed_set = PLAN_CAPABILITY_MATRIX.get(resolved_plan_key, set())
+
+    normalized_capability = str(capability_name or "").strip()
+
+    if not normalized_capability:
+        return {
+            "ok": True,
+            "exists": True,
+            "workspace_id": workspace_id,
+            "allowed": False,
+            "reason": "capability_missing",
+            **plan_info,
+        }
+
+    allowed = normalized_capability in allowed_set
+
+    return {
+        "ok": True,
+        "exists": True,
+        "workspace_id": workspace_id,
+        "capability": normalized_capability,
+        "allowed": allowed,
+        "reason": "" if allowed else "capability_not_allowed_for_plan",
+        **plan_info,
+    }
 
 # ============================================================
 # Usage Ledger helpers
