@@ -811,6 +811,127 @@ class EventCreate(BaseModel):
 # ============================================================
 # Utils
 # ============================================================
+def _usage_ledger_write_best_effort(
+    workspace_id: str,
+    run_record_id: str = "",
+    run_id: str = "",
+    capability: str = "",
+    status: str = "",
+    idempotency_key: str = "",
+    worker: str = "",
+    input_obj: Optional[Dict[str, Any]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    runs_delta: int = 0,
+    tokens_delta: int = 0,
+    http_calls_delta: int = 0,
+) -> Dict[str, Any]:
+    try:
+        if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+            return {
+                "ok": False,
+                "error": "missing_airtable_env",
+            }
+
+        normalized_workspace_id = _normalize_workspace_id(workspace_id)
+        if not normalized_workspace_id:
+            return {
+                "ok": False,
+                "error": "missing_workspace_id",
+            }
+
+        input_obj = input_obj if isinstance(input_obj, dict) else {}
+        metadata = metadata if isinstance(metadata, dict) else {}
+
+        now_iso = utc_now_iso()
+        period_key = str(
+            metadata.get("period_key")
+            or input_obj.get("period_key")
+            or now_iso[:7]
+        ).strip()
+
+        usage_id = f"usage_{uuid.uuid4().hex[:12]}"
+        safe_status = str(status or "unknown").strip() or "unknown"
+        safe_capability = str(capability or "").strip()
+        safe_worker = str(worker or WORKER_NAME or "unknown").strip() or "unknown"
+        safe_idempotency_key = str(idempotency_key or "").strip()
+
+        workspace_record_id = ""
+        try:
+            ws_record = _find_workspace_record_by_workspace_id(normalized_workspace_id)
+            if isinstance(ws_record, dict):
+                workspace_record_id = str(ws_record.get("id") or "")
+        except Exception:
+            workspace_record_id = ""
+
+        quantity = 1
+        if runs_delta == 0 and tokens_delta == 0 and http_calls_delta == 0:
+            quantity = 0 if safe_status in ("blocked", "unsupported", "error") else 1
+
+        name = f"{safe_capability or 'run'} · {safe_status} · {period_key}"
+
+        fields: Dict[str, Any] = {
+            "Name": name,
+            "Usage_ID": usage_id,
+            "Run_Record_ID": str(run_record_id or ""),
+            "Run_ID": str(run_id or ""),
+            "Capability": safe_capability,
+            "Usage_Type": "run",
+            "Status": safe_status,
+            "Worker": safe_worker,
+            "Idempotency_Key": safe_idempotency_key,
+            "Quantity": quantity,
+            "Unit": "count",
+            "Billable": False,
+            "Period_Key": period_key,
+            "Workspace_ID_Text": normalized_workspace_id,
+            "Runs_Delta": int(runs_delta or 0),
+            "Tokens_Delta": int(tokens_delta or 0),
+            "HTTP_Calls_Delta": int(http_calls_delta or 0),
+            "Metadata_JSON": _safe_json_dumps(
+                {
+                    "input": input_obj,
+                    "metadata": metadata,
+                    "written_at": now_iso,
+                }
+            ),
+        }
+
+        if workspace_record_id:
+            fields["Workspace"] = [workspace_record_id]
+
+        response = requests.post(
+            _airtable_url(USAGE_LEDGER_TABLE_NAME),
+            headers={
+                "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={"fields": fields},
+            timeout=20,
+        )
+        response.raise_for_status()
+
+        payload = response.json()
+
+        return {
+            "ok": True,
+            "record_id": str(payload.get("id") or ""),
+            "usage_id": usage_id,
+            "workspace_id": normalized_workspace_id,
+            "status": safe_status,
+            "capability": safe_capability,
+            "period_key": period_key,
+        }
+
+    except Exception as e:
+        print("[usage_ledger] write skipped err =", repr(e), flush=True)
+        return {
+            "ok": False,
+            "error": repr(e),
+            "workspace_id": str(workspace_id or ""),
+            "run_record_id": str(run_record_id or ""),
+            "run_id": str(run_id or ""),
+        }
+
 def _airtable_formula_escape(value: Any) -> str:
     text = str(value or "")
     return text.replace("\\", "\\\\").replace("'", "\\'")
