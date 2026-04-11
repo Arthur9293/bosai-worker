@@ -11641,7 +11641,79 @@ def get_sla(limit: int = 50) -> Dict[str, Any]:
         "incidents": incidents,
         "ts": utc_now_iso(),
     }
+@app.get("/workspaces/{workspace_id}")
+def get_workspace_detail(
+    request: Request,
+    workspace_id: str,
+) -> Dict[str, Any]:
+    headers_lc = {k.lower(): v for k, v in request.headers.items()}
 
+    workspace_record = resolve_workspace_from_headers(headers_lc)
+    if not workspace_record:
+        verify_request_auth_or_401(b"", headers_lc)
+
+    requested_workspace_id = _normalize_workspace_id(workspace_id)
+
+    record = _find_workspace_record_by_workspace_id(requested_workspace_id)
+    unwrapped = _unwrap_airtable_record(record)
+
+    if not unwrapped:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "workspace_not_found",
+                "workspace_id": requested_workspace_id,
+            },
+        )
+
+    fields = (
+        unwrapped.get("fields", {})
+        if isinstance(unwrapped, dict) and isinstance(unwrapped.get("fields"), dict)
+        else unwrapped
+    ) or {}
+
+    snapshot = _workspace_usage_snapshot(
+        workspace_id=requested_workspace_id,
+        capability="",
+        input_obj={},
+        project_requested_run=False,
+    )
+
+    plan_meta = _resolve_workspace_plan_metadata(fields)
+    gate_info = _workspace_plan_gate_info(fields)
+
+    return {
+        "ok": True,
+        "workspace": {
+            "record_id": str(unwrapped.get("id") or "") if isinstance(unwrapped, dict) else "",
+            "workspace_id": requested_workspace_id,
+            "name": snapshot.get("name") or _workspace_limit_text(fields, "Name"),
+            "slug": snapshot.get("slug") or _workspace_limit_text(fields, "Slug"),
+            "type": snapshot.get("type") or _workspace_limit_text(fields, "Type"),
+            "plan_id": snapshot.get("plan_id") or plan_meta.get("plan_id", ""),
+            "plan_code": snapshot.get("plan_code") or plan_meta.get("plan_code", ""),
+            "plan_label": snapshot.get("plan_label") or plan_meta.get("plan_label", ""),
+            "status": snapshot.get("status") or _workspace_limit_text(fields, "Status_select", "Status", "status"),
+            "is_active": bool(snapshot.get("is_active", _workspace_is_active_record(fields))),
+            "last_usage_reset_at": snapshot.get("last_usage_reset_at", ""),
+            "current_usage_period_key": snapshot.get("current_usage_period_key", ""),
+        },
+        "usage": snapshot.get("usage", {}),
+        "limits": snapshot.get("limits", {}),
+        "projected": snapshot.get("projected", {}),
+        "estimation": snapshot.get("estimation", {}),
+        "meters": snapshot.get("meters", {}),
+        "warnings": snapshot.get("warnings", []),
+        "blocked": snapshot.get("blocked", False),
+        "block_reason": snapshot.get("block_reason", ""),
+        "usage_period_reset": snapshot.get("usage_period_reset", {}),
+        "capabilities": {
+            "resolved_plan_key": gate_info.get("resolved_plan_key", ""),
+            "allowed_capabilities": gate_info.get("allowed_capabilities", []),
+        },
+        "ts": utc_now_iso(),
+    }
+    
 @app.get("/workspaces")
 def get_workspaces(
     request: Request,
