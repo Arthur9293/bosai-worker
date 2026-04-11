@@ -855,17 +855,31 @@ def _usage_ledger_write_best_effort(
         safe_worker = str(worker or WORKER_NAME or "unknown").strip() or "unknown"
         safe_idempotency_key = str(idempotency_key or "").strip()
 
+        safe_runs_delta = int(runs_delta or 0)
+        safe_tokens_delta = int(tokens_delta or 0)
+        safe_http_calls_delta = int(http_calls_delta or 0)
+
         workspace_record_id = ""
         try:
             ws_record = _find_workspace_record_by_workspace_id(normalized_workspace_id)
             if isinstance(ws_record, dict):
-                workspace_record_id = str(ws_record.get("id") or "")
+                workspace_record_id = str(ws_record.get("id") or "").strip()
         except Exception:
             workspace_record_id = ""
 
-        quantity = 1
-        if runs_delta == 0 and tokens_delta == 0 and http_calls_delta == 0:
+        # Quantité principale pour lecture produit / billing
+        if safe_tokens_delta > 0:
+            quantity = safe_tokens_delta
+            unit = "tokens"
+        elif safe_http_calls_delta > 0:
+            quantity = safe_http_calls_delta
+            unit = "count"
+        elif safe_runs_delta > 0:
+            quantity = safe_runs_delta
+            unit = "count"
+        else:
             quantity = 0 if safe_status in ("blocked", "unsupported", "error") else 1
+            unit = "count"
 
         name = f"{safe_capability or 'run'} · {safe_status} · {period_key}"
 
@@ -880,18 +894,21 @@ def _usage_ledger_write_best_effort(
             "Worker": safe_worker,
             "Idempotency_Key": safe_idempotency_key,
             "Quantity": quantity,
-            "Unit": "count",
+            "Unit": unit,
             "Billable": False,
             "Period_Key": period_key,
             "Workspace_ID_Text": normalized_workspace_id,
-            "Runs_Delta": int(runs_delta or 0),
-            "Tokens_Delta": int(tokens_delta or 0),
-            "HTTP_Calls_Delta": int(http_calls_delta or 0),
+            "Runs_Delta": safe_runs_delta,
+            "Tokens_Delta": safe_tokens_delta,
+            "HTTP_Calls_Delta": safe_http_calls_delta,
             "Metadata_JSON": _safe_json_dumps(
                 {
                     "input": input_obj,
                     "metadata": metadata,
                     "written_at": now_iso,
+                    "workspace_id": normalized_workspace_id,
+                    "status": safe_status,
+                    "capability": safe_capability,
                 }
             ),
         }
@@ -904,11 +921,28 @@ def _usage_ledger_write_best_effort(
             headers={
                 "Authorization": f"Bearer {AIRTABLE_API_KEY}",
                 "Content-Type": "application/json",
+                "Accept": "application/json",
             },
             json={"fields": fields},
             timeout=20,
         )
-        response.raise_for_status()
+
+        if not response.ok:
+            try:
+                error_payload = response.json()
+            except Exception:
+                error_payload = {"raw_text": response.text}
+
+            return {
+                "ok": False,
+                "error": "airtable_write_failed",
+                "status_code": response.status_code,
+                "airtable_error": error_payload,
+                "workspace_id": normalized_workspace_id,
+                "run_record_id": str(run_record_id or ""),
+                "run_id": str(run_id or ""),
+                "attempted_fields": fields,
+            }
 
         payload = response.json()
 
@@ -920,6 +954,7 @@ def _usage_ledger_write_best_effort(
             "status": safe_status,
             "capability": safe_capability,
             "period_key": period_key,
+            "written_fields": fields,
         }
 
     except Exception as e:
@@ -13118,55 +13153,6 @@ def _build_usage_ledger_fields(
 
     return cleaned
 
-
-def _usage_ledger_write_best_effort(
-    *,
-    workspace_id: str,
-    run_record_id: str,
-    run_id: str,
-    capability: str,
-    status: str,
-    idempotency_key: str,
-    worker: str,
-    input_obj: Optional[Dict[str, Any]] = None,
-    metadata: Optional[Dict[str, Any]] = None,
-    runs_delta: Optional[int] = None,
-    tokens_delta: Optional[int] = None,
-    http_calls_delta: Optional[int] = None,
-) -> Dict[str, Any]:
-    try:
-        if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
-            return {"ok": False, "skipped": True, "reason": "missing_airtable_env"}
-
-        fields = _build_usage_ledger_fields(
-            workspace_id=workspace_id,
-            run_record_id=run_record_id,
-            run_id=run_id,
-            capability=capability,
-            status=status,
-            idempotency_key=idempotency_key,
-            worker=worker,
-            input_obj=input_obj,
-            metadata=metadata,
-            runs_delta=runs_delta,
-            tokens_delta=tokens_delta,
-            http_calls_delta=http_calls_delta,
-        )
-
-        record_id = _airtable_create(USAGE_LEDGER_TABLE_NAME, fields)
-
-        return {
-            "ok": True,
-            "record_id": record_id,
-            "table": USAGE_LEDGER_TABLE_NAME,
-        }
-    except Exception as e:
-        print(f"[usage_ledger] write skipped err={repr(e)}", flush=True)
-        return {
-            "ok": False,
-            "error": repr(e),
-            "table": USAGE_LEDGER_TABLE_NAME,
-        }
         
 @app.post("/run", response_model=RunResponse)
 async def run(request: Request, response: Response) -> RunResponse:
@@ -13525,7 +13511,7 @@ async def run(request: Request, response: Response) -> RunResponse:
                 flush=True,
             )
 
-        _usage_ledger_write_best_effort(
+        ledger_write_result = _usage_ledger_write_best_effort(
             workspace_id=workspace_id,
             run_record_id=run_record_id,
             run_id=run_uuid,
@@ -13540,7 +13526,12 @@ async def run(request: Request, response: Response) -> RunResponse:
                 "workspace_usage": workspace_usage,
                 "spawn_summary": result_obj.get("spawn_summary"),
             },
+            runs_delta=1,
+            tokens_delta=0,
+            http_calls_delta=1 if req.capability == "http_exec" else 0,
         )
+
+        result_obj["usage_ledger_write"] = ledger_write_result
 
         try:
             _touch_workspace_last_seen(workspace_id)
