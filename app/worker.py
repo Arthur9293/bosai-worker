@@ -11191,6 +11191,8 @@ def get_workspace_usage(
     headers_lc = {k.lower(): v for k, v in request.headers.items()}
 
     requested_workspace_id = _normalize_workspace_id(workspace_id)
+    if not requested_workspace_id:
+        raise HTTPException(status_code=400, detail="workspace_id_required")
 
     workspace_record = resolve_workspace_from_headers(headers_lc)
     if workspace_record:
@@ -11206,6 +11208,9 @@ def get_workspace_usage(
     input_obj: Dict[str, Any] = {}
     if estimated_tokens > 0:
         input_obj["estimated_tokens"] = estimated_tokens
+
+    raw_workspace_record = _find_workspace_record_by_workspace_id(requested_workspace_id)
+    workspace_row = _unwrap_airtable_record(raw_workspace_record)
 
     snapshot = _workspace_usage_snapshot(
         workspace_id=requested_workspace_id,
@@ -11223,10 +11228,17 @@ def get_workspace_usage(
             },
         )
 
+    record_id = ""
+    if isinstance(raw_workspace_record, dict):
+        record_id = str(raw_workspace_record.get("id") or "").strip()
+
+    if not record_id and isinstance(workspace_row, dict):
+        record_id = str(workspace_row.get("id") or "").strip()
+
     return {
         "ok": True,
         "workspace": {
-            "record_id": str(((_unwrap_airtable_record(_find_workspace_record_by_workspace_id(requested_workspace_id))).get("id") or "")),
+            "record_id": record_id,
             "workspace_id": snapshot.get("workspace_id"),
             "name": snapshot.get("name"),
             "slug": snapshot.get("slug"),
