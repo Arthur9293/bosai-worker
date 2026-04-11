@@ -3820,7 +3820,127 @@ def _workspace_is_active_record(fields: Dict[str, Any]) -> bool:
 
     return True
 
+# ============================================================
+# Workspace plan enrichment
+# ============================================================
 
+PLANS_TABLE_NAME = os.getenv("PLANS_TABLE_NAME", "Plans").strip() or "Plans"
+
+
+def _first_linked_record_id(value: Any) -> str:
+    if value is None:
+        return ""
+
+    if isinstance(value, list):
+        for item in value:
+            rid = _first_linked_record_id(item)
+            if rid:
+                return rid
+        return ""
+
+    if isinstance(value, dict):
+        for key in ("id", "record_id", "value"):
+            raw = str(value.get(key) or "").strip()
+            if raw.startswith("rec"):
+                return raw
+        return ""
+
+    raw = str(value or "").strip()
+    if raw.startswith("rec"):
+        return raw
+
+    return ""
+
+
+def _resolve_workspace_plan_metadata(row: Dict[str, Any]) -> Dict[str, str]:
+    plan_label = ""
+    plan_code = ""
+    plan_id = ""
+
+    # 1) Valeurs directes présentes sur le workspace
+    direct_plan_label = _workspace_limit_text(
+        row,
+        "Plan_Label",
+        "Plan_Name",
+        "Plan",
+        "Plan_Text",
+    )
+
+    direct_plan_code = _workspace_limit_text(
+        row,
+        "Plan_Code",
+        "Plan_Slug",
+        "Plan_ID_Text",
+        "Plan_ID",
+    )
+
+    # Si on a déjà de vraies valeurs texte, on les garde
+    if direct_plan_label and not direct_plan_label.startswith("rec"):
+        plan_label = direct_plan_label
+
+    if direct_plan_code and not direct_plan_code.startswith("rec"):
+        plan_code = direct_plan_code
+
+    # 2) Chercher un linked record Airtable
+    linked_plan_record_id = (
+        _first_linked_record_id(row.get("Plan"))
+        or _first_linked_record_id(row.get("Plan_Link"))
+        or _first_linked_record_id(row.get("Plan_ID"))
+        or _first_linked_record_id(row.get("Plan_Record"))
+    )
+
+    if linked_plan_record_id:
+        plan_id = linked_plan_record_id
+
+        try:
+            plan_record = airtable_get_record(PLANS_TABLE_NAME, linked_plan_record_id)
+            plan_fields = plan_record.get("fields", {}) or {}
+
+            linked_label = _workspace_limit_text(
+                plan_fields,
+                "Name",
+                "Label",
+                "Plan_Label",
+                "Plan_Name",
+                "Title",
+            )
+
+            linked_code = _workspace_limit_text(
+                plan_fields,
+                "Code",
+                "Slug",
+                "Plan_Code",
+                "Plan_ID",
+                "Plan_Key",
+            )
+
+            if linked_label:
+                plan_label = linked_label
+
+            if linked_code:
+                plan_code = linked_code
+
+        except Exception as e:
+            print(f"[workspace.plan] linked lookup skipped err={repr(e)}", flush=True)
+
+    # 3) Fallback final
+    if not plan_id:
+        raw_plan_id = _workspace_limit_text(row, "Plan_ID_Text", "Plan_ID")
+        if raw_plan_id:
+            plan_id = raw_plan_id
+
+    if not plan_code and direct_plan_code and not direct_plan_code.startswith("rec"):
+        plan_code = direct_plan_code
+
+    if not plan_label and direct_plan_label and not direct_plan_label.startswith("rec"):
+        plan_label = direct_plan_label
+
+    return {
+        "plan_id": plan_id,
+        "plan_code": plan_code,
+        "plan_label": plan_label,
+    }
+    
 def _workspace_usage_snapshot(
     workspace_id: str,
     capability: str = "",
@@ -3842,9 +3962,18 @@ def _workspace_usage_snapshot(
             "usage": {},
             "limits": {},
             "projected": {},
-            "estimation": {},
+            "estimation": {
+                "requested_tokens": 0,
+                "source": "none",
+                "text_chars": 0,
+            },
             "meters": {},
+            "plan_id": "",
+            "plan_code": "",
+            "plan_label": "",
         }
+
+    plan_meta = _resolve_workspace_plan_metadata(row)
 
     current_runs = _workspace_limit_int(
         row.get("Usage_Runs_Current_Month") or row.get("Usage_Runs_Month"),
@@ -3874,11 +4003,30 @@ def _workspace_usage_snapshot(
     soft_http_calls = _workspace_limit_int(row.get("Soft_Limit_HTTP_Calls_Month"), 0)
     hard_http_calls = _workspace_limit_int(row.get("Hard_Limit_HTTP_Calls_Month"), 0)
 
-    token_estimate_meta = _estimate_requested_tokens(input_obj)
-    estimated_tokens = _workspace_limit_int(
-        token_estimate_meta.get("estimated_tokens"),
-        0,
-    )
+    estimated_tokens = 0
+    estimation_source = "none"
+    text_chars = 0
+
+    if isinstance(input_obj, dict):
+        explicit_estimated_tokens = _workspace_limit_int(
+            input_obj.get("estimated_tokens") or input_obj.get("estimated_token_count"),
+            0,
+        )
+
+        if explicit_estimated_tokens > 0:
+            estimated_tokens = explicit_estimated_tokens
+            estimation_source = "explicit:estimated_tokens"
+        else:
+            text_payload = str(
+                input_obj.get("text")
+                or input_obj.get("prompt")
+                or input_obj.get("content")
+                or ""
+            )
+            text_chars = len(text_payload)
+            if text_chars > 0:
+                estimated_tokens = max(1, round(text_chars / 4))
+                estimation_source = "derived:text_chars"
 
     run_delta = 1 if project_requested_run else 0
     http_delta = 1 if project_requested_run and str(capability or "").strip() == "http_exec" else 0
@@ -3913,6 +4061,53 @@ def _workspace_usage_snapshot(
     if not block_reason and soft_tokens > 0 and projected_tokens > soft_tokens:
         warnings.append("soft_limit_tokens_month_exceeded")
 
+    def _remaining_to_soft(current: int, soft_limit: int) -> Optional[int]:
+        if soft_limit <= 0:
+            return None
+        return max(0, soft_limit - current)
+
+    def _remaining_to_hard(current: int, hard_limit: int) -> Optional[int]:
+        if hard_limit <= 0:
+            return None
+        return max(0, hard_limit - current)
+
+    meters = {
+        "runs_month": {
+            "current": current_runs,
+            "projected": projected_runs,
+            "soft_limit": soft_runs if soft_runs > 0 else None,
+            "hard_limit": hard_runs if hard_runs > 0 else None,
+            "remaining_to_soft": _remaining_to_soft(current_runs, soft_runs),
+            "remaining_to_hard": _remaining_to_hard(current_runs, hard_runs),
+            "soft_reached_on_projection": bool(soft_runs > 0 and projected_runs > soft_runs),
+            "hard_reached_on_projection": bool(hard_runs > 0 and projected_runs > hard_runs),
+        },
+        "tokens_month": {
+            "current": current_tokens,
+            "projected": projected_tokens,
+            "soft_limit": soft_tokens if soft_tokens > 0 else None,
+            "hard_limit": hard_tokens if hard_tokens > 0 else None,
+            "remaining_to_soft": _remaining_to_soft(current_tokens, soft_tokens),
+            "remaining_to_hard": _remaining_to_hard(current_tokens, hard_tokens),
+            "soft_reached_on_projection": bool(soft_tokens > 0 and projected_tokens > soft_tokens),
+            "hard_reached_on_projection": bool(hard_tokens > 0 and projected_tokens > hard_tokens),
+        },
+        "http_calls_month": {
+            "current": current_http_calls,
+            "projected": projected_http_calls,
+            "soft_limit": soft_http_calls if soft_http_calls > 0 else None,
+            "hard_limit": hard_http_calls if hard_http_calls > 0 else None,
+            "remaining_to_soft": _remaining_to_soft(current_http_calls, soft_http_calls),
+            "remaining_to_hard": _remaining_to_hard(current_http_calls, hard_http_calls),
+            "soft_reached_on_projection": bool(
+                soft_http_calls > 0 and projected_http_calls > soft_http_calls
+            ),
+            "hard_reached_on_projection": bool(
+                hard_http_calls > 0 and projected_http_calls > hard_http_calls
+            ),
+        },
+    }
+
     return {
         "ok": True,
         "exists": True,
@@ -3920,7 +4115,9 @@ def _workspace_usage_snapshot(
         "name": _workspace_limit_text(row, "Name"),
         "slug": _workspace_limit_text(row, "Slug"),
         "type": _workspace_limit_text(row, "Type"),
-        "plan_id": _workspace_limit_text(row, "Plan_ID_Text", "Plan_ID"),
+        "plan_id": plan_meta.get("plan_id", ""),
+        "plan_code": plan_meta.get("plan_code", ""),
+        "plan_label": plan_meta.get("plan_label", ""),
         "status": _workspace_limit_text(row, "Status_select", "Status", "status"),
         "is_active": is_active,
         "last_usage_reset_at": _workspace_limit_text(row, "Last_Usage_Reset_At"),
@@ -3946,29 +4143,10 @@ def _workspace_usage_snapshot(
         },
         "estimation": {
             "requested_tokens": estimated_tokens,
-            "source": token_estimate_meta.get("source"),
-            "text_chars": _workspace_limit_int(token_estimate_meta.get("text_chars"), 0),
+            "source": estimation_source,
+            "text_chars": text_chars,
         },
-        "meters": {
-            "runs_month": _workspace_metric_meter(
-                current=current_runs,
-                projected=projected_runs,
-                soft=soft_runs,
-                hard=hard_runs,
-            ),
-            "tokens_month": _workspace_metric_meter(
-                current=current_tokens,
-                projected=projected_tokens,
-                soft=soft_tokens,
-                hard=hard_tokens,
-            ),
-            "http_calls_month": _workspace_metric_meter(
-                current=current_http_calls,
-                projected=projected_http_calls,
-                soft=soft_http_calls,
-                hard=hard_http_calls,
-            ),
-        },
+        "meters": meters,
         "warnings": warnings,
         "blocked": bool(block_reason),
         "block_reason": block_reason,
@@ -11191,8 +11369,6 @@ def get_workspace_usage(
     headers_lc = {k.lower(): v for k, v in request.headers.items()}
 
     requested_workspace_id = _normalize_workspace_id(workspace_id)
-    if not requested_workspace_id:
-        raise HTTPException(status_code=400, detail="workspace_id_required")
 
     workspace_record = resolve_workspace_from_headers(headers_lc)
     if workspace_record:
@@ -11208,9 +11384,6 @@ def get_workspace_usage(
     input_obj: Dict[str, Any] = {}
     if estimated_tokens > 0:
         input_obj["estimated_tokens"] = estimated_tokens
-
-    raw_workspace_record = _find_workspace_record_by_workspace_id(requested_workspace_id)
-    workspace_row = _unwrap_airtable_record(raw_workspace_record)
 
     snapshot = _workspace_usage_snapshot(
         workspace_id=requested_workspace_id,
@@ -11228,70 +11401,21 @@ def get_workspace_usage(
             },
         )
 
-    record_id = ""
-    if isinstance(raw_workspace_record, dict):
-        record_id = str(raw_workspace_record.get("id") or "").strip()
-
-    if not record_id and isinstance(workspace_row, dict):
-        record_id = str(workspace_row.get("id") or "").strip()
-
-    plan_id = str(snapshot.get("plan_id") or "").strip()
-
-    plan_label = _workspace_limit_text(
-        workspace_row,
-        "Plan_Label",
-        "Plan_Name",
-        "Plan_Display_Name",
-        "Plan_Text",
-        "Plan_Code",
-        "Plan_Slug",
-        "Plan_ID_Text",
+    record = _unwrap_airtable_record(
+        _find_workspace_record_by_workspace_id(requested_workspace_id)
     )
-
-    plan_code = _workspace_limit_text(
-        workspace_row,
-        "Plan_Code",
-        "Plan_Slug",
-        "Plan_Key",
-        "Plan_ID_Text",
-    )
-
-    raw_plan_value = workspace_row.get("Plan")
-    if not plan_label:
-        if isinstance(raw_plan_value, str):
-            candidate = raw_plan_value.strip()
-            if candidate and not candidate.startswith("rec"):
-                plan_label = candidate
-        elif isinstance(raw_plan_value, list):
-            for item in raw_plan_value:
-                candidate = str(item or "").strip()
-                if candidate and not candidate.startswith("rec"):
-                    plan_label = candidate
-                    break
-
-    if not plan_label and plan_code:
-        plan_label = plan_code
-
-    if not plan_code and plan_label and not str(plan_label).startswith("rec"):
-        plan_code = str(plan_label).strip().lower().replace(" ", "-")
-
-    if not plan_label and plan_id and not plan_id.startswith("rec"):
-        plan_label = plan_id
-
-    if not plan_code and plan_id and not plan_id.startswith("rec"):
-        plan_code = plan_id
 
     return {
         "ok": True,
         "workspace": {
-            "record_id": record_id,
+            "record_id": str((record.get("id") or "")) if isinstance(record, dict) else "",
             "workspace_id": snapshot.get("workspace_id"),
             "name": snapshot.get("name"),
             "slug": snapshot.get("slug"),
             "type": snapshot.get("type"),
-            "plan_id": plan_id,
-            "plan_label": plan_label,
-            "plan_code": plan_code,
+            "plan_id": snapshot.get("plan_id"),
+            "plan_code": snapshot.get("plan_code"),
+            "plan_label": snapshot.get("plan_label"),
             "status": snapshot.get("status"),
             "is_active": snapshot.get("is_active"),
             "last_usage_reset_at": snapshot.get("last_usage_reset_at"),
