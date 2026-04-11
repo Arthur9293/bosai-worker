@@ -11235,6 +11235,52 @@ def get_workspace_usage(
     if not record_id and isinstance(workspace_row, dict):
         record_id = str(workspace_row.get("id") or "").strip()
 
+    plan_id = str(snapshot.get("plan_id") or "").strip()
+
+    plan_label = _workspace_limit_text(
+        workspace_row,
+        "Plan_Label",
+        "Plan_Name",
+        "Plan_Display_Name",
+        "Plan_Text",
+        "Plan_Code",
+        "Plan_Slug",
+        "Plan_ID_Text",
+    )
+
+    plan_code = _workspace_limit_text(
+        workspace_row,
+        "Plan_Code",
+        "Plan_Slug",
+        "Plan_Key",
+        "Plan_ID_Text",
+    )
+
+    raw_plan_value = workspace_row.get("Plan")
+    if not plan_label:
+        if isinstance(raw_plan_value, str):
+            candidate = raw_plan_value.strip()
+            if candidate and not candidate.startswith("rec"):
+                plan_label = candidate
+        elif isinstance(raw_plan_value, list):
+            for item in raw_plan_value:
+                candidate = str(item or "").strip()
+                if candidate and not candidate.startswith("rec"):
+                    plan_label = candidate
+                    break
+
+    if not plan_label and plan_code:
+        plan_label = plan_code
+
+    if not plan_code and plan_label and not str(plan_label).startswith("rec"):
+        plan_code = str(plan_label).strip().lower().replace(" ", "-")
+
+    if not plan_label and plan_id and not plan_id.startswith("rec"):
+        plan_label = plan_id
+
+    if not plan_code and plan_id and not plan_id.startswith("rec"):
+        plan_code = plan_id
+
     return {
         "ok": True,
         "workspace": {
@@ -11243,7 +11289,9 @@ def get_workspace_usage(
             "name": snapshot.get("name"),
             "slug": snapshot.get("slug"),
             "type": snapshot.get("type"),
-            "plan_id": snapshot.get("plan_id"),
+            "plan_id": plan_id,
+            "plan_label": plan_label,
+            "plan_code": plan_code,
             "status": snapshot.get("status"),
             "is_active": snapshot.get("is_active"),
             "last_usage_reset_at": snapshot.get("last_usage_reset_at"),
@@ -11258,16 +11306,6 @@ def get_workspace_usage(
         "block_reason": snapshot.get("block_reason", ""),
         "ts": utc_now_iso(),
     }
-
-@app.get("/workspace/usage/{workspace_id}")
-async def get_workspace_usage_by_id(
-    workspace_id: str,
-    request: Request,
-) -> Dict[str, Any]:
-    return _build_workspace_usage_response(
-        request=request,
-        workspace_id=workspace_id,
-    )
     
 @app.get("/events")
 def get_events(limit: int = 30) -> Dict[str, Any]:
