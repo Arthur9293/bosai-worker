@@ -12743,6 +12743,36 @@ async def run(request: Request, response: Response) -> RunResponse:
             result={"idempotent_replay": True, "previous": previous_result},
         )
 
+    # ------------------------------------------------------------
+    # Capability gating by plan BEFORE quota projection
+    # ------------------------------------------------------------
+    gate_info = _is_capability_allowed_for_workspace(
+        workspace_id=workspace_id,
+        capability_name=req.capability,
+        workspace_record=workspace_record,
+    )
+
+    if not gate_info.get("ok"):
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "workspace_not_found",
+                "workspace_id": workspace_id,
+                "gate": gate_info,
+            },
+        )
+
+    if not gate_info.get("allowed"):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "capability_not_allowed_for_plan",
+                "workspace_id": workspace_id,
+                "capability": req.capability,
+                "gate": gate_info,
+            },
+        )
+
     workspace_preflight = None
 
     # ------------------------------------------------------------
@@ -13019,6 +13049,7 @@ async def run(request: Request, response: Response) -> RunResponse:
             traceback.print_exc()
 
         raise HTTPException(status_code=500, detail=repr(e))
+        
 # ============================================================
 # Incidents / graphs / details
 # ============================================================
