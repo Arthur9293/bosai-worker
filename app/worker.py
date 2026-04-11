@@ -3544,6 +3544,8 @@ def _load_system_run_context(record_id: str) -> Dict[str, Any]:
     raw = _get_airtable_record_by_record_id(SYSTEM_RUNS_TABLE_NAME, record_id)
     record = _unwrap_airtable_record(raw)
 
+    input_obj = _json_load_maybe(record.get("Input_JSON"))
+
     return {
         "record_id": str(record.get("id") or record_id or "").strip(),
         "run_id": _pick_first_text(record.get("Run_ID"), record.get("run_id")),
@@ -3564,6 +3566,7 @@ def _load_system_run_context(record_id: str) -> Dict[str, Any]:
             record.get("Source_Event_ID"),
             record.get("source_event_id"),
         ),
+        "input_obj": input_obj if isinstance(input_obj, dict) else {},
     }
 
 
@@ -3684,6 +3687,17 @@ def _post_run_accounting_best_effort(
         completion_tokens = usage_metrics["completion_tokens"]
         total_tokens = usage_metrics["total_tokens"]
 
+        run_input_obj = run_ctx.get("input_obj") if isinstance(run_ctx.get("input_obj"), dict) else {}
+        estimated_meta = _estimate_requested_tokens(run_input_obj)
+        estimated_tokens = _workspace_limit_int(estimated_meta.get("estimated_tokens"), 0)
+
+        used_estimated_tokens = False
+        if total_tokens <= 0 and estimated_tokens > 0:
+            prompt_tokens = estimated_tokens
+            completion_tokens = 0
+            total_tokens = estimated_tokens
+            used_estimated_tokens = True
+
         http_calls = 1 if capability.lower() == "http_exec" else 0
 
         _create_usage_ledger_row_best_effort(
@@ -3697,29 +3711,41 @@ def _post_run_accounting_best_effort(
             billable=billable,
         )
 
-        if prompt_tokens > 0:
+        if used_estimated_tokens:
             _create_usage_ledger_row_best_effort(
                 workspace_airtable_record_id=workspace_airtable_record_id,
                 run_record_id=system_run_record_id,
                 run_id=run_id,
                 capability=capability,
-                usage_type="token_input",
-                quantity=prompt_tokens,
+                usage_type="token_estimated",
+                quantity=total_tokens,
                 unit="tokens",
                 billable=billable,
             )
+        else:
+            if prompt_tokens > 0:
+                _create_usage_ledger_row_best_effort(
+                    workspace_airtable_record_id=workspace_airtable_record_id,
+                    run_record_id=system_run_record_id,
+                    run_id=run_id,
+                    capability=capability,
+                    usage_type="token_input",
+                    quantity=prompt_tokens,
+                    unit="tokens",
+                    billable=billable,
+                )
 
-        if completion_tokens > 0:
-            _create_usage_ledger_row_best_effort(
-                workspace_airtable_record_id=workspace_airtable_record_id,
-                run_record_id=system_run_record_id,
-                run_id=run_id,
-                capability=capability,
-                usage_type="token_output",
-                quantity=completion_tokens,
-                unit="tokens",
-                billable=billable,
-            )
+            if completion_tokens > 0:
+                _create_usage_ledger_row_best_effort(
+                    workspace_airtable_record_id=workspace_airtable_record_id,
+                    run_record_id=system_run_record_id,
+                    run_id=run_id,
+                    capability=capability,
+                    usage_type="token_output",
+                    quantity=completion_tokens,
+                    unit="tokens",
+                    billable=billable,
+                )
 
         if http_calls > 0:
             _create_usage_ledger_row_best_effort(
@@ -3743,7 +3769,6 @@ def _post_run_accounting_best_effort(
 
     except Exception as e:
         print(f"[_post_run_accounting_best_effort] err={repr(e)}", flush=True)
-
 # ============================================================
 # Workspace limits / quota enforcement
 # ============================================================
@@ -3817,6 +3842,8 @@ def _workspace_usage_snapshot(
             "usage": {},
             "limits": {},
             "projected": {},
+            "estimation": {},
+            "meters": {},
         }
 
     current_runs = _workspace_limit_int(
@@ -3847,12 +3874,11 @@ def _workspace_usage_snapshot(
     soft_http_calls = _workspace_limit_int(row.get("Soft_Limit_HTTP_Calls_Month"), 0)
     hard_http_calls = _workspace_limit_int(row.get("Hard_Limit_HTTP_Calls_Month"), 0)
 
-    estimated_tokens = 0
-    if isinstance(input_obj, dict):
-        estimated_tokens = _workspace_limit_int(
-            input_obj.get("estimated_tokens") or input_obj.get("estimated_token_count"),
-            0,
-        )
+    token_estimate_meta = _estimate_requested_tokens(input_obj)
+    estimated_tokens = _workspace_limit_int(
+        token_estimate_meta.get("estimated_tokens"),
+        0,
+    )
 
     run_delta = 1 if project_requested_run else 0
     http_delta = 1 if project_requested_run and str(capability or "").strip() == "http_exec" else 0
@@ -3918,10 +3944,36 @@ def _workspace_usage_snapshot(
             "http_calls_month": projected_http_calls,
             "estimated_tokens_delta": token_delta,
         },
+        "estimation": {
+            "requested_tokens": estimated_tokens,
+            "source": token_estimate_meta.get("source"),
+            "text_chars": _workspace_limit_int(token_estimate_meta.get("text_chars"), 0),
+        },
+        "meters": {
+            "runs_month": _workspace_metric_meter(
+                current=current_runs,
+                projected=projected_runs,
+                soft=soft_runs,
+                hard=hard_runs,
+            ),
+            "tokens_month": _workspace_metric_meter(
+                current=current_tokens,
+                projected=projected_tokens,
+                soft=soft_tokens,
+                hard=hard_tokens,
+            ),
+            "http_calls_month": _workspace_metric_meter(
+                current=current_http_calls,
+                projected=projected_http_calls,
+                soft=soft_http_calls,
+                hard=hard_http_calls,
+            ),
+        },
         "warnings": warnings,
         "blocked": bool(block_reason),
         "block_reason": block_reason,
     }
+    
 def _resolve_workspace_for_usage_or_raise(
     request: Request,
     workspace_id: str = "",
@@ -4152,7 +4204,114 @@ def _enforce_workspace_limits_or_raise(
         )
 
     return snapshot
-        
+
+
+def _workspace_metric_meter(current: int, projected: int, soft: int, hard: int) -> Dict[str, Any]:
+    def _remaining(limit_value: int, used_value: int) -> Optional[int]:
+        if limit_value <= 0:
+            return None
+        return max(limit_value - used_value, 0)
+
+    return {
+        "current": current,
+        "projected": projected,
+        "soft_limit": soft if soft > 0 else None,
+        "hard_limit": hard if hard > 0 else None,
+        "remaining_to_soft": _remaining(soft, current),
+        "remaining_to_hard": _remaining(hard, current),
+        "soft_reached_on_projection": bool(soft > 0 and projected > soft),
+        "hard_reached_on_projection": bool(hard > 0 and projected > hard),
+    }
+
+
+def _estimate_requested_tokens(input_obj: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(input_obj, dict):
+        return {
+            "estimated_tokens": 0,
+            "source": "none",
+            "text_chars": 0,
+        }
+
+    explicit_keys = (
+        "estimated_tokens",
+        "estimated_token_count",
+        "token_estimate",
+        "projected_tokens",
+        "input_tokens",
+    )
+
+    for key in explicit_keys:
+        value = _workspace_limit_int(input_obj.get(key), 0)
+        if value > 0:
+            return {
+                "estimated_tokens": value,
+                "source": f"explicit:{key}",
+                "text_chars": 0,
+            }
+
+    parts: List[str] = []
+
+    def _append_text(value: Any) -> None:
+        if value is None:
+            return
+
+        if isinstance(value, str):
+            text = value.strip()
+            if text:
+                parts.append(text)
+            return
+
+        if isinstance(value, list):
+            for item in value:
+                _append_text(item)
+            return
+
+        if isinstance(value, dict):
+            if "content" in value:
+                _append_text(value.get("content"))
+                return
+
+            if "text" in value:
+                _append_text(value.get("text"))
+                return
+
+            try:
+                dumped = json.dumps(value, ensure_ascii=False)
+                if dumped and dumped != "{}":
+                    parts.append(dumped)
+            except Exception:
+                pass
+            return
+
+        text = str(value).strip()
+        if text:
+            parts.append(text)
+
+    for key in ("prompt", "text", "content", "body_text", "goal"):
+        _append_text(input_obj.get(key))
+
+    _append_text(input_obj.get("messages"))
+
+    for key in ("json", "body", "data", "request"):
+        _append_text(input_obj.get(key))
+
+    combined = "\n".join(parts).strip()
+    if not combined:
+        return {
+            "estimated_tokens": 0,
+            "source": "none",
+            "text_chars": 0,
+        }
+
+    text_chars = len(combined)
+    estimated_tokens = max(1, (text_chars + 3) // 4)
+
+    return {
+        "estimated_tokens": estimated_tokens,
+        "source": "approx_chars_div_4",
+        "text_chars": text_chars,
+    }
+    
 def create_system_run(req: RunRequest) -> Tuple[str, str]:
     run_uuid = str(uuid.uuid4())
 
@@ -11022,15 +11181,71 @@ def get_sla(limit: int = 50) -> Dict[str, Any]:
     }
     
 @app.get("/workspace/usage")
-async def get_workspace_usage(
+def get_workspace_usage(
     request: Request,
-    workspace_id: str = Query(default=""),
+    workspace_id: str,
+    capability: str = "",
+    estimated_tokens: int = 0,
+    project_requested_run: int = 0,
 ) -> Dict[str, Any]:
-    return _build_workspace_usage_response(
-        request=request,
-        workspace_id=workspace_id,
+    headers_lc = {k.lower(): v for k, v in request.headers.items()}
+
+    requested_workspace_id = _normalize_workspace_id(workspace_id)
+
+    workspace_record = resolve_workspace_from_headers(headers_lc)
+    if workspace_record:
+        workspace_fields = workspace_record.get("fields", {}) or {}
+        allowed_workspace_id = _normalize_workspace_id(
+            workspace_fields.get("Workspace_ID")
+        )
+        if allowed_workspace_id != requested_workspace_id:
+            raise HTTPException(status_code=403, detail="workspace_mismatch")
+    else:
+        verify_request_auth_or_401(b"", headers_lc)
+
+    input_obj: Dict[str, Any] = {}
+    if estimated_tokens > 0:
+        input_obj["estimated_tokens"] = estimated_tokens
+
+    snapshot = _workspace_usage_snapshot(
+        workspace_id=requested_workspace_id,
+        capability=str(capability or "").strip(),
+        input_obj=input_obj,
+        project_requested_run=bool(project_requested_run),
     )
 
+    if not snapshot.get("exists"):
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "workspace_not_found",
+                "workspace_id": requested_workspace_id,
+            },
+        )
+
+    return {
+        "ok": True,
+        "workspace": {
+            "record_id": str(((_unwrap_airtable_record(_find_workspace_record_by_workspace_id(requested_workspace_id))).get("id") or "")),
+            "workspace_id": snapshot.get("workspace_id"),
+            "name": snapshot.get("name"),
+            "slug": snapshot.get("slug"),
+            "type": snapshot.get("type"),
+            "plan_id": snapshot.get("plan_id"),
+            "status": snapshot.get("status"),
+            "is_active": snapshot.get("is_active"),
+            "last_usage_reset_at": snapshot.get("last_usage_reset_at"),
+        },
+        "usage": snapshot.get("usage", {}),
+        "limits": snapshot.get("limits", {}),
+        "projected": snapshot.get("projected", {}),
+        "estimation": snapshot.get("estimation", {}),
+        "meters": snapshot.get("meters", {}),
+        "warnings": snapshot.get("warnings", []),
+        "blocked": snapshot.get("blocked", False),
+        "block_reason": snapshot.get("block_reason", ""),
+        "ts": utc_now_iso(),
+    }
 
 @app.get("/workspace/usage/{workspace_id}")
 async def get_workspace_usage_by_id(
