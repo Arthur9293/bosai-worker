@@ -11993,7 +11993,175 @@ async def create_workspace(request: Request):
         },
         "api_key": api_key,
     }
-    
+
+# ============================================================
+# Usage Ledger helpers
+# ============================================================
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        if isinstance(value, bool):
+            return int(value)
+        return int(float(str(value).strip().replace(",", ".")))
+    except Exception:
+        return default
+
+
+def _safe_json_dumps(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except Exception:
+        try:
+            return json.dumps({"repr": repr(value)}, ensure_ascii=False)
+        except Exception:
+            return "{}"
+
+
+def _usage_ledger_tokens_delta(input_obj: Optional[Dict[str, Any]]) -> int:
+    if not isinstance(input_obj, dict):
+        return 0
+
+    explicit = (
+        input_obj.get("estimated_tokens")
+        or input_obj.get("estimated_token_count")
+        or input_obj.get("token_estimate")
+        or 0
+    )
+    return max(0, _safe_int(explicit, 0))
+
+
+def _usage_ledger_http_delta(capability: str) -> int:
+    return 1 if str(capability or "").strip() == "http_exec" else 0
+
+
+def _usage_ledger_usage_type(
+    runs_delta: int,
+    tokens_delta: int,
+    http_delta: int,
+) -> str:
+    flags = sum(
+        1 for x in [runs_delta > 0, tokens_delta > 0, http_delta > 0] if x
+    )
+
+    if flags >= 2:
+        return "composite"
+    if http_delta > 0:
+        return "http"
+    if tokens_delta > 0:
+        return "token"
+    return "run"
+
+
+def _build_usage_ledger_fields(
+    *,
+    workspace_id: str,
+    run_record_id: str,
+    run_id: str,
+    capability: str,
+    status: str,
+    idempotency_key: str,
+    worker: str,
+    input_obj: Optional[Dict[str, Any]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    runs_delta: Optional[int] = None,
+    tokens_delta: Optional[int] = None,
+    http_calls_delta: Optional[int] = None,
+) -> Dict[str, Any]:
+    resolved_runs_delta = _safe_int(
+        runs_delta,
+        1 if status in ("success", "error", "unsupported") else 0,
+    )
+    resolved_tokens_delta = _safe_int(
+        tokens_delta,
+        _usage_ledger_tokens_delta(input_obj),
+    )
+    resolved_http_delta = _safe_int(
+        http_calls_delta,
+        _usage_ledger_http_delta(capability),
+    )
+
+    if status == "blocked":
+        resolved_runs_delta = 0
+        resolved_tokens_delta = 0
+        resolved_http_delta = 0
+
+    usage_type = _usage_ledger_usage_type(
+        resolved_runs_delta,
+        resolved_tokens_delta,
+        resolved_http_delta,
+    )
+
+    name = f"{workspace_id} • {capability} • {status}"
+
+    return {
+        "Name": name,
+        "Workspace_ID": workspace_id,
+        "Run_Record_ID": run_record_id,
+        "Run_ID": run_id,
+        "Capability": capability,
+        "Usage_Type": usage_type,
+        "Runs_Delta": resolved_runs_delta,
+        "Tokens_Delta": resolved_tokens_delta,
+        "HTTP_Calls_Delta": resolved_http_delta,
+        "Status": status,
+        "Idempotency_Key": idempotency_key,
+        "Worker": worker,
+        "Created_At": utc_now_iso(),
+        "Metadata_JSON": _safe_json_dumps(metadata or {}),
+    }
+
+
+def _usage_ledger_write_best_effort(
+    *,
+    workspace_id: str,
+    run_record_id: str,
+    run_id: str,
+    capability: str,
+    status: str,
+    idempotency_key: str,
+    worker: str,
+    input_obj: Optional[Dict[str, Any]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    runs_delta: Optional[int] = None,
+    tokens_delta: Optional[int] = None,
+    http_calls_delta: Optional[int] = None,
+) -> Dict[str, Any]:
+    try:
+        if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+            return {"ok": False, "skipped": True, "reason": "missing_airtable_env"}
+
+        fields = _build_usage_ledger_fields(
+            workspace_id=workspace_id,
+            run_record_id=run_record_id,
+            run_id=run_id,
+            capability=capability,
+            status=status,
+            idempotency_key=idempotency_key,
+            worker=worker,
+            input_obj=input_obj,
+            metadata=metadata,
+            runs_delta=runs_delta,
+            tokens_delta=tokens_delta,
+            http_calls_delta=http_calls_delta,
+        )
+
+        record_id = _airtable_create(USAGE_LEDGER_TABLE_NAME, fields)
+
+        return {
+            "ok": True,
+            "record_id": record_id,
+            "table": USAGE_LEDGER_TABLE_NAME,
+        }
+    except Exception as e:
+        print(f"[usage_ledger] write skipped err={repr(e)}", flush=True)
+        return {
+            "ok": False,
+            "error": repr(e),
+            "table": USAGE_LEDGER_TABLE_NAME,
+        }
+        
 @app.post("/run", response_model=RunResponse)
 async def run(request: Request, response: Response) -> RunResponse:
     started = time.time()
