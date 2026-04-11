@@ -11727,6 +11727,9 @@ async def run(request: Request, response: Response) -> RunResponse:
     if (time.time() - started) > RUN_MAX_SECONDS:
         raise HTTPException(status_code=408, detail="Request timed out before start.")
 
+    # ------------------------------------------------------------
+    # Idempotency replay BEFORE quota projection
+    # ------------------------------------------------------------
     existing = idempotency_lookup(req)
     if existing:
         fields = existing.get("fields", {}) or {}
@@ -11734,6 +11737,16 @@ async def run(request: Request, response: Response) -> RunResponse:
             previous_result = json.loads(fields.get("Result_JSON", "{}") or "{}")
         except Exception:
             previous_result = {"note": "Result_JSON unreadable"}
+
+        current_usage_snapshot = _workspace_usage_snapshot(
+            workspace_id=workspace_id,
+            capability=req.capability,
+            input_obj=req.input if isinstance(req.input, dict) else {},
+            project_requested_run=False,
+        )
+
+        if isinstance(previous_result, dict):
+            previous_result.setdefault("workspace_usage", current_usage_snapshot)
 
         return RunResponse(
             ok=True,
@@ -11746,9 +11759,9 @@ async def run(request: Request, response: Response) -> RunResponse:
         )
 
     # ------------------------------------------------------------
-    # Workspace quota / limits preflight
+    # Workspace quota preflight BEFORE real execution
     # ------------------------------------------------------------
-    preflight_usage_snapshot = _enforce_workspace_limits_or_raise(
+    workspace_preflight = _enforce_workspace_limits_or_raise(
         workspace_id=workspace_id,
         capability=req.capability,
         input_obj=req.input if isinstance(req.input, dict) else {},
@@ -11761,11 +11774,13 @@ async def run(request: Request, response: Response) -> RunResponse:
     try:
         fn = CAPABILITIES.get(req.capability)
         if not fn:
-            finish_system_run(
-                run_record_id,
-                "Unsupported",
-                {"ok": False, "error": "unsupported_capability"},
-            )
+            unsupported_result = {
+                "ok": False,
+                "error": "unsupported_capability",
+                "workspace_preflight": workspace_preflight,
+                "run_record_id": run_record_id,
+            }
+            finish_system_run(run_record_id, "Unsupported", unsupported_result)
             raise HTTPException(
                 status_code=400,
                 detail=f"Unsupported capability: {req.capability}",
@@ -11791,6 +11806,8 @@ async def run(request: Request, response: Response) -> RunResponse:
                 "capability": req.capability,
                 "run_record_id": run_record_id,
             }
+
+        result_obj.setdefault("workspace_preflight", workspace_preflight)
 
         next_cmds = result_obj.get("next_commands")
 
@@ -11841,25 +11858,37 @@ async def run(request: Request, response: Response) -> RunResponse:
 
         finish_system_run(run_record_id, "Done", result_obj)
 
+        # ------------------------------------------------------------
+        # Post-run usage snapshot AFTER accounting
+        # ------------------------------------------------------------
+        workspace_usage = _workspace_usage_snapshot(
+            workspace_id=workspace_id,
+            capability=req.capability,
+            input_obj=req.input if isinstance(req.input, dict) else {},
+            project_requested_run=False,
+        )
+
+        result_obj["workspace_usage"] = workspace_usage
+
+        try:
+            airtable_update(
+                SYSTEM_RUNS_TABLE_NAME,
+                run_record_id,
+                {
+                    "Result_JSON": _safe_json_dumps(result_obj),
+                },
+            )
+        except Exception as usage_patch_err:
+            print(
+                "[RUN WARNING] unable to patch Result_JSON with workspace_usage =",
+                repr(usage_patch_err),
+                flush=True,
+            )
+
         try:
             _touch_workspace_last_seen(workspace_id)
         except Exception as touch_err:
             print(f"[workspace] touch skipped err={repr(touch_err)}", flush=True)
-
-        try:
-            result_obj["workspace_preflight"] = preflight_usage_snapshot
-        except Exception:
-            pass
-
-        try:
-            result_obj["workspace_usage"] = _workspace_usage_snapshot(
-                workspace_id=workspace_id,
-                capability=req.capability,
-                input_obj=req.input if isinstance(req.input, dict) else {},
-                project_requested_run=False,
-            )
-        except Exception as usage_err:
-            print(f"[workspace] usage snapshot skipped err={repr(usage_err)}", flush=True)
 
         return RunResponse(
             ok=True,
@@ -11873,7 +11902,16 @@ async def run(request: Request, response: Response) -> RunResponse:
 
     except HTTPException as e:
         try:
-            fail_system_run(run_record_id, str(e.detail))
+            fail_system_run(
+                run_record_id,
+                str(e.detail),
+                {
+                    "ok": False,
+                    "error": str(e.detail),
+                    "workspace_preflight": workspace_preflight,
+                    "run_record_id": run_record_id,
+                },
+            )
         except Exception as fail_err:
             print("[RUN ERROR] fail_system_run failed =", repr(fail_err), flush=True)
             traceback.print_exc()
@@ -11884,13 +11922,21 @@ async def run(request: Request, response: Response) -> RunResponse:
         traceback.print_exc()
 
         try:
-            fail_system_run(run_record_id, repr(e))
+            fail_system_run(
+                run_record_id,
+                repr(e),
+                {
+                    "ok": False,
+                    "error": repr(e),
+                    "workspace_preflight": workspace_preflight,
+                    "run_record_id": run_record_id,
+                },
+            )
         except Exception as fail_err:
             print("[RUN ERROR] fail_system_run failed =", repr(fail_err), flush=True)
             traceback.print_exc()
 
         raise HTTPException(status_code=500, detail=repr(e))
-        
 # ============================================================
 # Incidents / graphs / details
 # ============================================================
