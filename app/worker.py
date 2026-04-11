@@ -11644,6 +11644,7 @@ def get_workspace_usage(
             "is_active": snapshot.get("is_active"),
             "last_usage_reset_at": snapshot.get("last_usage_reset_at"),
         },
+        "current_usage_period_key": snapshot.get("current_usage_period_key", ""),
         "usage": snapshot.get("usage", {}),
         "limits": snapshot.get("limits", {}),
         "projected": snapshot.get("projected", {}),
@@ -11652,6 +11653,7 @@ def get_workspace_usage(
         "warnings": snapshot.get("warnings", []),
         "blocked": snapshot.get("blocked", False),
         "block_reason": snapshot.get("block_reason", ""),
+        "usage_period_reset": snapshot.get("usage_period_reset", {}),
         "ts": utc_now_iso(),
     }
     
