@@ -12147,29 +12147,76 @@ async def run(request: Request, response: Response) -> RunResponse:
             result={"idempotent_replay": True, "previous": previous_result},
         )
 
+    workspace_preflight = None
+
     # ------------------------------------------------------------
     # Workspace quota preflight BEFORE real execution
     # ------------------------------------------------------------
-    workspace_preflight = _enforce_workspace_limits_or_raise(
-        workspace_id=workspace_id,
-        capability=req.capability,
-        input_obj=req.input if isinstance(req.input, dict) else {},
-    )
+    try:
+        workspace_preflight = _enforce_workspace_limits_or_raise(
+            workspace_id=workspace_id,
+            capability=req.capability,
+            input_obj=req.input if isinstance(req.input, dict) else {},
+        )
+    except HTTPException as quota_exc:
+        quota_detail = getattr(quota_exc, "detail", None)
+        if isinstance(quota_detail, dict):
+            workspace_preflight = quota_detail.get("workspace") or None
+
+        blocked_run_uuid = str(uuid.uuid4())
+
+        _usage_ledger_write_best_effort(
+            workspace_id=workspace_id,
+            run_record_id="",
+            run_id=blocked_run_uuid,
+            capability=capability_name or str(payload.get("capability") or ""),
+            status="blocked",
+            idempotency_key=str(payload.get("idempotency_key") or ""),
+            worker=str(payload.get("worker") or WORKER_NAME or "unknown"),
+            input_obj=payload_input if isinstance(payload_input, dict) else {},
+            metadata={
+                "error": quota_detail if quota_detail is not None else "quota_blocked",
+                "workspace_preflight": workspace_preflight,
+                "phase": "preflight",
+            },
+            runs_delta=0,
+            tokens_delta=0,
+            http_calls_delta=0,
+        )
+        raise
 
     run_record_id, run_uuid = create_system_run(req)
     response.headers["X-Run-Record-Id"] = run_record_id
     response.headers["X-Run-Id"] = run_uuid
 
+    unsupported_already_finished = False
+
     try:
         fn = CAPABILITIES.get(req.capability)
         if not fn:
+            unsupported_already_finished = True
+
             unsupported_result = {
                 "ok": False,
                 "error": "unsupported_capability",
                 "workspace_preflight": workspace_preflight,
                 "run_record_id": run_record_id,
             }
+
             finish_system_run(run_record_id, "Unsupported", unsupported_result)
+
+            _usage_ledger_write_best_effort(
+                workspace_id=workspace_id,
+                run_record_id=run_record_id,
+                run_id=run_uuid,
+                capability=req.capability,
+                status="unsupported",
+                idempotency_key=req.idempotency_key,
+                worker=req.worker,
+                input_obj=req.input if isinstance(req.input, dict) else {},
+                metadata=unsupported_result,
+            )
+
             raise HTTPException(
                 status_code=400,
                 detail=f"Unsupported capability: {req.capability}",
@@ -12274,6 +12321,23 @@ async def run(request: Request, response: Response) -> RunResponse:
                 flush=True,
             )
 
+        _usage_ledger_write_best_effort(
+            workspace_id=workspace_id,
+            run_record_id=run_record_id,
+            run_id=run_uuid,
+            capability=req.capability,
+            status="success",
+            idempotency_key=req.idempotency_key,
+            worker=req.worker,
+            input_obj=req.input if isinstance(req.input, dict) else {},
+            metadata={
+                "result_ok": bool(result_obj.get("ok")),
+                "workspace_preflight": workspace_preflight,
+                "workspace_usage": workspace_usage,
+                "spawn_summary": result_obj.get("spawn_summary"),
+            },
+        )
+
         try:
             _touch_workspace_last_seen(workspace_id)
         except Exception as touch_err:
@@ -12291,16 +12355,33 @@ async def run(request: Request, response: Response) -> RunResponse:
 
     except HTTPException as e:
         try:
-            fail_system_run(
-                run_record_id,
-                str(e.detail),
-                {
-                    "ok": False,
-                    "error": str(e.detail),
-                    "workspace_preflight": workspace_preflight,
-                    "run_record_id": run_record_id,
-                },
-            )
+            if not unsupported_already_finished:
+                fail_system_run(
+                    run_record_id,
+                    str(e.detail),
+                    {
+                        "ok": False,
+                        "error": str(e.detail),
+                        "workspace_preflight": workspace_preflight,
+                        "run_record_id": run_record_id,
+                    },
+                )
+
+                _usage_ledger_write_best_effort(
+                    workspace_id=workspace_id,
+                    run_record_id=run_record_id,
+                    run_id=run_uuid,
+                    capability=req.capability,
+                    status="error",
+                    idempotency_key=req.idempotency_key,
+                    worker=req.worker,
+                    input_obj=req.input if isinstance(req.input, dict) else {},
+                    metadata={
+                        "error": str(e.detail),
+                        "error_type": "http_exception",
+                        "workspace_preflight": workspace_preflight,
+                    },
+                )
         except Exception as fail_err:
             print("[RUN ERROR] fail_system_run failed =", repr(fail_err), flush=True)
             traceback.print_exc()
@@ -12319,6 +12400,22 @@ async def run(request: Request, response: Response) -> RunResponse:
                     "error": repr(e),
                     "workspace_preflight": workspace_preflight,
                     "run_record_id": run_record_id,
+                },
+            )
+
+            _usage_ledger_write_best_effort(
+                workspace_id=workspace_id,
+                run_record_id=run_record_id,
+                run_id=run_uuid,
+                capability=req.capability,
+                status="error",
+                idempotency_key=req.idempotency_key,
+                worker=req.worker,
+                input_obj=req.input if isinstance(req.input, dict) else {},
+                metadata={
+                    "error": repr(e),
+                    "error_type": "exception",
+                    "workspace_preflight": workspace_preflight,
                 },
             )
         except Exception as fail_err:
