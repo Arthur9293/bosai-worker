@@ -4161,6 +4161,40 @@ def _workspace_usage_snapshot(
             "plan_label": "",
         }
 
+    # ------------------------------------------------------------
+    # Automatic monthly reset (lazy / safe)
+    # ------------------------------------------------------------
+    reset_info = _ensure_workspace_usage_period_current(
+        workspace_id=workspace_id,
+        workspace_record=workspace_record,
+    )
+
+    if reset_info.get("reset_applied"):
+        workspace_record = _find_workspace_record_by_workspace_id(workspace_id)
+        row = _unwrap_airtable_record(workspace_record)
+
+        if not row:
+            return {
+                "ok": False,
+                "exists": False,
+                "workspace_id": workspace_id,
+                "blocked": True,
+                "block_reason": "workspace_not_found_after_reset",
+                "warnings": [],
+                "usage": {},
+                "limits": {},
+                "projected": {},
+                "estimation": {
+                    "requested_tokens": 0,
+                    "source": "none",
+                    "text_chars": 0,
+                },
+                "meters": {},
+                "plan_id": "",
+                "plan_code": "",
+                "plan_label": "",
+            }
+
     plan_meta = _resolve_workspace_plan_metadata(row)
 
     current_runs = _workspace_limit_int(
@@ -4309,6 +4343,7 @@ def _workspace_usage_snapshot(
         "status": _workspace_limit_text(row, "Status_select", "Status", "status"),
         "is_active": is_active,
         "last_usage_reset_at": _workspace_limit_text(row, "Last_Usage_Reset_At"),
+        "current_usage_period_key": _workspace_usage_period_fields(row).get("current_period"),
         "capability": str(capability or "").strip(),
         "usage": {
             "runs_month": current_runs,
@@ -4338,6 +4373,7 @@ def _workspace_usage_snapshot(
         "warnings": warnings,
         "blocked": bool(block_reason),
         "block_reason": block_reason,
+        "usage_period_reset": reset_info,
     }
     
 def _resolve_workspace_for_usage_or_raise(
