@@ -12093,10 +12093,33 @@ def _build_usage_ledger_fields(
         resolved_http_delta,
     )
 
-    name = f"{workspace_id} • {capability} • {status}"
+    created_at = utc_now_iso()
+    period_key = created_at[:7] if len(created_at) >= 7 else ""
 
-    return {
-        "Name": name,
+    # Quantité métier principale
+    if usage_type == "token":
+        quantity = resolved_tokens_delta
+        unit = "tokens"
+    elif usage_type == "http":
+        quantity = resolved_http_delta
+        unit = "count"
+    else:
+        quantity = resolved_runs_delta
+        unit = "count"
+
+    if usage_type == "composite":
+        quantity = max(resolved_runs_delta, 1)
+        unit = "count"
+
+    # Nom lisible
+    readable_name = f"{workspace_id} • {capability} • {status}"
+
+    # ID usage stable
+    usage_id = f"ulg_{run_id}"
+
+    fields = {
+        # Canonical / original fields
+        "Name": readable_name,
         "Workspace_ID": workspace_id,
         "Run_Record_ID": run_record_id,
         "Run_ID": run_id,
@@ -12108,9 +12131,32 @@ def _build_usage_ledger_fields(
         "Status": status,
         "Idempotency_Key": idempotency_key,
         "Worker": worker,
-        "Created_At": utc_now_iso(),
+        "Created_At": created_at,
         "Metadata_JSON": _safe_json_dumps(metadata or {}),
+
+        # Product / billing-oriented schema seen in your Airtable
+        "Usage_ID": usage_id,
+        "Quantity": quantity,
+        "Unit": unit,
+        "Billable": bool(status == "success" and quantity > 0),
+        "Period_Key": period_key,
+        "Workspace_ID_Text": workspace_id,
+        "User_ID_Text": str(
+            (input_obj or {}).get("user_id")
+            or (input_obj or {}).get("userId")
+            or (input_obj or {}).get("owner_user_id")
+            or ""
+        ).strip(),
     }
+
+    # Nettoyage valeurs None
+    cleaned: Dict[str, Any] = {}
+    for key, value in fields.items():
+        if value is None:
+            continue
+        cleaned[key] = value
+
+    return cleaned
 
 
 def _usage_ledger_write_best_effort(
