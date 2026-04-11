@@ -4100,7 +4100,13 @@ def _ensure_workspace_usage_period_current(
             "reason": "workspace_not_found",
         }
 
-    row = unwrapped.get("fields", {}) or {}
+    # IMPORTANT:
+    # selon la forme renvoyée par _unwrap_airtable_record, on peut avoir :
+    # - un record aplati
+    # - ou un record avec .fields
+    row = unwrapped.get("fields", {}) if isinstance(unwrapped, dict) and isinstance(unwrapped.get("fields"), dict) else unwrapped
+    row = row or {}
+
     period_info = _workspace_usage_period_fields(row)
     needs_reset = _workspace_usage_needs_reset(row)
 
