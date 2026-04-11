@@ -398,7 +398,7 @@ WORKSPACE_API_KEYS_RAW = os.getenv("BOSAI_WORKSPACE_API_KEYS", "").strip()
 WORKSPACE_API_KEY_HEADER = "x-bosai-key"
 
 WORKSPACES_TABLE_NAME = os.getenv("WORKSPACES_TABLE_NAME", "Workspaces").strip()
-USAGE_LEDGER_TABLE_NAME = os.getenv("USAGE_LEDGER_TABLE_NAME", "Usage_Ledger").strip()
+USAGE_LEDGER_TABLE_NAME = os.getenv("USAGE_LEDGER_TABLE_NAME", "Usage_Ledger").strip() or "Usage_Ledger"
 WORKSPACES_VIEW_NAME = os.getenv("WORKSPACES_VIEW_NAME", "Grid view").strip()
 
 USERS_TABLE_NAME = os.getenv("USERS_TABLE_NAME", "Users").strip()
