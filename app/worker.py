@@ -10862,7 +10862,61 @@ CAPABILITIES = {
     "send_lead_email": capability_send_lead_email,
 
 }
-  
+
+# ============================================================
+# Workspaces listing helpers
+# ============================================================
+
+def _list_workspace_records_best_effort(
+    *,
+    max_records: int = 50,
+    view_name: str = "",
+) -> Dict[str, Any]:
+    try:
+        if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
+            return {
+                "ok": False,
+                "records": [],
+                "error": "missing_airtable_env",
+            }
+
+        params: Dict[str, Any] = {
+            "maxRecords": max(1, min(int(max_records or 50), 100)),
+        }
+
+        resolved_view = str(view_name or "").strip()
+        if resolved_view:
+            params["view"] = resolved_view
+
+        response = requests.get(
+            _airtable_url(WORKSPACES_TABLE_NAME),
+            headers={
+                "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+                "Accept": "application/json",
+            },
+            params=params,
+            timeout=20,
+        )
+        response.raise_for_status()
+
+        payload = response.json()
+        records = payload.get("records", []) or []
+
+        return {
+            "ok": True,
+            "records": records,
+            "view": resolved_view,
+            "count": len(records),
+        }
+
+    except Exception as e:
+        return {
+            "ok": False,
+            "records": [],
+            "error": repr(e),
+            "view": str(view_name or "").strip(),
+        }
+        
 # ============================================================
 # Root / health
 # ============================================================
@@ -11585,6 +11639,99 @@ def get_sla(limit: int = 50) -> Dict[str, Any]:
         "count": len(incidents),
         "stats": stats,
         "incidents": incidents,
+        "ts": utc_now_iso(),
+    }
+
+@app.get("/workspaces")
+def get_workspaces(
+    request: Request,
+    limit: int = 50,
+    view: str = "",
+) -> Dict[str, Any]:
+    headers_lc = {k.lower(): v for k, v in request.headers.items()}
+
+    workspace_record = resolve_workspace_from_headers(headers_lc)
+    if not workspace_record:
+        verify_request_auth_or_401(b"", headers_lc)
+
+    listed = _list_workspace_records_best_effort(
+        max_records=limit,
+        view_name=view,
+    )
+
+    if not listed.get("ok"):
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "workspaces_list_failed",
+                "source": listed,
+            },
+        )
+
+    items: List[Dict[str, Any]] = []
+
+    for record in listed.get("records", []):
+        fields = record.get("fields", {}) or {}
+
+        workspace_id = _normalize_workspace_id(
+            fields.get("Workspace_ID")
+            or fields.get("workspace_id")
+            or fields.get("Workspace")
+            or ""
+        )
+
+        if not workspace_id:
+            continue
+
+        snapshot = _workspace_usage_snapshot(
+            workspace_id=workspace_id,
+            capability="",
+            input_obj={},
+            project_requested_run=False,
+        )
+
+        plan_meta = _resolve_workspace_plan_metadata(fields)
+
+        items.append(
+            {
+                "record_id": str(record.get("id") or ""),
+                "workspace_id": workspace_id,
+                "name": _workspace_limit_text(fields, "Name"),
+                "slug": _workspace_limit_text(fields, "Slug"),
+                "type": _workspace_limit_text(fields, "Type"),
+                "plan_id": plan_meta.get("plan_id", ""),
+                "plan_code": plan_meta.get("plan_code", ""),
+                "plan_label": plan_meta.get("plan_label", ""),
+                "status": _workspace_limit_text(fields, "Status_select", "Status", "status"),
+                "is_active": _workspace_is_active_record(fields),
+                "last_usage_reset_at": snapshot.get("last_usage_reset_at", ""),
+                "current_usage_period_key": snapshot.get("current_usage_period_key", ""),
+                "usage": snapshot.get("usage", {}),
+                "limits": snapshot.get("limits", {}),
+                "blocked": snapshot.get("blocked", False),
+                "block_reason": snapshot.get("block_reason", ""),
+                "warnings": snapshot.get("warnings", []),
+                "usage_period_reset": snapshot.get("usage_period_reset", {}),
+            }
+        )
+
+    items.sort(
+        key=lambda x: (
+            str(x.get("status") or ""),
+            str(x.get("name") or ""),
+            str(x.get("workspace_id") or ""),
+        )
+    )
+
+    return {
+        "ok": True,
+        "count": len(items),
+        "items": items,
+        "source": {
+            "table": WORKSPACES_TABLE_NAME,
+            "view": str(view or "").strip(),
+            "limit": max(1, min(int(limit or 50), 100)),
+        },
         "ts": utc_now_iso(),
     }
     
