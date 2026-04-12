@@ -296,7 +296,11 @@ def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         step_index = 0
 
-    raw_depth = normalized.get("_depth") if normalized.get("_depth") is not None else normalized.get("depth")
+    raw_depth = (
+        normalized.get("_depth")
+        if normalized.get("_depth") is not None
+        else normalized.get("depth")
+    )
     depth = _to_int(raw_depth, 0)
 
     if flow_id:
@@ -1011,9 +1015,6 @@ def _build_incident_fields_candidates(
 
     payload_json = _safe_json(incident_record_payload)
 
-    linked_run = [run_record_id] if run_record_id.startswith("rec") else []
-    linked_command = [parent_command_id] if parent_command_id.startswith("rec") else []
-
     minimal = {
         "Name": _build_incident_name(incident_record_payload),
         "Status_select": "Open",
@@ -1037,18 +1038,7 @@ def _build_incident_fields_candidates(
         "Created_By_Capability": "incident_create",
     }
 
-    if linked_run:
-        rich["Linked_Run"] = linked_run
-    if linked_command:
-        rich["Linked_Command"] = linked_command
-
     candidates: List[Dict[str, Any]] = [dict(rich)]
-
-    if "Linked_Run" in rich or "Linked_Command" in rich:
-        no_links = dict(rich)
-        no_links.pop("Linked_Run", None)
-        no_links.pop("Linked_Command", None)
-        candidates.append(no_links)
 
     mid = dict(minimal)
     if flow_id:
@@ -1212,10 +1202,8 @@ def run(
     parent_command_id = _pick_text(meta.get("parent_command_id"), current_command_id)
     current_step_index = _to_int(meta.get("step_index"), 0)
 
-    # Seed depuis le payload entrant
     seed_decision_block = _normalize_decision_block(data)
 
-    # Canonicalisation d’abord
     incident_payload = _canonical_incident_context(
         data=data,
         meta=meta,
@@ -1226,7 +1214,6 @@ def run(
         incident_record_id="",
     )
 
-    # Recompute défensif sur le contexte canonique enrichi
     canonical_decision_block = _recompute_decision_from_canonical(incident_payload)
 
     explicit_decision_present = bool(
@@ -1242,7 +1229,6 @@ def run(
 
     decision_block = seed_decision_block if explicit_decision_present else canonical_decision_block
 
-    # Promotion sécurisée si le seed est trop faible mais le canonique voit un cas sévère
     if (
         decision_block.get("next_action") in {"", "complete_flow_incident"}
         and canonical_decision_block.get("next_action") in {"internal_escalate", "resolve_incident"}
