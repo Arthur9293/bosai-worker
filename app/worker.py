@@ -12878,6 +12878,48 @@ PLAN_CAPABILITY_MATRIX: Dict[str, set[str]] = {
         "complete_flow_incident",
         "decision_router",
     },
+
+    # PLAN DE TEST INTERNE
+    "plan_internal_test": {
+        "health_tick",
+        "commands_tick",
+        "escalation_engine",
+        "internal_escalate",
+        "http_exec",
+        "state_get",
+        "state_put",
+        "flow_state_get",
+        "flow_state_put",
+        "flow_state_append_step",
+        "lock_acquire",
+        "lock_release",
+        "retry_queue",
+        "lock_recovery",
+        "command_orchestrator",
+        "event_engine",
+        "chain_demo",
+        "planner_demo",
+        "lead_machine_demo",
+        "decision_demo",
+        "decision_router",
+        "complete_flow",
+        "complete_flow_demo",
+        "sla_router",
+        "retry_router",
+        "incident_router",
+        "incident_router_v2",
+        "incident_create",
+        "complete_flow_incident",
+        "incident_deduplicate",
+        "incident_update",
+        "resolve_incident",
+        "close_incident",
+        "smart_resolve",
+        "planner_monitoring",
+        "decision_monitoring",
+        "lead_decision",
+        "send_lead_email",
+    },
 }
 
 PLAN_KEY_ALIASES: Dict[str, str] = {
@@ -12892,8 +12934,11 @@ PLAN_KEY_ALIASES: Dict[str, str] = {
 
     "orchestrate": "orchestrate",
     "plan_orchestrate": "orchestrate",
-}
 
+    # TEST INTERNE
+    "internal_test": "plan_internal_test",
+    "plan_internal_test": "plan_internal_test",
+}
 
 def _normalize_plan_key_value(value: Any) -> str:
     text = str(value or "").strip().lower()
