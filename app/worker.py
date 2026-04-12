@@ -7257,111 +7257,110 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             ),
         )
 
-def _normalize_command_context(
-    *,
-    command_id: str,
-    fields: Dict[str, Any],
-    cmd_input: Dict[str, Any],
-    fallback_workspace: str = "production",
-    fallback_run_record_id: str = "",
-) -> Dict[str, str]:
-    flow_id = _pick(
-        cmd_input.get("flow_id"),
-        cmd_input.get("flowid"),
-        cmd_input.get("flowId"),
-        fields.get("Flow_ID"),
-        fields.get("flow_id"),
-        fields.get("flowid"),
-    )
+    def _normalize_command_context(
+        *,
+        command_id: str,
+        fields: Dict[str, Any],
+        cmd_input: Dict[str, Any],
+        fallback_workspace: str = "production",
+        fallback_run_record_id: str = "",
+    ) -> Dict[str, str]:
+        flow_id = _pick(
+            cmd_input.get("flow_id"),
+            cmd_input.get("flowid"),
+            cmd_input.get("flowId"),
+            fields.get("Flow_ID"),
+            fields.get("flow_id"),
+            fields.get("flowid"),
+        )
 
-    root_event_id = _pick(
-        cmd_input.get("root_event_id"),
-        cmd_input.get("rooteventid"),
-        cmd_input.get("rootEventId"),
-        fields.get("Root_Event_ID"),
-        fields.get("root_event_id"),
-        fields.get("rooteventid"),
-        cmd_input.get("event_id"),
-        cmd_input.get("eventid"),
-        cmd_input.get("eventId"),
-    )
+        root_event_id = _pick(
+            cmd_input.get("root_event_id"),
+            cmd_input.get("rooteventid"),
+            cmd_input.get("rootEventId"),
+            fields.get("Root_Event_ID"),
+            fields.get("root_event_id"),
+            fields.get("rooteventid"),
+            cmd_input.get("event_id"),
+            cmd_input.get("eventid"),
+            cmd_input.get("eventId"),
+        )
 
-    source_event_id = _pick(
-        cmd_input.get("source_event_id"),
-        cmd_input.get("sourceeventid"),
-        cmd_input.get("sourceEventId"),
-        fields.get("Source_Event_ID"),
-        fields.get("source_event_id"),
-        fields.get("sourceeventid"),
-        cmd_input.get("event_id"),
-        cmd_input.get("eventid"),
-        cmd_input.get("eventId"),
-        root_event_id,
-        flow_id,
-    )
+        source_event_id = _pick(
+            cmd_input.get("source_event_id"),
+            cmd_input.get("sourceeventid"),
+            cmd_input.get("sourceEventId"),
+            fields.get("Source_Event_ID"),
+            fields.get("source_event_id"),
+            fields.get("sourceeventid"),
+            cmd_input.get("event_id"),
+            cmd_input.get("eventid"),
+            cmd_input.get("eventId"),
+            root_event_id,
+            flow_id,
+        )
 
-    workspace_id = _pick(
-        cmd_input.get("workspace_id"),
-        cmd_input.get("workspaceid"),
-        cmd_input.get("workspaceId"),
-        cmd_input.get("workspace"),
-        fields.get("Workspace_ID"),
-        fields.get("workspace_id"),
-        fields.get("workspaceid"),
-        fallback_workspace,
-        "production",
-    )
+        workspace_id = _pick(
+            cmd_input.get("workspace_id"),
+            cmd_input.get("workspaceid"),
+            cmd_input.get("workspaceId"),
+            cmd_input.get("workspace"),
+            fields.get("Workspace_ID"),
+            fields.get("workspace_id"),
+            fields.get("workspaceid"),
+            fallback_workspace,
+            "production",
+        )
 
-    linked_run = _pick(
-        cmd_input.get("linked_run"),
-        cmd_input.get("linkedrun"),
-        cmd_input.get("run_record_id"),
-        cmd_input.get("runrecordid"),
-        cmd_input.get("runRecordId"),
-        fields.get("Linked_Run"),
-        fields.get("Run_Record_ID"),
-        fields.get("run_record_id"),
-        fallback_run_record_id,
-    )
+        linked_run = _pick(
+            cmd_input.get("linked_run"),
+            cmd_input.get("linkedrun"),
+            cmd_input.get("run_record_id"),
+            cmd_input.get("runrecordid"),
+            cmd_input.get("runRecordId"),
+            fields.get("Linked_Run"),
+            fields.get("Run_Record_ID"),
+            fields.get("run_record_id"),
+            fallback_run_record_id,
+        )
 
-    parent_command_id = _pick(
-        cmd_input.get("parent_command_id"),
-        cmd_input.get("parentcommandid"),
-        cmd_input.get("parentCommandId"),
-        fields.get("Parent_Command_ID"),
-        fields.get("parent_command_id"),
-        fields.get("parentcommandid"),
-    )
+        parent_command_id = _pick(
+            cmd_input.get("parent_command_id"),
+            cmd_input.get("parentcommandid"),
+            cmd_input.get("parentCommandId"),
+            fields.get("Parent_Command_ID"),
+            fields.get("parent_command_id"),
+            fields.get("parentcommandid"),
+        )
 
-    current_command_id = _pick(
-        command_id,
-        cmd_input.get("command_id"),
-        cmd_input.get("commandid"),
-        cmd_input.get("commandId"),
-        fields.get("Command_ID"),
-        fields.get("command_id"),
-        fields.get("commandid"),
-    )
+        current_command_id = _pick(
+            command_id,
+            cmd_input.get("command_id"),
+            cmd_input.get("commandid"),
+            cmd_input.get("commandId"),
+            fields.get("Command_ID"),
+            fields.get("command_id"),
+            fields.get("commandid"),
+        )
 
-    if not flow_id and root_event_id:
-        flow_id = root_event_id
-    if not root_event_id and flow_id:
-        root_event_id = flow_id
-    if not source_event_id:
-        source_event_id = root_event_id or flow_id
+        if not flow_id and root_event_id:
+            flow_id = root_event_id
+        if not root_event_id and flow_id:
+            root_event_id = flow_id
+        if not source_event_id:
+            source_event_id = root_event_id or flow_id
 
-    return {
-        "flow_id": flow_id or "",
-        "root_event_id": root_event_id or "",
-        "source_event_id": source_event_id or "",
-        "event_id": source_event_id or root_event_id or flow_id or "",
-        "workspace_id": workspace_id or "production",
-        "run_record_id": linked_run or fallback_run_record_id or "",
-        "linked_run": linked_run or fallback_run_record_id or "",
-        "parent_command_id": parent_command_id or "",
-        "command_id": current_command_id or command_id or "",
-    }
-
+        return {
+            "flow_id": flow_id or "",
+            "root_event_id": root_event_id or "",
+            "source_event_id": source_event_id or "",
+            "event_id": source_event_id or root_event_id or flow_id or "",
+            "workspace_id": workspace_id or "production",
+            "run_record_id": linked_run or fallback_run_record_id or "",
+            "linked_run": linked_run or fallback_run_record_id or "",
+            "parent_command_id": parent_command_id or "",
+            "command_id": current_command_id or command_id or "",
+        }
     def _inject_context_into_input(
         input_obj: Dict[str, Any],
         ctx: Dict[str, str],
