@@ -6636,6 +6636,12 @@ def _command_mark_done_best_effort(command_id: str, run_record_id: str, result_o
                 "Status_select": "Done",
                 "Finished_At": now,
                 "Result_JSON": result_json,
+                "Linked_Run": [run_record_id],
+            },
+            {
+                "Status_select": "Done",
+                "Finished_At": now,
+                "Result_JSON": result_json,
             },
         ],
     )
