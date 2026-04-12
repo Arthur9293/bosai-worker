@@ -6387,47 +6387,111 @@ def _claim_command_for_worker(command_id: str, worker_name: str, run_record_id: 
     lock_token = _new_lock_token()
     expires_at = _utc_plus_minutes_iso(ttl_min)
 
-    update_res = _airtable_update_best_effort(
+    # ------------------------------------------------------------
+    # 1) CLAIM MINIMAL OBLIGATOIRE
+    #    On ne met QUE les champs strictement nécessaires au lock.
+    #    Pas de Linked_Run ici. Pas d'Idempotency_Key ici.
+    # ------------------------------------------------------------
+    claim_res = _airtable_update_best_effort(
         COMMANDS_TABLE_NAME,
         command_id,
         [
             {
                 "Status_select": "Running",
-                "Idempotency_Key": idem,
-                "Linked_Run": [run_record_id],
-                "Started_At": now,
                 "Is_Locked": True,
-                "Locked_At": now,
                 "Locked_By": worker_name,
                 "Lock_Token": lock_token,
-                "Lock_TTL_Min": ttl_min,
                 "Lock_Expires_At": expires_at,
-                "Last_Heartbeat_At": now,
-            }
+            },
+            {
+                "Status_select": "Running",
+                "Is_Locked": True,
+                "Locked_By": worker_name,
+                "Lock_Token": lock_token,
+            },
+            {
+                "Status_select": "Running",
+                "Locked_By": worker_name,
+                "Lock_Token": lock_token,
+            },
         ],
     )
 
-    if not update_res.get("ok"):
-        return {"ok": False, "reason": "update_failed", "error": update_res.get("error")}
+    if not claim_res.get("ok"):
+        return {
+            "ok": False,
+            "reason": "update_failed",
+            "error": claim_res.get("error"),
+        }
 
+    # ------------------------------------------------------------
+    # 2) REFRESH IMMÉDIAT POUR VÉRIFIER LA PROPRIÉTÉ DU LOCK
+    # ------------------------------------------------------------
     try:
         rec = airtable_get_record(COMMANDS_TABLE_NAME, command_id)
         fields = rec.get("fields", {}) or {}
 
-        if (
-            str(fields.get("Locked_By") or "").strip() == worker_name
-            and str(fields.get("Lock_Token") or "").strip() == lock_token
-            and _read_command_status(fields) == "Running"
-        ):
+        locked_by_ok = str(fields.get("Locked_By") or "").strip() == str(worker_name or "").strip()
+        lock_token_ok = str(fields.get("Lock_Token") or "").strip() == str(lock_token or "").strip()
+        status_ok = _read_command_status(fields) == "Running"
+
+        if not (locked_by_ok and lock_token_ok and status_ok):
             return {
-                "ok": True,
-                "lock_token": lock_token,
-                "record_id": command_id,
+                "ok": False,
+                "reason": "lock_not_owned_after_refresh",
+                "debug": {
+                    "expected_worker": worker_name,
+                    "actual_locked_by": fields.get("Locked_By"),
+                    "expected_lock_token": lock_token,
+                    "actual_lock_token": fields.get("Lock_Token"),
+                    "actual_status": _read_command_status(fields),
+                },
             }
 
-        return {"ok": False, "reason": "lock_not_owned_after_refresh"}
     except Exception as e:
-        return {"ok": False, "reason": "refresh_failed", "error": repr(e)}
+        return {
+            "ok": False,
+            "reason": "refresh_failed",
+            "error": repr(e),
+        }
+
+    # ------------------------------------------------------------
+    # 3) ENRICHISSEMENT NON BLOQUANT
+    #    Si ça échoue, on garde quand même le claim réussi.
+    # ------------------------------------------------------------
+    try:
+        _airtable_update_best_effort(
+            COMMANDS_TABLE_NAME,
+            command_id,
+            [
+                {
+                    "Started_At": now,
+                    "Locked_At": now,
+                    "Last_Heartbeat_At": now,
+                    "Lock_TTL_Min": ttl_min,
+                },
+                {
+                    "Started_At": now,
+                    "Locked_At": now,
+                    "Last_Heartbeat_At": now,
+                },
+                {
+                    "Started_At": now,
+                    "Locked_At": now,
+                },
+                {
+                    "Last_Heartbeat_At": now,
+                },
+            ],
+        )
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "lock_token": lock_token,
+        "record_id": command_id,
+    }
 
 def _worker_still_owns_lock(command_id: str, worker_name: str, lock_token: str) -> bool:
     try:
