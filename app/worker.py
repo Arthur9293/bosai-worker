@@ -10,6 +10,8 @@ import time
 import traceback
 import uuid
 import smtplib
+import requests
+
 
 print("WORKER_MAIN_FILE_MARKER")
 
@@ -19,10 +21,9 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote
 
-import requests
 from fastapi import FastAPI, HTTPException, Request, Response, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -12978,7 +12979,137 @@ def _workspace_plan_gate_info(row: Dict[str, Any]) -> Dict[str, Any]:
         "allowed_capabilities": allowed_capabilities,
     }
 
+ALL_KNOWN_CAPABILITIES: Set[str] = {
+    "health_tick",
+    "commands_tick",
+    "escalation_engine",
+    "internal_escalate",
+    "http_exec",
+    "state_get",
+    "state_put",
+    "flow_state_get",
+    "flow_state_put",
+    "flow_state_append_step",
+    "lock_acquire",
+    "lock_release",
+    "retry_queue",
+    "lock_recovery",
+    "command_orchestrator",
+    "event_engine",
+    "chain_demo",
+    "planner_demo",
+    "lead_machine_demo",
+    "decision_demo",
+    "decision_router",
+    "complete_flow",
+    "complete_flow_demo",
+    "sla_router",
+    "retry_router",
+    "incident_router",
+    "incident_router_v2",
+    "incident_create",
+    "complete_flow_incident",
+    "incident_deduplicate",
+    "incident_update",
+    "resolve_incident",
+    "close_incident",
+    "smart_resolve",
+    "planner_monitoring",
+    "decision_monitoring",
+    "lead_decision",
+    "send_lead_email",
+}
 
+
+def _clean_capability_list(values: Any) -> List[str]:
+    out: List[str] = []
+
+    if isinstance(values, list):
+        for item in values:
+            text = str(item or "").strip()
+            if text and text not in out:
+                out.append(text)
+        return out
+
+    if isinstance(values, str):
+        text = values.strip()
+        if not text:
+            return []
+
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return _clean_capability_list(parsed)
+        except Exception:
+            pass
+
+        # fallback CSV / line-based
+        chunks = []
+        for part in text.replace("\n", ",").split(","):
+            piece = str(part or "").strip().strip('"').strip("'")
+            if piece and piece not in chunks:
+                chunks.append(piece)
+        return chunks
+
+    return []
+
+
+def _parse_allowed_capabilities_from_plan_fields(plan_fields: Dict[str, Any]) -> List[str]:
+    if not isinstance(plan_fields, dict):
+        return []
+
+    # 1) direct field
+    direct = _clean_capability_list(plan_fields.get("Allowed_Capabilities"))
+    if direct:
+        if any(x.lower() in {"*", "all", "__all__"} for x in direct):
+            return sorted(ALL_KNOWN_CAPABILITIES)
+        return direct
+
+    # 2) features json field
+    features_raw = plan_fields.get("Features_JSON")
+
+    if isinstance(features_raw, dict):
+        nested = _clean_capability_list(features_raw.get("allowed_capabilities"))
+        if nested:
+            if any(x.lower() in {"*", "all", "__all__"} for x in nested):
+                return sorted(ALL_KNOWN_CAPABILITIES)
+            return nested
+
+    if isinstance(features_raw, str) and features_raw.strip():
+        try:
+            parsed = json.loads(features_raw)
+            if isinstance(parsed, dict):
+                nested = _clean_capability_list(parsed.get("allowed_capabilities"))
+                if nested:
+                    if any(x.lower() in {"*", "all", "__all__"} for x in nested):
+                        return sorted(ALL_KNOWN_CAPABILITIES)
+                    return nested
+        except Exception:
+            pass
+
+    return []
+
+
+def _resolve_allowed_capabilities_for_plan(
+    plan_info: Dict[str, Any],
+) -> List[str]:
+    plan_record = plan_info.get("plan_record")
+    plan_fields = {}
+
+    if isinstance(plan_record, dict):
+        if isinstance(plan_record.get("fields"), dict):
+            plan_fields = plan_record.get("fields", {}) or {}
+        else:
+            plan_fields = plan_record or {}
+
+    allowed_from_airtable = _parse_allowed_capabilities_from_plan_fields(plan_fields)
+    if allowed_from_airtable:
+        return allowed_from_airtable
+
+    resolved_plan_key = str(plan_info.get("resolved_plan_key") or "").strip()
+    fallback_set = PLAN_CAPABILITY_MATRIX.get(resolved_plan_key, set())
+    return sorted(str(x).strip() for x in fallback_set if str(x).strip())
+    
 def _is_capability_allowed_for_workspace(
     workspace_id: str,
     capability_name: str,
@@ -13008,7 +13139,11 @@ def _is_capability_allowed_for_workspace(
 
     plan_info = _workspace_plan_gate_info(row)
     resolved_plan_key = str(plan_info.get("resolved_plan_key") or "").strip()
+
     allowed_set = PLAN_CAPABILITY_MATRIX.get(resolved_plan_key, set())
+    allowed_capabilities = sorted(
+        str(x).strip() for x in allowed_set if str(x).strip()
+    )
 
     normalized_capability = str(capability_name or "").strip()
 
@@ -13020,6 +13155,7 @@ def _is_capability_allowed_for_workspace(
             "allowed": False,
             "reason": "capability_missing",
             **plan_info,
+            "allowed_capabilities": allowed_capabilities,
         }
 
     allowed = normalized_capability in allowed_set
@@ -13032,6 +13168,7 @@ def _is_capability_allowed_for_workspace(
         "allowed": allowed,
         "reason": "" if allowed else "capability_not_allowed_for_plan",
         **plan_info,
+        "allowed_capabilities": allowed_capabilities,
     }
 
 # ============================================================
