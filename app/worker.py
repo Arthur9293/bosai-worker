@@ -3566,18 +3566,94 @@ def send_email_smtp(to_email: str, subject: str, body: str) -> dict:
 # ============================================================
 
 def _airtable_update_best_effort(table_name: str, record_id: str, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    attempts: List[Dict[str, Any]] = []
     last_err: Optional[str] = None
-    for fields in candidates:
+
+    for idx, fields in enumerate(candidates, start=1):
         if not fields:
             continue
+
         try:
+            print(
+                "[airtable_update_best_effort] try",
+                {
+                    "table": table_name,
+                    "record_id": record_id,
+                    "candidate_index": idx,
+                    "field_keys": list(fields.keys()),
+                },
+                flush=True,
+            )
+
             airtable_update(table_name, record_id, fields)
-            return {"ok": True, "applied_fields": list(fields.keys())}
+
+            print(
+                "[airtable_update_best_effort] success",
+                {
+                    "table": table_name,
+                    "record_id": record_id,
+                    "candidate_index": idx,
+                    "field_keys": list(fields.keys()),
+                },
+                flush=True,
+            )
+
+            return {
+                "ok": True,
+                "candidate_index": idx,
+                "applied_fields": list(fields.keys()),
+                "attempts": attempts,
+            }
+
         except HTTPException as e:
             last_err = str(e.detail)
+            attempts.append(
+                {
+                    "candidate_index": idx,
+                    "field_keys": list(fields.keys()),
+                    "error": last_err,
+                    "error_type": "HTTPException",
+                }
+            )
+            print(
+                "[airtable_update_best_effort] http_error",
+                {
+                    "table": table_name,
+                    "record_id": record_id,
+                    "candidate_index": idx,
+                    "field_keys": list(fields.keys()),
+                    "error": last_err,
+                },
+                flush=True,
+            )
+
         except Exception as e:
             last_err = repr(e)
-    return {"ok": False, "error": last_err or "update_failed"}
+            attempts.append(
+                {
+                    "candidate_index": idx,
+                    "field_keys": list(fields.keys()),
+                    "error": last_err,
+                    "error_type": type(e).__name__,
+                }
+            )
+            print(
+                "[airtable_update_best_effort] error",
+                {
+                    "table": table_name,
+                    "record_id": record_id,
+                    "candidate_index": idx,
+                    "field_keys": list(fields.keys()),
+                    "error": last_err,
+                },
+                flush=True,
+            )
+
+    return {
+        "ok": False,
+        "error": last_err or "update_failed",
+        "attempts": attempts,
+    }
 
 
 def _airtable_create_best_effort(table_name: str, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
