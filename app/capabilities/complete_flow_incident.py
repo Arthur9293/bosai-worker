@@ -5,6 +5,9 @@ import time
 from typing import Any, Dict, List, Optional
 
 
+DEFAULT_MAX_DEPTH = 8
+
+
 def _now_ts() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -104,7 +107,23 @@ def _pick_text(*values: Any) -> str:
             continue
 
         if isinstance(value, dict):
-            for key in ("id", "record_id", "incident_record_id", "name", "value", "text"):
+            for key in (
+                "id",
+                "record_id",
+                "incident_record_id",
+                "name",
+                "value",
+                "text",
+                "flow_id",
+                "root_event_id",
+                "source_event_id",
+                "event_id",
+                "workspace_id",
+                "run_record_id",
+                "linked_run",
+                "command_id",
+                "parent_command_id",
+            ):
                 if key in value:
                     text = _pick_text(value.get(key))
                     if text:
@@ -123,13 +142,6 @@ def _pick_value(*values: Any) -> Any:
         if not _is_empty(value):
             return value
     return None
-
-
-def _pick_dict(*values: Any) -> Dict[str, Any]:
-    for value in values:
-        if isinstance(value, dict) and value:
-            return dict(value)
-    return {}
 
 
 def _merge_missing(target: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, Any]:
@@ -398,6 +410,30 @@ def run(
     payload = _normalize_payload(payload)
     search_dicts = _extract_search_dicts(payload)
 
+    current_depth = _to_int(
+        _pick_value_from_dicts(search_dicts, "_depth", "depth"),
+        0,
+    )
+
+    if current_depth >= DEFAULT_MAX_DEPTH:
+        return {
+            "ok": False,
+            "capability": "complete_flow_incident",
+            "error": "max_depth_reached",
+            "flow_id": _pick_text_from_dicts(search_dicts, "flow_id", default=""),
+            "root_event_id": _pick_text_from_dicts(search_dicts, "root_event_id", default=""),
+            "source_event_id": _pick_text_from_dicts(search_dicts, "source_event_id", default=""),
+            "incident_record_id": _pick_text_from_dicts(search_dicts, "incident_record_id", default=""),
+            "run_record_id": _pick_text_from_dicts(search_dicts, "run_record_id", "linked_run", default=run_record_id),
+            "terminal": True,
+            "spawn_summary": {
+                "ok": True,
+                "spawned": 0,
+                "skipped": 0,
+                "errors": [],
+            },
+        }
+
     flow_id = _pick_text_from_dicts(search_dicts, "flow_id", default="")
     root_event_id = _pick_text_from_dicts(search_dicts, "root_event_id", default=flow_id)
     source_event_id = _pick_text_from_dicts(
@@ -411,6 +447,8 @@ def run(
         "workspace",
         default="production",
     )
+    tenant_id = _pick_text_from_dicts(search_dicts, "tenant_id", "tenantId", default="")
+    app_name = _pick_text_from_dicts(search_dicts, "app_name", "appName", default="")
 
     incoming_run_record_id = _pick_text_from_dicts(search_dicts, "run_record_id", default="")
     linked_run = _pick_text_from_dicts(
@@ -463,10 +501,17 @@ def run(
     original_capability = _pick_text_from_dicts(search_dicts, "original_capability", default="")
     failed_capability = _pick_text_from_dicts(search_dicts, "failed_capability", default="")
     target_capability = _pick_text_from_dicts(search_dicts, "target_capability", default="")
-    failed_url = _pick_text_from_dicts(search_dicts, "failed_url", "target_url", "url", default="")
+    failed_url = _pick_text_from_dicts(search_dicts, "failed_url", "target_url", "url", "http_target", default="")
     failed_method = _pick_text_from_dicts(search_dicts, "failed_method", "method", default="")
     incident_code = _pick_text_from_dicts(search_dicts, "incident_code", default="")
     error_message = _pick_text_from_dicts(search_dicts, "error_message", "error", default="")
+    incident_message = _pick_text_from_dicts(
+        search_dicts,
+        "incident_message",
+        "error_message",
+        "error",
+        default=error_message,
+    )
 
     http_status_value = _pick_value_from_dicts(search_dicts, "http_status", "status_code")
     http_status: Optional[int]
@@ -474,6 +519,8 @@ def run(
         http_status = int(http_status_value) if http_status_value not in (None, "") else None
     except Exception:
         http_status = None
+
+    status_code = http_status
 
     final_failure = _to_bool(
         _pick_value_from_dicts(search_dicts, "final_failure", "finalfailure"),
@@ -493,10 +540,6 @@ def run(
         _pick_value_from_dicts(search_dicts, "step_index"),
         0,
     )
-    current_depth = _to_int(
-        _pick_value_from_dicts(search_dicts, "_depth"),
-        0,
-    )
 
     auto_resolve = False
     decision = _pick_text(payload.get("decision"), "keep_escalated")
@@ -509,6 +552,8 @@ def run(
         "event_id": source_event_id or root_event_id or flow_id,
         "workspace_id": workspace_id,
         "workspace": workspace_id,
+        "tenant_id": tenant_id,
+        "app_name": app_name,
         "run_record_id": effective_run_record_id,
         "linked_run": linked_run or effective_run_record_id,
         "incident_record_id": incident_record_id,
@@ -528,10 +573,16 @@ def run(
         "failed_capability": failed_capability,
         "target_capability": target_capability,
         "failed_url": failed_url,
+        "target_url": failed_url,
+        "url": failed_url,
+        "http_target": failed_url,
         "failed_method": failed_method,
+        "method": failed_method,
         "incident_code": incident_code,
         "error_message": error_message,
+        "incident_message": incident_message,
         "http_status": http_status,
+        "status_code": status_code,
         "retry_count": retry_count,
         "retry_max": retry_max,
         "final_failure": final_failure,
@@ -551,6 +602,7 @@ def run(
     return {
         "ok": True,
         "capability": "complete_flow_incident",
+        "status": "done",
         "flow_id": flow_id,
         "root_event_id": root_event_id,
         "source_event_id": source_event_id,
@@ -561,6 +613,8 @@ def run(
         "run_record_id": effective_run_record_id,
         "linked_run": linked_run or effective_run_record_id,
         "workspace_id": workspace_id,
+        "tenant_id": tenant_id,
+        "app_name": app_name,
         "command_id": command_id,
         "parent_command_id": parent_command_id,
         "decision": decision,
@@ -580,7 +634,9 @@ def run(
         "failed_method": failed_method,
         "incident_code": incident_code,
         "error_message": error_message,
+        "incident_message": incident_message,
         "http_status": http_status,
+        "status_code": status_code,
         "retry_count": retry_count,
         "retry_max": retry_max,
         "final_failure": final_failure,
