@@ -46,6 +46,22 @@ def _to_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def _json_load_maybe(value: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return value
+    if value is None:
+        return None
+
+    text = _to_str(value).strip()
+    if not text:
+        return None
+
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
+
 def _pick_text(*values: Any) -> str:
     for value in values:
         if value is None:
@@ -94,14 +110,20 @@ def _extract_input(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
 
-    for key in ("input", "event", "data", "command_input", "incident"):
-        nested = payload.get(key)
-        if isinstance(nested, dict):
-            merged = dict(payload)
-            merged.update(nested)
-            return merged
+    normalized = dict(payload)
 
-    return dict(payload)
+    for key in ("input", "event", "data", "command_input", "incident"):
+        nested = normalized.get(key)
+
+        if isinstance(nested, str):
+            nested = _json_load_maybe(nested)
+
+        if isinstance(nested, dict):
+            merged = dict(normalized)
+            merged.update(nested)
+            normalized = merged
+
+    return normalized
 
 
 def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -109,6 +131,8 @@ def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
         payload = {}
 
     original_input = payload.get("original_input")
+    if isinstance(original_input, str):
+        original_input = _json_load_maybe(original_input)
     if not isinstance(original_input, dict):
         original_input = {}
 
@@ -351,33 +375,11 @@ def _normalize_reason(data: Dict[str, Any]) -> str:
         0,
     )
 
-    retry_count = _to_int(
-        data.get("retry_count")
-        if data.get("retry_count") is not None
-        else data.get("retrycount"),
-        0,
-    )
-    retry_max = _to_int(
-        data.get("retry_max")
-        if data.get("retry_max") is not None
-        else data.get("retrymax"),
-        0,
-    )
-    final_failure = _to_bool(
-        data.get("final_failure")
-        if data.get("final_failure") is not None
-        else data.get("finalfailure"),
-        False,
-    )
-
-    if http_status >= 500 and (final_failure or retry_count >= retry_max):
-        return "http_5xx_exhausted"
-
-    if http_status >= 500:
-        return "http_status_error"
-
     if incident_code:
         return incident_code
+
+    if http_status >= 400:
+        return "http_status_error"
 
     return "incident_detected"
 
@@ -398,12 +400,7 @@ def _normalize_severity(data: Dict[str, Any]) -> str:
         else data.get("httpstatus"),
         0,
     )
-    final_failure = _to_bool(
-        data.get("final_failure")
-        if data.get("final_failure") is not None
-        else data.get("finalfailure"),
-        False,
-    )
+    final_failure = _resolve_final_failure(data)
 
     if http_status >= 500 and final_failure:
         return "high"
@@ -413,10 +410,42 @@ def _normalize_severity(data: Dict[str, Any]) -> str:
     return "medium"
 
 
+def _resolve_final_failure(data: Dict[str, Any]) -> bool:
+    if "final_failure" in data:
+        return _to_bool(data.get("final_failure"), False)
+    if "finalfailure" in data:
+        return _to_bool(data.get("finalfailure"), False)
+
+    retry_count = _to_int(
+        data.get("retry_count")
+        if data.get("retry_count") is not None
+        else data.get("retrycount"),
+        0,
+    )
+    retry_max = _to_int(
+        data.get("retry_max")
+        if data.get("retry_max") is not None
+        else data.get("retrymax"),
+        0,
+    )
+    http_status = _to_int(
+        data.get("http_status")
+        if data.get("http_status") is not None
+        else data.get("httpstatus"),
+        0,
+    )
+
+    if http_status >= 400 and retry_count >= retry_max:
+        return True
+
+    return False
+
+
 def _normalize_event(data: Dict[str, Any]) -> Dict[str, Any]:
     category = _normalize_category(data)
     reason = _normalize_reason(data)
-    severity = _normalize_severity(data)
+    final_failure = _resolve_final_failure(data)
+    severity = _normalize_severity({**data, "final_failure": final_failure})
 
     error_message = _to_str(
         data.get("error_message")
@@ -442,27 +471,29 @@ def _normalize_event(data: Dict[str, Any]) -> Dict[str, Any]:
         or "GET"
     ).strip().upper()
 
+    http_status = _to_int(
+        data.get("http_status")
+        if data.get("http_status") is not None
+        else data.get("httpstatus"),
+        0,
+    )
+
+    incident_code = _to_str(
+        data.get("incident_code")
+        or data.get("incidentcode")
+        or ""
+    ).strip().lower()
+
+    if not incident_code and http_status >= 400:
+        incident_code = "http_status_error"
+
     return {
         "category": category,
         "reason": reason,
         "severity": severity,
-        "http_status": _to_int(
-            data.get("http_status")
-            if data.get("http_status") is not None
-            else data.get("httpstatus"),
-            0,
-        ),
-        "final_failure": _to_bool(
-            data.get("final_failure")
-            if data.get("final_failure") is not None
-            else data.get("finalfailure"),
-            False,
-        ),
-        "incident_code": _to_str(
-            data.get("incident_code")
-            or data.get("incidentcode")
-            or ""
-        ).strip().lower(),
+        "http_status": http_status,
+        "final_failure": final_failure,
+        "incident_code": incident_code,
         "original_capability": _to_str(
             data.get("original_capability")
             or data.get("originalcapability")
@@ -536,6 +567,32 @@ def _route(normalized: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _build_incident_key(
+    *,
+    flow_id: str,
+    root_event_id: str,
+    failed_capability: str,
+    failed_method: str,
+    failed_url: str,
+    http_status: int,
+    incident_code: str,
+    reason: str,
+    final_failure: bool,
+) -> str:
+    parts = [
+        flow_id,
+        root_event_id,
+        failed_capability or "unknown_capability",
+        failed_method or "GET",
+        failed_url or "unknown_url",
+        str(http_status or 0),
+        incident_code or "no_code",
+        reason or "no_reason",
+        "final" if final_failure else "nonfinal",
+    ]
+    return "|".join(parts)
+
+
 def run(
     req: Optional[Any] = None,
     run_record_id: str = "",
@@ -590,6 +647,31 @@ def run(
     normalized = _normalize_event(data)
     routing = _route(normalized)
 
+    decision_status = ""
+    decision_reason = ""
+    next_action = ""
+    auto_executable = False
+    priority_score = 0
+
+    if routing["route"] == "incident":
+        decision_status = "Escalate"
+        decision_reason = "escalate_failure_or_severe_signal"
+        next_action = "internal_escalate"
+        auto_executable = True
+        priority_score = 80
+
+    incident_key = _build_incident_key(
+        flow_id=flow_id,
+        root_event_id=root_event_id,
+        failed_capability=normalized["failed_capability"] or normalized["original_capability"],
+        failed_method=normalized["failed_method"],
+        failed_url=normalized["failed_url"],
+        http_status=normalized["http_status"],
+        incident_code=normalized["incident_code"],
+        reason=normalized["reason"],
+        final_failure=normalized["final_failure"],
+    )
+
     next_commands = []
 
     next_input = {
@@ -607,7 +689,7 @@ def run(
         "_depth": depth + 1,
         "run_record_id": effective_run_record_id,
         "linked_run": effective_linked_run,
-        "parent_command_id": meta["parent_command_id"],
+        "parent_command_id": meta["command_id"] or meta["parent_command_id"],
         "command_id": meta["command_id"],
         "incident_record_id": normalized["incident_record_id"],
         "log_record_id": normalized["log_record_id"],
@@ -634,8 +716,14 @@ def run(
         "method": normalized["failed_method"],
         "retry_count": normalized["retry_count"],
         "retry_max": normalized["retry_max"],
-        "goal": _to_str(data.get("goal") or "incident_router_v2_test").strip(),
+        "goal": _to_str(data.get("goal") or "").strip(),
         "decision": _to_str(data.get("decision") or "").strip(),
+        "decision_status": decision_status,
+        "decision_reason": decision_reason,
+        "next_action": next_action,
+        "auto_executable": auto_executable,
+        "priority_score": priority_score,
+        "incident_key": incident_key,
     }
 
     if routing["route"] == "incident":
@@ -657,6 +745,8 @@ def run(
         "source_event_id": source_event_id,
         "run_record_id": effective_run_record_id,
         "linked_run": effective_linked_run,
+        "command_id": meta["command_id"],
+        "parent_command_id": meta["parent_command_id"],
         "route": routing["route"],
         "reason": routing["reason"],
         "normalized_category": normalized["category"],
@@ -664,8 +754,14 @@ def run(
         "normalized_severity": normalized["severity"],
         "normalized_http_status": normalized["http_status"],
         "final_failure": normalized["final_failure"],
+        "decision_status": decision_status,
+        "decision_reason": decision_reason,
+        "next_action": next_action,
+        "auto_executable": auto_executable,
+        "priority_score": priority_score,
+        "incident_key": incident_key,
         "next_commands": next_commands,
-        "terminal": False,
+        "terminal": len(next_commands) == 0,
         "spawn_summary": {
             "ok": True,
             "spawned": len(next_commands),
