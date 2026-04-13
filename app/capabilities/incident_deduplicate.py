@@ -24,23 +24,6 @@ ORCHESTRATION_CAPABILITIES = {
 }
 
 
-def _pick_capability(*values: Any, fallback: str = "") -> str:
-    first_non_empty = ""
-
-    for value in values:
-        text = _pick_text(value)
-        if not text:
-            continue
-
-        if not first_non_empty:
-            first_non_empty = text
-
-        if text not in ORCHESTRATION_CAPABILITIES:
-            return text
-
-    return fallback or first_non_empty
-
-
 def _now_ts() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -91,9 +74,7 @@ def _escape_airtable_formula_value(value: str) -> str:
 
 
 def _json_load_maybe(value: Any) -> Any:
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, list):
+    if isinstance(value, (dict, list)):
         return value
     if value is None:
         return None
@@ -129,14 +110,88 @@ def _json_load_maybe(value: Any) -> Any:
             if not inner:
                 continue
             try:
-                parsed2 = json.loads(inner)
-                return parsed2
+                return json.loads(inner)
             except Exception:
                 return parsed
 
         return parsed
 
     return None
+
+
+def _pick_text(*values: Any) -> str:
+    for value in values:
+        if value is None:
+            continue
+
+        if isinstance(value, list):
+            for item in value:
+                text = _pick_text(item)
+                if text:
+                    return text
+            continue
+
+        if isinstance(value, dict):
+            for key in (
+                "id",
+                "name",
+                "value",
+                "text",
+                "url",
+                "method",
+                "status_code",
+                "flow_id",
+                "root_event_id",
+                "source_event_id",
+                "event_id",
+                "workspace_id",
+                "run_record_id",
+                "linked_run",
+                "command_id",
+                "parent_command_id",
+            ):
+                if key in value:
+                    text = _pick_text(value.get(key))
+                    if text:
+                        return text
+            continue
+
+        text = _to_str(value).strip()
+        if text:
+            return text
+
+    return ""
+
+
+def _pick_int(*values: Any) -> Optional[int]:
+    for value in values:
+        if value is None or value == "":
+            continue
+        try:
+            return int(value)
+        except Exception:
+            try:
+                return int(str(value).strip())
+            except Exception:
+                continue
+    return None
+
+
+def _pick_capability(*values: Any, fallback: str = "") -> str:
+    first_non_empty = ""
+
+    for value in values:
+        text = _pick_text(value)
+        if not text:
+            continue
+
+        if not first_non_empty:
+            first_non_empty = text
+
+        if text not in ORCHESTRATION_CAPABILITIES:
+            return text
+
+    return fallback or first_non_empty
 
 
 def _normalize_keys_deep(value: Any) -> Any:
@@ -196,6 +251,27 @@ def _normalize_keys_deep(value: Any) -> Any:
         return [_normalize_keys_deep(item) for item in value]
 
     return value
+
+
+def _unwrap_command_payload(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+
+    current = dict(value)
+
+    for key in ("input", "command_input"):
+        nested = current.get(key)
+
+        if isinstance(nested, str):
+            nested = _json_load_maybe(nested)
+
+        if isinstance(nested, dict):
+            merged = dict(current)
+            merged.pop(key, None)
+            merged.update(nested)
+            current = merged
+
+    return current
 
 
 def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -305,7 +381,11 @@ def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         step_index = 0
 
-    raw_depth = normalized.get("_depth") if normalized.get("_depth") is not None else normalized.get("depth")
+    raw_depth = (
+        normalized.get("_depth")
+        if normalized.get("_depth") is not None
+        else normalized.get("depth")
+    )
     depth = _to_int(raw_depth, 0)
 
     if flow_id:
@@ -378,76 +458,24 @@ def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
-def _unwrap_command_payload(value: Any) -> Any:
-    if not isinstance(value, dict):
-        return value
-
-    current = dict(value)
-
-    for key in ("input", "command_input"):
-        nested = current.get(key)
-        if isinstance(nested, dict):
-            merged = dict(current)
-            merged.pop(key, None)
-            merged.update(nested)
-            current = merged
-
-    return current
-
-
-def _pick_text(*values: Any) -> str:
-    for value in values:
-        if value is None:
-            continue
-
-        if isinstance(value, list):
-            for item in value:
-                text = _pick_text(item)
-                if text:
-                    return text
-            continue
-
-        if isinstance(value, dict):
-            for key in ("id", "name", "value", "text", "url", "method", "status_code"):
-                if key in value:
-                    text = _pick_text(value.get(key))
-                    if text:
-                        return text
-            continue
-
-        text = _to_str(value).strip()
-        if text:
-            return text
-
-    return ""
-
-
-def _pick_int(*values: Any) -> Optional[int]:
-    for value in values:
-        if value is None or value == "":
-            continue
-        try:
-            return int(value)
-        except Exception:
-            try:
-                return int(str(value).strip())
-            except Exception:
-                continue
-    return None
-
-
 def _extract_input(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
 
-    for key in ("input", "command_input", "incident"):
-        nested = payload.get(key)
-        if isinstance(nested, dict):
-            merged = dict(payload)
-            merged.update(nested)
-            return merged
+    normalized = dict(payload)
 
-    return dict(payload)
+    for key in ("input", "command_input", "incident"):
+        nested = normalized.get(key)
+
+        if isinstance(nested, str):
+            nested = _json_load_maybe(nested)
+
+        if isinstance(nested, dict):
+            merged = dict(normalized)
+            merged.update(nested)
+            normalized = merged
+
+    return normalized
 
 
 def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -757,7 +785,6 @@ def _canonical_incident_context(
     next_depth: int,
     decision_block: Dict[str, Any],
 ) -> Dict[str, Any]:
-    # Garde-fou: on parse aussi les JSON sérialisés
     raw_original_input = _json_load_maybe(data.get("original_input"))
     original_input = raw_original_input if isinstance(raw_original_input, dict) else {}
     original_input = _normalize_keys_deep(original_input)
@@ -893,7 +920,6 @@ def _canonical_incident_context(
         "GET",
     ).upper()
 
-    # on préfère aussi original_input et response_obj pour ne pas perdre le 503
     http_status = _pick_int(
         data.get("http_status"),
         data.get("httpstatus"),
@@ -921,7 +947,6 @@ def _canonical_incident_context(
         "http_failure" if target_url else "",
     )
 
-    # ordre changé pour éviter "incident" si un signal plus précis existe déjà
     reason = _pick_text(
         data.get("retry_reason"),
         original_input.get("retry_reason"),
@@ -976,7 +1001,6 @@ def _canonical_incident_context(
         False,
     )
 
-    # si toujours faux mais signaux HTTP forts présents, on force
     if not normalized_final_failure:
         if (
             (http_status is not None and http_status >= 500)
@@ -1303,7 +1327,7 @@ def run(
             "terminal": True,
         }
 
-    # 1) on construit d’abord un contexte canonique SANS figer une mauvaise décision
+    # 1) Contexte canonique sans figer une mauvaise décision
     seed_decision_block = _empty_decision_block()
 
     canonical_for_key = _canonical_incident_context(
@@ -1315,10 +1339,10 @@ def run(
         decision_block=seed_decision_block,
     )
 
-    # 2) on recalcule la décision sur le contexte canonique enrichi
+    # 2) Recalcul défensif de la décision sur le contexte canonique enrichi
     decision_block = _recompute_decision_from_canonical(canonical_for_key)
 
-    # 3) on réinjecte la vraie décision dans le payload canonique
+    # 3) Réinjection de la vraie décision
     canonical_for_key = dict(canonical_for_key)
     canonical_for_key["decision_status"] = decision_block["decision_status"]
     canonical_for_key["decision_reason"] = decision_block["decision_reason"]
@@ -1416,7 +1440,7 @@ def run(
             "update_ok": bool(update_res.get("ok")),
             "update_res": update_res,
             "next_commands": next_commands,
-            "terminal": False,
+            "terminal": len(next_commands) == 0,
             "spawn_summary": {
                 "ok": True,
                 "spawned": len(next_commands),
@@ -1459,7 +1483,7 @@ def run(
         "auto_executable": decision_block["auto_executable"],
         "priority_score": decision_block["priority_score"],
         "next_commands": next_commands,
-        "terminal": False,
+        "terminal": len(next_commands) == 0,
         "spawn_summary": {
             "ok": True,
             "spawned": len(next_commands),
