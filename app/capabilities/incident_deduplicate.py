@@ -349,6 +349,7 @@ def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
     parent_command_id = str(
         normalized.get("parent_command_id")
         or normalized.get("parentcommandid")
+        or normalized.get("parentcommand_id")
         or normalized.get("parentCommandId")
         or normalized.get("Parent_Command_ID")
         or ""
@@ -442,6 +443,7 @@ def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
         "linkedrun",
         "Linked_Run",
         "parentcommandid",
+        "parentcommand_id",
         "parentCommandId",
         "Parent_Command_ID",
         "commandid",
@@ -1171,129 +1173,262 @@ def _build_incident_key(data: Dict[str, Any], meta: Dict[str, Any]) -> str:
     )
 
 
-def _extract_records_from_airtable_response(response: Any) -> List[Dict[str, Any]]:
-    parsed = _json_load_maybe(response)
+def _normalize_airtable_records_response(value: Any) -> List[Dict[str, Any]]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
 
-    if isinstance(parsed, list):
-        return [item for item in parsed if isinstance(item, dict)]
+    if isinstance(value, dict):
+        records = value.get("records")
+        if isinstance(records, list):
+            return [item for item in records if isinstance(item, dict)]
 
-    if isinstance(parsed, dict):
-        for key in ("records", "items", "data", "results"):
-            value = parsed.get(key)
-            if isinstance(value, list):
-                return [item for item in value if isinstance(item, dict)]
-
-        if "id" in parsed and isinstance(parsed.get("fields"), dict):
-            return [parsed]
+        if "id" in value or "fields" in value:
+            return [value]
 
     return []
 
 
-def _record_field_text(record: Dict[str, Any], field_name: str) -> str:
-    if not isinstance(record, dict):
+def _extract_airtable_record_id(record: Any) -> str:
+    if isinstance(record, dict):
+        return _pick_text(record.get("id"), record.get("record_id"))
+    return ""
+
+
+def _extract_airtable_fields(record: Any) -> Dict[str, Any]:
+    if isinstance(record, dict):
+        fields = record.get("fields")
+        if isinstance(fields, dict):
+            return fields
+        return record
+    return {}
+
+
+def _build_fallback_formula(candidate: Dict[str, Any]) -> str:
+    flow_id = _pick_text(candidate.get("flow_id"))
+    root_event_id = _pick_text(candidate.get("root_event_id"))
+    workspace_id = _pick_text(candidate.get("workspace_id"))
+
+    parts: List[str] = []
+
+    if flow_id:
+        parts.append(f"{{Flow_ID}}='{_escape_airtable_formula_value(flow_id)}'")
+    if root_event_id:
+        parts.append(f"{{Root_Event_ID}}='{_escape_airtable_formula_value(root_event_id)}'")
+    if workspace_id:
+        parts.append(f"{{Workspace_ID}}='{_escape_airtable_formula_value(workspace_id)}'")
+
+    if not parts:
         return ""
 
-    fields = record.get("fields")
-    if isinstance(fields, dict):
-        return _pick_text(fields.get(field_name))
+    if len(parts) == 1:
+        return parts[0]
 
-    return _pick_text(record.get(field_name))
+    return f"AND({','.join(parts)})"
 
 
-def _manual_match_incident_record(records: List[Dict[str, Any]], incident_key: str) -> Optional[Dict[str, Any]]:
-    target = incident_key.strip()
-    if not target:
-        return None
+def _record_matches_candidate(candidate: Dict[str, Any], record: Dict[str, Any]) -> bool:
+    fields = _extract_airtable_fields(record)
 
-    for rec in records:
-        current = _record_field_text(rec, "Incident_Key").strip()
-        if current == target:
-            return rec
+    record_key = _pick_text(
+        fields.get("Incident_Key"),
+        fields.get("incident_key"),
+        fields.get("Incident Key"),
+    )
+    candidate_key = _pick_text(candidate.get("incident_key"))
 
-    return None
+    if candidate_key and record_key and candidate_key == record_key:
+        return True
+
+    payload = _json_load_maybe(fields.get("Payload_JSON"))
+    payload = payload if isinstance(payload, dict) else {}
+    payload = _normalize_keys_deep(payload)
+    payload = _unwrap_command_payload(payload)
+    payload = _normalize_flow_keys(payload)
+
+    candidate_flow = _pick_text(candidate.get("flow_id"))
+    record_flow = _pick_text(fields.get("Flow_ID"), payload.get("flow_id"))
+
+    candidate_root = _pick_text(candidate.get("root_event_id"))
+    record_root = _pick_text(fields.get("Root_Event_ID"), payload.get("root_event_id"))
+
+    candidate_workspace = _pick_text(candidate.get("workspace_id"))
+    record_workspace = _pick_text(fields.get("Workspace_ID"), payload.get("workspace_id"), payload.get("workspace"))
+
+    candidate_url = _pick_text(
+        candidate.get("failed_url"),
+        candidate.get("target_url"),
+        candidate.get("url"),
+        candidate.get("http_target"),
+    )
+    record_url = _pick_text(
+        payload.get("failed_url"),
+        payload.get("target_url"),
+        payload.get("url"),
+        payload.get("http_target"),
+    )
+
+    candidate_method = _pick_text(candidate.get("failed_method"), candidate.get("method"), "GET").upper()
+    record_method = _pick_text(payload.get("failed_method"), payload.get("method"), "GET").upper()
+
+    candidate_status = _pick_text(candidate.get("http_status"), candidate.get("status_code"))
+    record_status = _pick_text(payload.get("http_status"), payload.get("status_code"))
+
+    candidate_code = _pick_text(candidate.get("incident_code"), candidate.get("retry_reason"), candidate.get("reason"))
+    record_code = _pick_text(payload.get("incident_code"), payload.get("retry_reason"), payload.get("reason"))
+
+    candidate_capability = _pick_capability(
+        candidate.get("original_capability"),
+        candidate.get("failed_capability"),
+        candidate.get("source_capability"),
+        fallback="",
+    )
+    record_capability = _pick_capability(
+        payload.get("original_capability"),
+        payload.get("failed_capability"),
+        payload.get("source_capability"),
+        fallback="",
+    )
+
+    if candidate_flow and record_flow and candidate_flow != record_flow:
+        return False
+    if candidate_root and record_root and candidate_root != record_root:
+        return False
+    if candidate_workspace and record_workspace and candidate_workspace != record_workspace:
+        return False
+    if candidate_url and record_url and candidate_url != record_url:
+        return False
+    if candidate_method and record_method and candidate_method != record_method:
+        return False
+    if candidate_status and record_status and candidate_status != record_status:
+        return False
+    if candidate_code and record_code and candidate_code != record_code:
+        return False
+    if candidate_capability and record_capability and candidate_capability != record_capability:
+        return False
+
+    return bool(
+        candidate_flow
+        and candidate_root
+        and candidate_url
+        and record_flow
+        and record_root
+        and record_url
+        and candidate_flow == record_flow
+        and candidate_root == record_root
+        and candidate_url == record_url
+    )
 
 
 def _find_existing_incident(
     incidents_table_name: str,
     incident_key: str,
+    canonical_candidate: Dict[str, Any],
     airtable_list_filtered,
 ) -> Optional[Dict[str, Any]]:
+    print("[incident_deduplicate] lookup incident_key =", incident_key, flush=True)
+
     if not callable(airtable_list_filtered):
         print("[incident_deduplicate] airtable_list_filtered not callable", flush=True)
         return None
 
-    safe_key = _escape_airtable_formula_value(incident_key)
-    formulas = [
-        f"{{Incident_Key}}='{safe_key}'",
-        f"({{Incident_Key}}='{safe_key}')",
-    ]
+    try:
+        safe_key = _escape_airtable_formula_value(incident_key)
+        exact_formula = f"{{Incident_Key}}='{safe_key}'"
 
-    attempt_specs: List[Dict[str, Any]] = []
-    for formula in formulas:
-        attempt_specs.extend(
-            [
-                {"formula": formula, "max_records": 1},
-                {"filter_formula": formula, "max_records": 1},
-                {"filterByFormula": formula, "max_records": 1},
-                {"formula": formula},
-                {"filter_formula": formula},
-                {"filterByFormula": formula},
-            ]
+        print("[incident_deduplicate] exact formula =", exact_formula, flush=True)
+
+        exact_raw = airtable_list_filtered(
+            incidents_table_name,
+            formula=exact_formula,
+            max_records=5,
+        )
+        exact_records = _normalize_airtable_records_response(exact_raw)
+
+        print(
+            "[incident_deduplicate] exact raw type =",
+            type(exact_raw).__name__,
+            "count =",
+            len(exact_records),
+            "ids =",
+            [_extract_airtable_record_id(r) for r in exact_records],
+            flush=True,
         )
 
-    for kwargs in attempt_specs:
-        try:
-            response = airtable_list_filtered(incidents_table_name, **kwargs)
-            records = _extract_records_from_airtable_response(response)
-            if records:
+        if exact_records:
+            for record in exact_records:
+                fields = _extract_airtable_fields(record)
                 print(
-                    "[incident_deduplicate] lookup matched via kwargs =",
-                    kwargs,
+                    "[incident_deduplicate] exact candidate:",
+                    {
+                        "id": _extract_airtable_record_id(record),
+                        "Incident_Key": _pick_text(fields.get("Incident_Key")),
+                        "Flow_ID": _pick_text(fields.get("Flow_ID")),
+                        "Root_Event_ID": _pick_text(fields.get("Root_Event_ID")),
+                    },
                     flush=True,
                 )
-                return records[0]
-        except Exception as exc:
-            print(
-                "[incident_deduplicate] lookup attempt failed kwargs =",
-                kwargs,
-                "error =",
-                repr(exc),
-                flush=True,
-            )
 
-    # Fallback : on charge un lot plus large puis on filtre localement.
-    fallback_specs = [
-        {"max_records": 100},
-        {"page_size": 100},
-        {},
-    ]
+            return exact_records[0]
 
-    for kwargs in fallback_specs:
-        try:
-            response = airtable_list_filtered(incidents_table_name, **kwargs)
-            records = _extract_records_from_airtable_response(response)
-            found = _manual_match_incident_record(records, incident_key)
-            if found:
+        fallback_formula = _build_fallback_formula(canonical_candidate)
+        print("[incident_deduplicate] fallback formula =", fallback_formula, flush=True)
+
+        if not fallback_formula:
+            return None
+
+        fallback_raw = airtable_list_filtered(
+            incidents_table_name,
+            formula=fallback_formula,
+            max_records=20,
+        )
+        fallback_records = _normalize_airtable_records_response(fallback_raw)
+
+        print(
+            "[incident_deduplicate] fallback raw type =",
+            type(fallback_raw).__name__,
+            "count =",
+            len(fallback_records),
+            "ids =",
+            [_extract_airtable_record_id(r) for r in fallback_records],
+            flush=True,
+        )
+
+        for record in fallback_records:
+            fields = _extract_airtable_fields(record)
+            payload = _json_load_maybe(fields.get("Payload_JSON"))
+            payload = payload if isinstance(payload, dict) else {}
+
+            summary = {
+                "id": _extract_airtable_record_id(record),
+                "Incident_Key": _pick_text(fields.get("Incident_Key")),
+                "Flow_ID": _pick_text(fields.get("Flow_ID")),
+                "Root_Event_ID": _pick_text(fields.get("Root_Event_ID")),
+                "Workspace_ID": _pick_text(fields.get("Workspace_ID")),
+                "payload_url": _pick_text(
+                    payload.get("failed_url"),
+                    payload.get("target_url"),
+                    payload.get("url"),
+                    payload.get("http_target"),
+                ),
+                "payload_status": _pick_text(
+                    payload.get("http_status"),
+                    payload.get("status_code"),
+                ),
+            }
+            print("[incident_deduplicate] fallback candidate =", summary, flush=True)
+
+            if _record_matches_candidate(canonical_candidate, record):
                 print(
-                    "[incident_deduplicate] lookup matched via manual fallback kwargs =",
-                    kwargs,
+                    "[incident_deduplicate] fallback MATCH found id =",
+                    _extract_airtable_record_id(record),
                     flush=True,
                 )
-                return found
-        except Exception as exc:
-            print(
-                "[incident_deduplicate] manual fallback failed kwargs =",
-                kwargs,
-                "error =",
-                repr(exc),
-                flush=True,
-            )
+                return record
 
-    print(
-        "[incident_deduplicate] no incident found for key =",
-        incident_key,
-        flush=True,
-    )
+    except Exception as exc:
+        print("[incident_deduplicate] lookup error =", repr(exc), flush=True)
+
+    print("[incident_deduplicate] no existing incident found", flush=True)
     return None
 
 
@@ -1466,14 +1601,43 @@ def run(
         },
     )
 
+    canonical_for_key["incident_key"] = incident_key
+
+    print(
+        "[incident_deduplicate] canonical summary =",
+        {
+            "flow_id": _pick_text(canonical_for_key.get("flow_id")),
+            "root_event_id": _pick_text(canonical_for_key.get("root_event_id")),
+            "workspace_id": _pick_text(canonical_for_key.get("workspace_id")),
+            "url": _pick_text(
+                canonical_for_key.get("failed_url"),
+                canonical_for_key.get("target_url"),
+                canonical_for_key.get("url"),
+            ),
+            "method": _pick_text(
+                canonical_for_key.get("failed_method"),
+                canonical_for_key.get("method"),
+                "GET",
+            ),
+            "http_status": _pick_text(
+                canonical_for_key.get("http_status"),
+                canonical_for_key.get("status_code"),
+            ),
+            "incident_code": _pick_text(canonical_for_key.get("incident_code")),
+            "incident_key": incident_key,
+        },
+        flush=True,
+    )
+
     existing = _find_existing_incident(
         incidents_table_name,
         incident_key,
+        canonical_for_key,
         airtable_list_filtered,
     )
 
     if existing:
-        existing_id = _pick_text(existing.get("id"))
+        existing_id = _extract_airtable_record_id(existing)
 
         update_res = _update_existing_incident_best_effort(
             airtable_update=airtable_update,
