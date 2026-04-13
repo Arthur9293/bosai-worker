@@ -52,10 +52,39 @@ def _json_load_maybe(value: Any) -> Any:
     if not text:
         return None
 
+    candidates = [text]
+
     try:
-        return json.loads(text)
+        candidates.append(bytes(text, "utf-8").decode("unicode_escape"))
     except Exception:
-        return None
+        pass
+
+    candidates.append(text.replace('\\"', '"'))
+    candidates.append(text.replace("\\_", "_"))
+    candidates.append(text.replace('\\"', '"').replace("\\_", "_"))
+
+    seen = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            continue
+
+        if isinstance(parsed, str):
+            inner = parsed.strip()
+            if not inner:
+                continue
+            try:
+                return json.loads(inner)
+            except Exception:
+                return parsed
+
+        return parsed
+
+    return None
 
 
 def _is_empty(value: Any) -> bool:
@@ -75,7 +104,7 @@ def _pick_text(*values: Any) -> str:
             continue
 
         if isinstance(value, dict):
-            for key in ("id", "name", "value", "text"):
+            for key in ("id", "record_id", "incident_record_id", "name", "value", "text"):
                 if key in value:
                     text = _pick_text(value.get(key))
                     if text:
@@ -115,20 +144,72 @@ def _merge_missing(target: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, 
     return target
 
 
+def _extract_record_id(value: Any) -> str:
+    if value is None:
+        return ""
+
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("rec"):
+            return text
+        parsed = _json_load_maybe(text)
+        if parsed is not None and parsed is not value:
+            return _extract_record_id(parsed)
+        return ""
+
+    if isinstance(value, list):
+        for item in value:
+            rid = _extract_record_id(item)
+            if rid:
+                return rid
+        return ""
+
+    if isinstance(value, dict):
+        for key in (
+            "incident_record_id",
+            "record_id",
+            "id",
+            "Incident_Record_ID",
+        ):
+            rid = _extract_record_id(value.get(key))
+            if rid:
+                return rid
+
+        for key in ("response", "result", "incident_create_res", "incident_result"):
+            rid = _extract_record_id(value.get(key))
+            if rid:
+                return rid
+
+    return ""
+
+
 def _extract_search_dicts(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     result: List[Dict[str, Any]] = []
+
+    def _append_candidate(value: Any) -> None:
+        if isinstance(value, str):
+            value = _json_load_maybe(value)
+        if isinstance(value, dict) and value:
+            result.append(dict(value))
 
     if isinstance(payload, dict):
         result.append(dict(payload))
 
-    for key in ("incident_result", "original_input", "body", "input", "command_input"):
+    for key in (
+        "incident_result",
+        "incident_create_res",
+        "incident_update_res",
+        "original_input",
+        "body",
+        "payload",
+        "result",
+        "input",
+        "command_input",
+        "incident",
+        "response",
+    ):
         nested = payload.get(key) if isinstance(payload, dict) else None
-
-        if isinstance(nested, str):
-            nested = _json_load_maybe(nested)
-
-        if isinstance(nested, dict) and nested:
-            result.append(dict(nested))
+        _append_candidate(nested)
 
     return result
 
@@ -163,6 +244,8 @@ def _normalize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     for key in ("input", "command_input"):
         nested = normalized.get(key)
+        if isinstance(nested, str):
+            nested = _json_load_maybe(nested)
         if isinstance(nested, dict):
             merged = dict(normalized)
             merged.pop(key, None)
@@ -245,6 +328,32 @@ def _normalize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         default=command_id,
     )
 
+    incident_record_id = _pick_text_from_dicts(
+        search_dicts,
+        "incident_record_id",
+        "incidentrecordid",
+        "Incident_Record_ID",
+        default="",
+    )
+
+    if not incident_record_id:
+        for data in search_dicts:
+            incident_record_id = _extract_record_id(data.get("incident_create_res"))
+            if incident_record_id:
+                break
+
+    if not incident_record_id:
+        for data in search_dicts:
+            incident_record_id = _extract_record_id(data.get("incident_result"))
+            if incident_record_id:
+                break
+
+    if not incident_record_id:
+        for data in search_dicts:
+            incident_record_id = _extract_record_id(data)
+            if incident_record_id:
+                break
+
     normalized["flow_id"] = flow_id
     normalized["root_event_id"] = root_event_id
     normalized["source_event_id"] = source_event_id
@@ -255,6 +364,7 @@ def _normalize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     normalized["linked_run"] = linked_run or run_record_id
     normalized["command_id"] = command_id
     normalized["parent_command_id"] = parent_command_id
+    normalized["incident_record_id"] = incident_record_id
     normalized["step_index"] = _to_int(
         _pick_value_from_dicts(search_dicts, "step_index", "stepindex", "stepIndex"),
         0,
@@ -295,10 +405,19 @@ def run(
         "source_event_id",
         default=root_event_id or flow_id,
     )
-    workspace_id = _pick_text_from_dicts(search_dicts, "workspace_id", "workspace", default="production")
+    workspace_id = _pick_text_from_dicts(
+        search_dicts,
+        "workspace_id",
+        "workspace",
+        default="production",
+    )
 
     incoming_run_record_id = _pick_text_from_dicts(search_dicts, "run_record_id", default="")
-    linked_run = _pick_text_from_dicts(search_dicts, "linked_run", default=incoming_run_record_id or run_record_id)
+    linked_run = _pick_text_from_dicts(
+        search_dicts,
+        "linked_run",
+        default=incoming_run_record_id or run_record_id,
+    )
     effective_run_record_id = _pick_text(incoming_run_record_id, linked_run, run_record_id)
 
     command_id = _pick_text_from_dicts(search_dicts, "command_id", default="")
@@ -314,6 +433,24 @@ def run(
         "incidentrecordid",
         default="",
     )
+
+    if not incident_record_id:
+        for data in search_dicts:
+            incident_record_id = _extract_record_id(data.get("incident_create_res"))
+            if incident_record_id:
+                break
+
+    if not incident_record_id:
+        for data in search_dicts:
+            incident_record_id = _extract_record_id(data.get("incident_result"))
+            if incident_record_id:
+                break
+
+    if not incident_record_id:
+        for data in search_dicts:
+            incident_record_id = _extract_record_id(data)
+            if incident_record_id:
+                break
 
     severity = _pick_text_from_dicts(search_dicts, "severity", default="").strip().lower()
     category = _pick_text_from_dicts(search_dicts, "category", default="")
