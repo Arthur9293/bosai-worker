@@ -110,6 +110,46 @@ def _is_airtable_record_id(value: Any) -> bool:
     return bool(AIRTABLE_RECORD_ID_RE.match(rid))
 
 
+def _extract_record_id(value: Any) -> str:
+    if value is None:
+        return ""
+
+    if isinstance(value, str):
+        text = value.strip()
+        if _is_airtable_record_id(text):
+            return text
+
+        parsed = _json_load_maybe(text)
+        if parsed is not None and parsed is not value:
+            return _extract_record_id(parsed)
+        return ""
+
+    if isinstance(value, list):
+        for item in value:
+            rid = _extract_record_id(item)
+            if rid:
+                return rid
+        return ""
+
+    if isinstance(value, dict):
+        for key in (
+            "incident_record_id",
+            "record_id",
+            "id",
+            "Incident_Record_ID",
+        ):
+            rid = _extract_record_id(value.get(key))
+            if rid:
+                return rid
+
+        for key in ("response", "result", "incident_create_res", "incident_result"):
+            rid = _extract_record_id(value.get(key))
+            if rid:
+                return rid
+
+    return ""
+
+
 def _extract_input(req: Any) -> Dict[str, Any]:
     if req is not None and hasattr(req, "input"):
         payload = getattr(req, "input", {}) or {}
@@ -124,16 +164,18 @@ def _extract_input(req: Any) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
 
+    normalized = dict(payload)
+
     for key in ("input", "command_input", "incident"):
-        nested = payload.get(key)
+        nested = normalized.get(key)
         if isinstance(nested, str):
             nested = _json_load_maybe(nested)
         if isinstance(nested, dict):
-            merged = dict(payload)
+            merged = dict(normalized)
             merged.update(nested)
-            return merged
+            normalized = merged
 
-    return dict(payload)
+    return normalized
 
 
 def _clean_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
@@ -211,46 +253,6 @@ def _extract_created_record_id(response: Any) -> str:
     return ""
 
 
-def _extract_record_id(value: Any) -> str:
-    if value is None:
-        return ""
-
-    if isinstance(value, str):
-        text = value.strip()
-        if _is_airtable_record_id(text):
-            return text
-
-        parsed = _json_load_maybe(text)
-        if parsed is not None and parsed is not value:
-            return _extract_record_id(parsed)
-        return ""
-
-    if isinstance(value, list):
-        for item in value:
-            rid = _extract_record_id(item)
-            if rid:
-                return rid
-        return ""
-
-    if isinstance(value, dict):
-        for key in (
-            "incident_record_id",
-            "record_id",
-            "id",
-            "Incident_Record_ID",
-        ):
-            rid = _extract_record_id(value.get(key))
-            if rid:
-                return rid
-
-        for key in ("response", "result", "incident_create_res", "incident_result"):
-            rid = _extract_record_id(value.get(key))
-            if rid:
-                return rid
-
-    return ""
-
-
 def _build_incident_title(
     *,
     category: str,
@@ -308,11 +310,22 @@ def _pick_text_from_dicts(dicts: List[Dict[str, Any]], *keys: str, default: str 
         if not isinstance(data, dict):
             continue
         for key in keys:
-            if key in data:
-                value = data.get(key)
-                text = _to_str(value).strip() if not isinstance(value, (dict, list)) else ""
-                if text:
-                    return text
+            if key not in data:
+                continue
+
+            value = data.get(key)
+
+            rid = _extract_record_id(value)
+            if rid:
+                return rid
+
+            if isinstance(value, (dict, list)):
+                continue
+
+            text = _to_str(value).strip()
+            if text:
+                return text
+
     return default
 
 
@@ -740,17 +753,34 @@ def capability_internal_escalate(
         default="",
     )
 
-    reason = _pick_text_from_dicts(search_dicts, "reason", default="internal_escalation")
+    reason = _pick_text_from_dicts(search_dicts, "reason", "retry_reason", default="internal_escalation")
     goal = _pick_text_from_dicts(search_dicts, "goal", default="escalation_send")
     severity_raw = _pick_text_from_dicts(search_dicts, "severity", default="high")
-    http_status = _pick_value_from_dicts(search_dicts, "http_status", "status_code")
+
+    http_status_value = _pick_value_from_dicts(search_dicts, "http_status", "status_code")
+    http_status_int = _to_int(http_status_value, 0)
+    http_status: Any = http_status_int if http_status_int > 0 else http_status_value
+
     failed_goal = _pick_text_from_dicts(search_dicts, "failed_goal", default="")
-    failed_url = _pick_text_from_dicts(search_dicts, "failed_url", "target_url", "url", default="")
+    failed_url = _pick_text_from_dicts(
+        search_dicts,
+        "failed_url",
+        "target_url",
+        "http_target",
+        "url",
+        default="",
+    )
+    failed_method = _pick_text_from_dicts(search_dicts, "failed_method", "method", default="GET").upper()
     sla_status_raw = _pick_text_from_dicts(search_dicts, "sla_status", default="open")
+
     final_failure = _to_bool(
         _pick_value_from_dicts(search_dicts, "final_failure", "finalfailure"),
         False,
     )
+    if not final_failure:
+        if http_status_int >= 500 or _pick_text_from_dicts(search_dicts, "category", default="") == "http_failure":
+            final_failure = True
+
     category = _pick_text_from_dicts(search_dicts, "category", default="http_failure")
     incident_code = _pick_text_from_dicts(
         search_dicts,
@@ -759,6 +789,31 @@ def capability_internal_escalate(
         "error_code",
         default="",
     )
+    if not incident_code and http_status_int >= 400:
+        incident_code = "http_status_error"
+
+    error_message = _pick_text_from_dicts(
+        search_dicts,
+        "error_message",
+        "incident_message",
+        "error",
+        default="",
+    )
+    incident_message = _pick_text_from_dicts(
+        search_dicts,
+        "incident_message",
+        "error_message",
+        "error",
+        default=error_message,
+    )
+
+    retry_reason = _pick_text_from_dicts(search_dicts, "retry_reason", default=reason)
+    retry_count = _to_int(_pick_value_from_dicts(search_dicts, "retry_count"), 0)
+    retry_max = _to_int(_pick_value_from_dicts(search_dicts, "retry_max"), 0)
+
+    original_capability = _pick_text_from_dicts(search_dicts, "original_capability", default="")
+    failed_capability = _pick_text_from_dicts(search_dicts, "failed_capability", default=original_capability)
+    source_capability = _pick_text_from_dicts(search_dicts, "source_capability", default=failed_capability or original_capability)
 
     workspace_id = _pick_text_from_dicts(
         search_dicts,
@@ -768,6 +823,9 @@ def capability_internal_escalate(
         "workspace",
         default="production",
     ).strip()
+
+    tenant_id = _pick_text_from_dicts(search_dicts, "tenant_id", "tenantId", default="")
+    app_name = _pick_text_from_dicts(search_dicts, "app_name", "appName", default="")
 
     if not flow_id:
         if incident_record_id:
@@ -870,8 +928,15 @@ def capability_internal_escalate(
         "category": category,
         "incident_code": incident_code,
         "http_status": http_status,
+        "status_code": http_status,
         "failed_goal": failed_goal,
         "failed_url": failed_url,
+        "failed_method": failed_method,
+        "error_message": error_message,
+        "incident_message": incident_message,
+        "retry_reason": retry_reason,
+        "retry_count": retry_count,
+        "retry_max": retry_max,
         "sla_status": sla_status_raw,
         "final_failure": final_failure,
         "incident_record_id": incident_record_id,
@@ -884,8 +949,13 @@ def capability_internal_escalate(
         "root_event_id": root_event_id,
         "source_event_id": source_event_id,
         "workspace_id": workspace_id,
+        "tenant_id": tenant_id,
+        "app_name": app_name,
         "parent_command_id": parent_command_id,
         "command_id": parent_command_id,
+        "original_capability": original_capability,
+        "failed_capability": failed_capability,
+        "source_capability": source_capability,
         "ts": utc_now_iso(),
     }
 
@@ -924,6 +994,8 @@ def capability_internal_escalate(
         "goal": "escalation_sent",
         "workspace_id": workspace_id,
         "workspace": workspace_id,
+        "tenant_id": tenant_id,
+        "app_name": app_name,
         "parent_command_id": parent_command_id,
         "command_id": parent_command_id,
         "linked_command": parent_command_id,
@@ -933,7 +1005,18 @@ def capability_internal_escalate(
         "incident_code": incident_code,
         "final_failure": final_failure,
         "failed_url": failed_url,
+        "target_url": failed_url,
+        "http_target": failed_url,
+        "url": failed_url,
+        "failed_method": failed_method,
+        "method": failed_method,
         "http_status": http_status,
+        "status_code": http_status,
+        "error_message": error_message,
+        "incident_message": incident_message,
+        "retry_reason": retry_reason,
+        "retry_count": retry_count,
+        "retry_max": retry_max,
         "run_record_id": effective_run_record_id,
         "linked_run": effective_run_record_id,
         "decision_status": "Escalated",
@@ -941,6 +1024,9 @@ def capability_internal_escalate(
         "next_action": "complete_flow_incident",
         "incident_create_ok": bool(incident_record_id),
         "incident_create_res": incident_create_res,
+        "original_capability": original_capability,
+        "failed_capability": failed_capability,
+        "source_capability": source_capability,
     }
 
     return {
@@ -961,6 +1047,10 @@ def capability_internal_escalate(
         "run_record_id": effective_run_record_id,
         "linked_run": effective_run_record_id,
         "command_id": parent_command_id,
+        "decision_status": "Escalated",
+        "decision_reason": "internal_escalation_sent",
+        "next_action": "complete_flow_incident",
+        "final_failure": final_failure,
         "logs_update_ok": bool(logs_update_res.get("ok")),
         "logs_update_res": logs_update_res,
         "incident_update_ok": bool(incident_update_res.get("ok")),
