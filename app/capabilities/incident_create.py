@@ -113,6 +113,81 @@ def _json_load_maybe(value: Any) -> Any:
     return None
 
 
+def _pick_text(*values: Any) -> str:
+    for value in values:
+        if value is None:
+            continue
+
+        if isinstance(value, list):
+            for item in value:
+                text = _pick_text(item)
+                if text:
+                    return text
+            continue
+
+        if isinstance(value, dict):
+            for key in (
+                "id",
+                "name",
+                "value",
+                "text",
+                "url",
+                "method",
+                "status_code",
+                "flow_id",
+                "root_event_id",
+                "source_event_id",
+                "event_id",
+                "workspace_id",
+                "run_record_id",
+                "linked_run",
+                "command_id",
+                "parent_command_id",
+            ):
+                if key in value:
+                    text = _pick_text(value.get(key))
+                    if text:
+                        return text
+            continue
+
+        text = _to_str(value).strip()
+        if text:
+            return text
+
+    return ""
+
+
+def _pick_int(*values: Any) -> Optional[int]:
+    for value in values:
+        if value is None or value == "":
+            continue
+        try:
+            return int(value)
+        except Exception:
+            try:
+                return int(str(value).strip())
+            except Exception:
+                continue
+    return None
+
+
+def _pick_capability(*values: Any, fallback: str = "") -> str:
+    first_non_empty = ""
+
+    for value in values:
+        text = _pick_text(value)
+        if not text:
+            continue
+
+        if not first_non_empty:
+            first_non_empty = text
+
+        if text not in ORCHESTRATION_CAPABILITIES:
+            return text
+
+    return fallback or first_non_empty
+
+
 def _normalize_keys_deep(value: Any) -> Any:
     mapping = {
         "commandinput": "command_input",
@@ -180,6 +255,10 @@ def _unwrap_command_payload(value: Any) -> Any:
 
     for key in ("input", "command_input"):
         nested = current.get(key)
+
+        if isinstance(nested, str):
+            nested = _json_load_maybe(nested)
+
         if isinstance(nested, dict):
             merged = dict(current)
             merged.pop(key, None)
@@ -373,76 +452,24 @@ def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
-def _pick_text(*values: Any) -> str:
-    for value in values:
-        if value is None:
-            continue
-
-        if isinstance(value, list):
-            for item in value:
-                text = _pick_text(item)
-                if text:
-                    return text
-            continue
-
-        if isinstance(value, dict):
-            for key in ("id", "name", "value", "text", "url", "method", "status_code"):
-                if key in value:
-                    text = _pick_text(value.get(key))
-                    if text:
-                        return text
-            continue
-
-        text = _to_str(value).strip()
-        if text:
-            return text
-
-    return ""
-
-
-def _pick_int(*values: Any) -> Optional[int]:
-    for value in values:
-        if value is None or value == "":
-            continue
-        try:
-            return int(value)
-        except Exception:
-            try:
-                return int(str(value).strip())
-            except Exception:
-                continue
-    return None
-
-
-def _pick_capability(*values: Any, fallback: str = "") -> str:
-    first_non_empty = ""
-
-    for value in values:
-        text = _pick_text(value)
-        if not text:
-            continue
-
-        if not first_non_empty:
-            first_non_empty = text
-
-        if text not in ORCHESTRATION_CAPABILITIES:
-            return text
-
-    return fallback or first_non_empty
-
-
 def _extract_input(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
 
-    for key in ("input", "command_input", "incident"):
-        nested = payload.get(key)
-        if isinstance(nested, dict):
-            merged = dict(payload)
-            merged.update(nested)
-            return merged
+    normalized = dict(payload)
 
-    return dict(payload)
+    for key in ("input", "command_input", "incident"):
+        nested = normalized.get(key)
+
+        if isinstance(nested, str):
+            nested = _json_load_maybe(nested)
+
+        if isinstance(nested, dict):
+            merged = dict(normalized)
+            merged.update(nested)
+            normalized = merged
+
+    return normalized
 
 
 def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -765,18 +792,23 @@ def _canonical_incident_context(
     decision_block: Dict[str, Any],
     incident_record_id: str = "",
 ) -> Dict[str, Any]:
-    original_input = data.get("original_input") if isinstance(data.get("original_input"), dict) else {}
+    raw_original_input = _json_load_maybe(data.get("original_input"))
+    original_input = raw_original_input if isinstance(raw_original_input, dict) else {}
     original_input = _normalize_keys_deep(original_input)
     original_input = _unwrap_command_payload(original_input)
     original_input = _normalize_flow_keys(original_input)
 
-    request_obj = data.get("request") if isinstance(data.get("request"), dict) else {}
+    raw_request = _json_load_maybe(data.get("request"))
+    request_obj = raw_request if isinstance(raw_request, dict) else {}
     if not request_obj:
-        request_obj = original_input.get("request") if isinstance(original_input.get("request"), dict) else {}
+        raw_request_from_original = _json_load_maybe(original_input.get("request"))
+        request_obj = raw_request_from_original if isinstance(raw_request_from_original, dict) else {}
 
-    response_obj = data.get("response") if isinstance(data.get("response"), dict) else {}
+    raw_response = _json_load_maybe(data.get("response"))
+    response_obj = raw_response if isinstance(raw_response, dict) else {}
     if not response_obj:
-        response_obj = original_input.get("response") if isinstance(original_input.get("response"), dict) else {}
+        raw_response_from_original = _json_load_maybe(original_input.get("response"))
+        response_obj = raw_response_from_original if isinstance(raw_response_from_original, dict) else {}
 
     flow_id = _pick_text(
         meta.get("flow_id"),
@@ -879,7 +911,9 @@ def _canonical_incident_context(
 
     http_status = _pick_int(
         data.get("http_status"),
+        data.get("httpstatus"),
         data.get("status_code"),
+        data.get("statuscode"),
         original_input.get("http_status"),
         original_input.get("status_code"),
         response_obj.get("status_code"),
@@ -887,7 +921,9 @@ def _canonical_incident_context(
 
     status_code = _pick_int(
         data.get("status_code"),
+        data.get("statuscode"),
         data.get("http_status"),
+        data.get("httpstatus"),
         original_input.get("status_code"),
         original_input.get("http_status"),
         response_obj.get("status_code"),
@@ -1015,6 +1051,9 @@ def _build_incident_fields_candidates(
 
     payload_json = _safe_json(incident_record_payload)
 
+    linked_run = [run_record_id] if run_record_id.startswith("rec") else []
+    linked_command = [parent_command_id] if parent_command_id.startswith("rec") else []
+
     minimal = {
         "Name": _build_incident_name(incident_record_payload),
         "Status_select": "Open",
@@ -1038,7 +1077,18 @@ def _build_incident_fields_candidates(
         "Created_By_Capability": "incident_create",
     }
 
+    if linked_run:
+        rich["Linked_Run"] = linked_run
+    if linked_command:
+        rich["Linked_Command"] = linked_command
+
     candidates: List[Dict[str, Any]] = [dict(rich)]
+
+    if "Linked_Run" in rich or "Linked_Command" in rich:
+        no_links = dict(rich)
+        no_links.pop("Linked_Run", None)
+        no_links.pop("Linked_Command", None)
+        candidates.append(no_links)
 
     mid = dict(minimal)
     if flow_id:
@@ -1367,5 +1417,5 @@ def run(
                 "input": next_input,
             }
         ],
-        "terminal": False,
+        "terminal": len([1]) == 0,
     }
