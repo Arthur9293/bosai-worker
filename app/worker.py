@@ -4821,7 +4821,129 @@ def _workspace_allowed_capabilities_from_record(fields: Dict[str, Any]) -> List[
 
     return []
 
+def _normalize_capability_name(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
 
+    previous = None
+    while text != previous:
+        previous = text
+        text = text.replace("\u00a0", " ")
+        text = text.replace("\\_", "_")
+        text = text.replace('\\"', '"')
+        text = text.strip()
+        text = text.strip('"').strip("'").strip()
+
+    return text
+
+
+def _parse_allowed_capabilities_value(raw: Any) -> List[str]:
+    if raw is None:
+        return []
+
+    if isinstance(raw, (list, tuple, set)):
+        items = list(raw)
+        cleaned = []
+        seen = set()
+
+        for item in items:
+            name = _normalize_capability_name(item)
+            if not name:
+                continue
+            if name in seen:
+                continue
+            seen.add(name)
+            cleaned.append(name)
+
+        return cleaned
+
+    text = str(raw).strip()
+    if not text:
+        return []
+
+    text = text.replace("\u00a0", " ")
+    text = text.replace("\\_", "_")
+    text = text.replace('\\"', '"').strip()
+
+    parsed = None
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        parsed = None
+
+    if isinstance(parsed, str):
+        return _parse_allowed_capabilities_value(parsed)
+
+    if isinstance(parsed, list):
+        return _parse_allowed_capabilities_value(parsed)
+
+    scratch = (
+        text.replace("[", " ")
+        .replace("]", " ")
+        .replace("\n", ",")
+        .replace("\r", ",")
+    )
+
+    raw_tokens = scratch.split(",")
+    cleaned = []
+    seen = set()
+
+    for token in raw_tokens:
+        name = _normalize_capability_name(token)
+        if not name:
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        cleaned.append(name)
+
+    return cleaned
+
+
+def _workspace_allowed_capabilities_from_record(row: Dict[str, Any]) -> List[str]:
+    if not isinstance(row, dict):
+        return []
+
+    explicit_caps: List[str] = []
+
+    for field_name in (
+        "Allowed_Capabilities",
+        "Features_JSON",
+        "Features",
+        "Capabilities",
+    ):
+        value = row.get(field_name)
+        parsed = _parse_allowed_capabilities_value(value)
+        if parsed:
+            explicit_caps.extend(parsed)
+
+    plan_key = _normalize_plan_key_value(
+        row.get("Plan_Code")
+        or row.get("plan_code")
+        or row.get("Plan_Key")
+        or row.get("plan_key")
+        or row.get("Plan_Name")
+        or row.get("plan_name")
+        or ""
+    )
+
+    matrix_caps = sorted(PLAN_CAPABILITY_MATRIX.get(plan_key, set()))
+
+    merged: List[str] = []
+    seen = set()
+
+    for value in explicit_caps + matrix_caps:
+        name = _normalize_capability_name(value)
+        if not name:
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        merged.append(name)
+
+    return merged
+    
 def _enforce_workspace_access_for_run(
     request: Request,
     headers_lc: Dict[str, str],
@@ -4830,6 +4952,7 @@ def _enforce_workspace_access_for_run(
     workspace_record: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     workspace_id = _normalize_workspace_id(workspace_id)
+    capability_name = _normalize_capability_name(capability_name)
 
     record = workspace_record
     if not record:
@@ -4856,6 +4979,9 @@ def _enforce_workspace_access_for_run(
         )
 
     allowed_capabilities = _workspace_allowed_capabilities_from_record(row)
+    allowed_capabilities = [
+        _normalize_capability_name(item) for item in allowed_capabilities if item
+    ]
 
     if capability_name and allowed_capabilities:
         if capability_name not in allowed_capabilities:
