@@ -605,7 +605,6 @@ def _normalize_decision_block(data: Dict[str, Any]) -> Dict[str, Any]:
     severity = _pick_text(data.get("severity")).lower()
     category = _pick_text(data.get("category")).lower()
 
-    # on préfère retry_reason / incident_code avant un reason trop générique
     reason = _pick_text(
         data.get("retry_reason"),
         data.get("incident_code"),
@@ -1172,26 +1171,129 @@ def _build_incident_key(data: Dict[str, Any], meta: Dict[str, Any]) -> str:
     )
 
 
+def _extract_records_from_airtable_response(response: Any) -> List[Dict[str, Any]]:
+    parsed = _json_load_maybe(response)
+
+    if isinstance(parsed, list):
+        return [item for item in parsed if isinstance(item, dict)]
+
+    if isinstance(parsed, dict):
+        for key in ("records", "items", "data", "results"):
+            value = parsed.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+
+        if "id" in parsed and isinstance(parsed.get("fields"), dict):
+            return [parsed]
+
+    return []
+
+
+def _record_field_text(record: Dict[str, Any], field_name: str) -> str:
+    if not isinstance(record, dict):
+        return ""
+
+    fields = record.get("fields")
+    if isinstance(fields, dict):
+        return _pick_text(fields.get(field_name))
+
+    return _pick_text(record.get(field_name))
+
+
+def _manual_match_incident_record(records: List[Dict[str, Any]], incident_key: str) -> Optional[Dict[str, Any]]:
+    target = incident_key.strip()
+    if not target:
+        return None
+
+    for rec in records:
+        current = _record_field_text(rec, "Incident_Key").strip()
+        if current == target:
+            return rec
+
+    return None
+
+
 def _find_existing_incident(
     incidents_table_name: str,
     incident_key: str,
     airtable_list_filtered,
 ) -> Optional[Dict[str, Any]]:
     if not callable(airtable_list_filtered):
+        print("[incident_deduplicate] airtable_list_filtered not callable", flush=True)
         return None
 
-    try:
-        safe_key = _escape_airtable_formula_value(incident_key)
-        recs = airtable_list_filtered(
-            incidents_table_name,
-            formula=f"{{Incident_Key}}='{safe_key}'",
-            max_records=1,
-        )
-        if isinstance(recs, list) and recs:
-            return recs[0]
-    except Exception:
-        pass
+    safe_key = _escape_airtable_formula_value(incident_key)
+    formulas = [
+        f"{{Incident_Key}}='{safe_key}'",
+        f"({{Incident_Key}}='{safe_key}')",
+    ]
 
+    attempt_specs: List[Dict[str, Any]] = []
+    for formula in formulas:
+        attempt_specs.extend(
+            [
+                {"formula": formula, "max_records": 1},
+                {"filter_formula": formula, "max_records": 1},
+                {"filterByFormula": formula, "max_records": 1},
+                {"formula": formula},
+                {"filter_formula": formula},
+                {"filterByFormula": formula},
+            ]
+        )
+
+    for kwargs in attempt_specs:
+        try:
+            response = airtable_list_filtered(incidents_table_name, **kwargs)
+            records = _extract_records_from_airtable_response(response)
+            if records:
+                print(
+                    "[incident_deduplicate] lookup matched via kwargs =",
+                    kwargs,
+                    flush=True,
+                )
+                return records[0]
+        except Exception as exc:
+            print(
+                "[incident_deduplicate] lookup attempt failed kwargs =",
+                kwargs,
+                "error =",
+                repr(exc),
+                flush=True,
+            )
+
+    # Fallback : on charge un lot plus large puis on filtre localement.
+    fallback_specs = [
+        {"max_records": 100},
+        {"page_size": 100},
+        {},
+    ]
+
+    for kwargs in fallback_specs:
+        try:
+            response = airtable_list_filtered(incidents_table_name, **kwargs)
+            records = _extract_records_from_airtable_response(response)
+            found = _manual_match_incident_record(records, incident_key)
+            if found:
+                print(
+                    "[incident_deduplicate] lookup matched via manual fallback kwargs =",
+                    kwargs,
+                    flush=True,
+                )
+                return found
+        except Exception as exc:
+            print(
+                "[incident_deduplicate] manual fallback failed kwargs =",
+                kwargs,
+                "error =",
+                repr(exc),
+                flush=True,
+            )
+
+    print(
+        "[incident_deduplicate] no incident found for key =",
+        incident_key,
+        flush=True,
+    )
     return None
 
 
@@ -1327,7 +1429,6 @@ def run(
             "terminal": True,
         }
 
-    # 1) Contexte canonique sans figer une mauvaise décision
     seed_decision_block = _empty_decision_block()
 
     canonical_for_key = _canonical_incident_context(
@@ -1339,10 +1440,8 @@ def run(
         decision_block=seed_decision_block,
     )
 
-    # 2) Recalcul défensif de la décision sur le contexte canonique enrichi
     decision_block = _recompute_decision_from_canonical(canonical_for_key)
 
-    # 3) Réinjection de la vraie décision
     canonical_for_key = dict(canonical_for_key)
     canonical_for_key["decision_status"] = decision_block["decision_status"]
     canonical_for_key["decision_reason"] = decision_block["decision_reason"]
