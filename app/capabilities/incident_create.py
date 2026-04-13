@@ -783,6 +783,15 @@ def _strip_runtime_keys(value: Dict[str, Any]) -> Dict[str, Any]:
     return cleaned
 
 
+def _clean_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: v for k, v in fields.items() if v not in ("", None, [])}
+
+
+def _safe_record_links(record_id: str) -> List[str]:
+    rid = _pick_text(record_id)
+    return [rid] if rid.startswith("rec") else []
+
+
 def _canonical_incident_context(
     data: Dict[str, Any],
     meta: Dict[str, Any],
@@ -1051,8 +1060,8 @@ def _build_incident_fields_candidates(
 
     payload_json = _safe_json(incident_record_payload)
 
-    linked_run = [run_record_id] if run_record_id.startswith("rec") else []
-    linked_command = [parent_command_id] if parent_command_id.startswith("rec") else []
+    linked_run = _safe_record_links(run_record_id)
+    linked_command = _safe_record_links(parent_command_id)
 
     minimal = {
         "Name": _build_incident_name(incident_record_payload),
@@ -1107,7 +1116,7 @@ def _build_incident_fields_candidates(
     seen = set()
 
     for candidate in candidates:
-        clean = {k: v for k, v in candidate.items() if v not in ("", None, [])}
+        clean = _clean_fields(candidate)
         signature = json.dumps(clean, sort_keys=True, ensure_ascii=False)
         if signature in seen:
             continue
@@ -1170,6 +1179,128 @@ def _extract_created_record_id(create_res: Any) -> str:
         return ""
 
 
+def _post_create_backfill_best_effort(
+    *,
+    airtable_update,
+    incidents_table_name: str,
+    incident_record_id: str,
+    incident_record_payload: Dict[str, Any],
+    now_ts: str,
+) -> Dict[str, Any]:
+    if not callable(airtable_update):
+        return {
+            "ok": False,
+            "skipped": True,
+            "reason": "missing_airtable_update",
+            "attempts": [],
+        }
+
+    if not incident_record_id:
+        return {
+            "ok": False,
+            "skipped": True,
+            "reason": "missing_incident_record_id",
+            "attempts": [],
+        }
+
+    incident_key = _pick_text(incident_record_payload.get("incident_key"))
+    if not incident_key:
+        return {
+            "ok": False,
+            "skipped": True,
+            "reason": "missing_incident_key",
+            "attempts": [],
+        }
+
+    flow_id = _pick_text(incident_record_payload.get("flow_id"))
+    root_event_id = _pick_text(incident_record_payload.get("root_event_id"))
+    source_event_id = _pick_text(incident_record_payload.get("source_event_id"))
+    workspace_id = _pick_text(incident_record_payload.get("workspace_id"), "production")
+    run_record_id = _pick_text(incident_record_payload.get("run_record_id"))
+    parent_command_id = _pick_text(incident_record_payload.get("parent_command_id"))
+
+    linked_run = _safe_record_links(run_record_id)
+    linked_command = _safe_record_links(parent_command_id)
+
+    attempts_fields: List[Dict[str, Any]] = [
+        {
+            "Incident_Key": incident_key,
+            "Flow_ID": flow_id,
+            "Root_Event_ID": root_event_id,
+            "Source_Event_ID": source_event_id,
+            "Workspace_ID": workspace_id,
+            "Run_Record_ID": run_record_id,
+            "Command_ID": parent_command_id,
+            "Updated_At": now_ts,
+            "Payload_JSON": _safe_json(incident_record_payload),
+            "Linked_Run": linked_run,
+            "Linked_Command": linked_command,
+        },
+        {
+            "Incident_Key": incident_key,
+            "Flow_ID": flow_id,
+            "Root_Event_ID": root_event_id,
+            "Source_Event_ID": source_event_id,
+            "Workspace_ID": workspace_id,
+            "Run_Record_ID": run_record_id,
+            "Command_ID": parent_command_id,
+            "Updated_At": now_ts,
+        },
+        {
+            "Incident_Key": incident_key,
+            "Flow_ID": flow_id,
+            "Root_Event_ID": root_event_id,
+            "Workspace_ID": workspace_id,
+            "Updated_At": now_ts,
+        },
+        {
+            "Incident_Key": incident_key,
+            "Updated_At": now_ts,
+        },
+        {
+            "Incident_Key": incident_key,
+        },
+    ]
+
+    attempts: List[Dict[str, Any]] = []
+
+    seen = set()
+    for fields in attempts_fields:
+        clean = _clean_fields(fields)
+        if not clean:
+            continue
+
+        signature = json.dumps(clean, sort_keys=True, ensure_ascii=False)
+        if signature in seen:
+            continue
+        seen.add(signature)
+
+        try:
+            res = airtable_update(incidents_table_name, incident_record_id, clean)
+            return {
+                "ok": True,
+                "record_id": incident_record_id,
+                "fields": clean,
+                "response": res,
+                "attempts": attempts,
+            }
+        except Exception as exc:
+            attempts.append(
+                {
+                    "ok": False,
+                    "fields": clean,
+                    "error": repr(exc),
+                }
+            )
+
+    return {
+        "ok": False,
+        "record_id": incident_record_id,
+        "attempts": attempts,
+        "reason": "all_backfill_attempts_failed",
+    }
+
+
 def _build_next_input(base: Dict[str, Any], **extra: Any) -> Dict[str, Any]:
     payload = _strip_runtime_keys(base)
     payload.update(extra)
@@ -1184,6 +1315,7 @@ def run(
     run_record_id: str = "",
     *,
     airtable_create,
+    airtable_update=None,
     airtable_update_by_field=None,
     incidents_table_name: str,
     **kwargs: Any,
@@ -1328,8 +1460,19 @@ def run(
 
     create_res = create_best_effort_res.get("response")
     incident_record_id = _extract_created_record_id(create_res)
+    incident_payload["incident_record_id"] = incident_record_id
 
     print("[incident_create] created =", incident_record_id, flush=True)
+
+    post_create_backfill_res = _post_create_backfill_best_effort(
+        airtable_update=airtable_update,
+        incidents_table_name=incidents_table_name,
+        incident_record_id=incident_record_id,
+        incident_record_payload=incident_payload,
+        now_ts=now_ts,
+    )
+
+    print("[incident_create] post_create_backfill =", post_create_backfill_res, flush=True)
 
     try:
         endpoint_name = _pick_text(
@@ -1410,6 +1553,8 @@ def run(
         "next_action": decision_block["next_action"],
         "auto_executable": decision_block["auto_executable"],
         "priority_score": decision_block["priority_score"],
+        "post_create_backfill_ok": bool(post_create_backfill_res.get("ok")),
+        "post_create_backfill_res": post_create_backfill_res,
         "next_commands": [
             {
                 "capability": next_capability,
@@ -1417,5 +1562,5 @@ def run(
                 "input": next_input,
             }
         ],
-        "terminal": len([1]) == 0,
+        "terminal": False,
     }
