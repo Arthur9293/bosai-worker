@@ -4786,35 +4786,6 @@ def _build_workspace_usage_response(
         "ts": utc_now_iso(),
     }
 
-def _workspace_allowed_capabilities_from_record(fields: Dict[str, Any]) -> List[str]:
-    raw_json = fields.get("Allowed_Capabilities_JSON")
-    raw_text = fields.get("Allowed_Capabilities")
-
-    if isinstance(raw_json, list):
-        return [str(x).strip() for x in raw_json if str(x).strip()]
-
-    if isinstance(raw_text, list):
-        return [str(x).strip() for x in raw_text if str(x).strip()]
-
-    for raw in (raw_json, raw_text):
-        if raw is None:
-            continue
-
-        text = str(raw).strip()
-        if not text:
-            continue
-
-        try:
-            parsed = json.loads(text)
-            if isinstance(parsed, list):
-                return [str(x).strip() for x in parsed if str(x).strip()]
-        except Exception:
-            pass
-
-        return [part.strip() for part in text.split(",") if part.strip()]
-
-    return []
-
 def _normalize_capability_name(value: Any) -> str:
     text = str(value or "").strip()
     if not text:
