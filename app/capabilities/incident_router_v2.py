@@ -7,6 +7,27 @@ from typing import Any, Dict, Optional
 
 DEFAULT_MAX_DEPTH = 8
 
+LEGACY_OUTPUT_KEYS = {
+    "flowid",
+    "flowId",
+    "rooteventid",
+    "rootEventId",
+    "sourceeventid",
+    "sourceEventId",
+    "eventid",
+    "eventId",
+    "workspaceid",
+    "workspaceId",
+    "runrecordid",
+    "runRecordId",
+    "linkedrun",
+    "linkedRun",
+    "commandid",
+    "commandId",
+    "parentcommandid",
+    "parentCommandId",
+}
+
 
 def _now_ts() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -104,6 +125,21 @@ def _pick_text(*values: Any) -> str:
             return text
 
     return ""
+
+
+def _finalize_output_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        cleaned: Dict[str, Any] = {}
+        for key, nested in value.items():
+            if key in LEGACY_OUTPUT_KEYS:
+                continue
+            cleaned[key] = _finalize_output_payload(nested)
+        return cleaned
+
+    if isinstance(value, list):
+        return [_finalize_output_payload(item) for item in value]
+
+    return value
 
 
 def _extract_input(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -384,32 +420,6 @@ def _normalize_reason(data: Dict[str, Any]) -> str:
     return "incident_detected"
 
 
-def _normalize_severity(data: Dict[str, Any]) -> str:
-    severity = _to_str(
-        data.get("severity")
-        or data.get("Severity")
-        or ""
-    ).strip().lower()
-
-    if severity in {"critical", "high", "medium", "warning", "low"}:
-        return "medium" if severity == "warning" else severity
-
-    http_status = _to_int(
-        data.get("http_status")
-        if data.get("http_status") is not None
-        else data.get("httpstatus"),
-        0,
-    )
-    final_failure = _resolve_final_failure(data)
-
-    if http_status >= 500 and final_failure:
-        return "high"
-    if http_status >= 500:
-        return "medium"
-
-    return "medium"
-
-
 def _resolve_final_failure(data: Dict[str, Any]) -> bool:
     if "final_failure" in data:
         return _to_bool(data.get("final_failure"), False)
@@ -439,6 +449,32 @@ def _resolve_final_failure(data: Dict[str, Any]) -> bool:
         return True
 
     return False
+
+
+def _normalize_severity(data: Dict[str, Any]) -> str:
+    severity = _to_str(
+        data.get("severity")
+        or data.get("Severity")
+        or ""
+    ).strip().lower()
+
+    if severity in {"critical", "high", "medium", "warning", "low"}:
+        return "medium" if severity == "warning" else severity
+
+    http_status = _to_int(
+        data.get("http_status")
+        if data.get("http_status") is not None
+        else data.get("httpstatus"),
+        0,
+    )
+    final_failure = _resolve_final_failure(data)
+
+    if http_status >= 500 and final_failure:
+        return "high"
+    if http_status >= 500:
+        return "medium"
+
+    return "medium"
 
 
 def _normalize_event(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -614,23 +650,25 @@ def run(
 
     depth = meta["depth"]
     if depth >= DEFAULT_MAX_DEPTH:
-        return {
-            "ok": False,
-            "capability": "incident_router_v2",
-            "error": "max_depth_reached",
-            "flow_id": meta.get("flow_id", ""),
-            "root_event_id": meta.get("root_event_id", ""),
-            "source_event_id": meta.get("source_event_id", ""),
-            "run_record_id": meta.get("run_record_id", "") or run_record_id,
-            "linked_run": meta.get("linked_run", "") or run_record_id,
-            "terminal": True,
-            "spawn_summary": {
-                "ok": True,
-                "spawned": 0,
-                "skipped": 0,
-                "errors": [],
-            },
-        }
+        return _finalize_output_payload(
+            {
+                "ok": False,
+                "capability": "incident_router_v2",
+                "error": "max_depth_reached",
+                "flow_id": meta.get("flow_id", ""),
+                "root_event_id": meta.get("root_event_id", ""),
+                "source_event_id": meta.get("source_event_id", ""),
+                "run_record_id": meta.get("run_record_id", "") or run_record_id,
+                "linked_run": meta.get("linked_run", "") or run_record_id,
+                "terminal": True,
+                "spawn_summary": {
+                    "ok": True,
+                    "spawned": 0,
+                    "skipped": 0,
+                    "errors": [],
+                },
+            }
+        )
 
     effective_run_record_id = _to_str(
         run_record_id or meta.get("run_record_id") or meta.get("linked_run") or ""
@@ -674,98 +712,104 @@ def run(
 
     next_commands = []
 
-    next_input = {
-        **data,
-        "flow_id": flow_id,
-        "root_event_id": root_event_id,
-        "source_event_id": source_event_id,
-        "event_id": source_event_id,
-        "workspace_id": meta["workspace_id"],
-        "workspace": meta["workspace_id"],
-        "tenant_id": meta["tenant_id"],
-        "app_name": meta["app_name"],
-        "source": meta["source"],
-        "step_index": meta["step_index"] + 1,
-        "_depth": depth + 1,
-        "run_record_id": effective_run_record_id,
-        "linked_run": effective_linked_run,
-        "parent_command_id": meta["command_id"] or meta["parent_command_id"],
-        "command_id": meta["command_id"],
-        "incident_record_id": normalized["incident_record_id"],
-        "log_record_id": normalized["log_record_id"],
-        "category": normalized["category"],
-        "reason": normalized["reason"],
-        "severity": normalized["severity"],
-        "http_status": normalized["http_status"],
-        "final_failure": normalized["final_failure"],
-        "error": normalized["error"],
-        "error_message": normalized["error_message"],
-        "incident_message": normalized["error_message"],
-        "incident_code": normalized["incident_code"],
-        "original_capability": normalized["original_capability"],
-        "failed_capability": normalized["failed_capability"],
-        "source_capability": (
-            normalized["failed_capability"]
-            or normalized["original_capability"]
-        ),
-        "failed_url": normalized["failed_url"],
-        "target_url": normalized["failed_url"],
-        "http_target": normalized["failed_url"],
-        "url": normalized["failed_url"],
-        "failed_method": normalized["failed_method"],
-        "method": normalized["failed_method"],
-        "retry_count": normalized["retry_count"],
-        "retry_max": normalized["retry_max"],
-        "goal": _to_str(data.get("goal") or "").strip(),
-        "decision": _to_str(data.get("decision") or "").strip(),
-        "decision_status": decision_status,
-        "decision_reason": decision_reason,
-        "next_action": next_action,
-        "auto_executable": auto_executable,
-        "priority_score": priority_score,
-        "incident_key": incident_key,
-    }
+    next_input = _finalize_output_payload(
+        {
+            **data,
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
+            "source_event_id": source_event_id,
+            "event_id": source_event_id,
+            "workspace_id": meta["workspace_id"],
+            "workspace": meta["workspace_id"],
+            "tenant_id": meta["tenant_id"],
+            "app_name": meta["app_name"],
+            "source": meta["source"],
+            "step_index": meta["step_index"] + 1,
+            "_depth": depth + 1,
+            "run_record_id": effective_run_record_id,
+            "linked_run": effective_linked_run,
+            "parent_command_id": meta["command_id"] or meta["parent_command_id"],
+            "command_id": meta["command_id"],
+            "incident_record_id": normalized["incident_record_id"],
+            "log_record_id": normalized["log_record_id"],
+            "category": normalized["category"],
+            "reason": normalized["reason"],
+            "severity": normalized["severity"],
+            "http_status": normalized["http_status"],
+            "final_failure": normalized["final_failure"],
+            "error": normalized["error"],
+            "error_message": normalized["error_message"],
+            "incident_message": normalized["error_message"],
+            "incident_code": normalized["incident_code"],
+            "original_capability": normalized["original_capability"],
+            "failed_capability": normalized["failed_capability"],
+            "source_capability": (
+                normalized["failed_capability"]
+                or normalized["original_capability"]
+            ),
+            "failed_url": normalized["failed_url"],
+            "target_url": normalized["failed_url"],
+            "http_target": normalized["failed_url"],
+            "url": normalized["failed_url"],
+            "failed_method": normalized["failed_method"],
+            "method": normalized["failed_method"],
+            "retry_count": normalized["retry_count"],
+            "retry_max": normalized["retry_max"],
+            "goal": _to_str(data.get("goal") or "").strip(),
+            "decision": _to_str(data.get("decision") or "").strip(),
+            "decision_status": decision_status,
+            "decision_reason": decision_reason,
+            "next_action": next_action,
+            "auto_executable": auto_executable,
+            "priority_score": priority_score,
+            "incident_key": incident_key,
+        }
+    )
 
     if routing["route"] == "incident":
         next_commands.append(
-            {
-                "capability": "incident_deduplicate",
-                "priority": 1,
-                "input": next_input,
-            }
+            _finalize_output_payload(
+                {
+                    "capability": "incident_deduplicate",
+                    "priority": 1,
+                    "input": next_input,
+                }
+            )
         )
 
-    return {
-        "ok": True,
-        "capability": "incident_router_v2",
-        "status": "done",
-        "ts": _now_ts(),
-        "flow_id": flow_id,
-        "root_event_id": root_event_id,
-        "source_event_id": source_event_id,
-        "run_record_id": effective_run_record_id,
-        "linked_run": effective_linked_run,
-        "command_id": meta["command_id"],
-        "parent_command_id": meta["parent_command_id"],
-        "route": routing["route"],
-        "reason": routing["reason"],
-        "normalized_category": normalized["category"],
-        "normalized_reason": normalized["reason"],
-        "normalized_severity": normalized["severity"],
-        "normalized_http_status": normalized["http_status"],
-        "final_failure": normalized["final_failure"],
-        "decision_status": decision_status,
-        "decision_reason": decision_reason,
-        "next_action": next_action,
-        "auto_executable": auto_executable,
-        "priority_score": priority_score,
-        "incident_key": incident_key,
-        "next_commands": next_commands,
-        "terminal": len(next_commands) == 0,
-        "spawn_summary": {
+    return _finalize_output_payload(
+        {
             "ok": True,
-            "spawned": len(next_commands),
-            "skipped": 0,
-            "errors": [],
-        },
-    }
+            "capability": "incident_router_v2",
+            "status": "done",
+            "ts": _now_ts(),
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
+            "source_event_id": source_event_id,
+            "run_record_id": effective_run_record_id,
+            "linked_run": effective_linked_run,
+            "command_id": meta["command_id"],
+            "parent_command_id": meta["parent_command_id"],
+            "route": routing["route"],
+            "reason": routing["reason"],
+            "normalized_category": normalized["category"],
+            "normalized_reason": normalized["reason"],
+            "normalized_severity": normalized["severity"],
+            "normalized_http_status": normalized["http_status"],
+            "final_failure": normalized["final_failure"],
+            "decision_status": decision_status,
+            "decision_reason": decision_reason,
+            "next_action": next_action,
+            "auto_executable": auto_executable,
+            "priority_score": priority_score,
+            "incident_key": incident_key,
+            "next_commands": next_commands,
+            "terminal": len(next_commands) == 0,
+            "spawn_summary": {
+                "ok": True,
+                "spawned": len(next_commands),
+                "skipped": 0,
+                "errors": [],
+            },
+        }
+    )
