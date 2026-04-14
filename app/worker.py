@@ -5425,7 +5425,7 @@ def _coerce_non_empty_str(value):
         return ""
     return str(value).strip()
 
-def process_events() -> Dict[str, Any]:
+def process_events_internal() -> Dict[str, Any]:
     fetched = fetch_events_source()  # garde ton appel existant
     source_meta = fetched.get("meta", {}) if isinstance(fetched, dict) else {}
     records = fetched.get("records", []) if isinstance(fetched, dict) else []
