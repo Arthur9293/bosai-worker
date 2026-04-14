@@ -7,6 +7,29 @@ from typing import Any, Dict, List, Optional
 
 DEFAULT_MAX_DEPTH = 8
 
+LEGACY_OUTPUT_KEYS = {
+    "flowid",
+    "flowId",
+    "rooteventid",
+    "rootEventId",
+    "sourceeventid",
+    "sourceEventId",
+    "eventid",
+    "eventId",
+    "workspaceid",
+    "workspaceId",
+    "runrecordid",
+    "runRecordId",
+    "linkedrun",
+    "linkedRun",
+    "commandid",
+    "commandId",
+    "parentcommandid",
+    "parentCommandId",
+    "incidentrecordid",
+    "incidentRecordId",
+}
+
 
 def _now_ts() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -248,6 +271,21 @@ def _pick_value_from_dicts(dicts: List[Dict[str, Any]], *keys: str) -> Any:
     return None
 
 
+def _finalize_output_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        cleaned: Dict[str, Any] = {}
+        for key, nested in value.items():
+            if key in LEGACY_OUTPUT_KEYS:
+                continue
+            cleaned[key] = _finalize_output_payload(nested)
+        return cleaned
+
+    if isinstance(value, list):
+        return [_finalize_output_payload(item) for item in value]
+
+    return value
+
+
 def _normalize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
@@ -377,6 +415,11 @@ def _normalize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     normalized["command_id"] = command_id
     normalized["parent_command_id"] = parent_command_id
     normalized["incident_record_id"] = incident_record_id
+    normalized["incident_key"] = _pick_text_from_dicts(
+        search_dicts,
+        "incident_key",
+        default="",
+    )
     normalized["step_index"] = _to_int(
         _pick_value_from_dicts(search_dicts, "step_index", "stepindex", "stepIndex"),
         0,
@@ -416,23 +459,25 @@ def run(
     )
 
     if current_depth >= DEFAULT_MAX_DEPTH:
-        return {
-            "ok": False,
-            "capability": "complete_flow_incident",
-            "error": "max_depth_reached",
-            "flow_id": _pick_text_from_dicts(search_dicts, "flow_id", default=""),
-            "root_event_id": _pick_text_from_dicts(search_dicts, "root_event_id", default=""),
-            "source_event_id": _pick_text_from_dicts(search_dicts, "source_event_id", default=""),
-            "incident_record_id": _pick_text_from_dicts(search_dicts, "incident_record_id", default=""),
-            "run_record_id": _pick_text_from_dicts(search_dicts, "run_record_id", "linked_run", default=run_record_id),
-            "terminal": True,
-            "spawn_summary": {
-                "ok": True,
-                "spawned": 0,
-                "skipped": 0,
-                "errors": [],
-            },
-        }
+        return _finalize_output_payload(
+            {
+                "ok": False,
+                "capability": "complete_flow_incident",
+                "error": "max_depth_reached",
+                "flow_id": _pick_text_from_dicts(search_dicts, "flow_id", default=""),
+                "root_event_id": _pick_text_from_dicts(search_dicts, "root_event_id", default=""),
+                "source_event_id": _pick_text_from_dicts(search_dicts, "source_event_id", default=""),
+                "incident_record_id": _pick_text_from_dicts(search_dicts, "incident_record_id", default=""),
+                "run_record_id": _pick_text_from_dicts(search_dicts, "run_record_id", "linked_run", default=run_record_id),
+                "terminal": True,
+                "spawn_summary": {
+                    "ok": True,
+                    "spawned": 0,
+                    "skipped": 0,
+                    "errors": [],
+                },
+            }
+        )
 
     flow_id = _pick_text_from_dicts(search_dicts, "flow_id", default="")
     root_event_id = _pick_text_from_dicts(search_dicts, "root_event_id", default=flow_id)
@@ -449,6 +494,7 @@ def run(
     )
     tenant_id = _pick_text_from_dicts(search_dicts, "tenant_id", "tenantId", default="")
     app_name = _pick_text_from_dicts(search_dicts, "app_name", "appName", default="")
+    incident_key = _pick_text_from_dicts(search_dicts, "incident_key", default="")
 
     incoming_run_record_id = _pick_text_from_dicts(search_dicts, "run_record_id", default="")
     linked_run = _pick_text_from_dicts(
@@ -499,10 +545,21 @@ def run(
     next_action = _pick_text_from_dicts(search_dicts, "next_action", default="")
     source_capability = _pick_text_from_dicts(search_dicts, "source_capability", default="")
     original_capability = _pick_text_from_dicts(search_dicts, "original_capability", default="")
-    failed_capability = _pick_text_from_dicts(search_dicts, "failed_capability", default="")
+    failed_capability = _pick_text_from_dicts(
+        search_dicts,
+        "failed_capability",
+        default=source_capability or original_capability,
+    )
     target_capability = _pick_text_from_dicts(search_dicts, "target_capability", default="")
-    failed_url = _pick_text_from_dicts(search_dicts, "failed_url", "target_url", "url", "http_target", default="")
-    failed_method = _pick_text_from_dicts(search_dicts, "failed_method", "method", default="")
+    failed_url = _pick_text_from_dicts(
+        search_dicts,
+        "failed_url",
+        "target_url",
+        "url",
+        "http_target",
+        default="",
+    )
+    failed_method = _pick_text_from_dicts(search_dicts, "failed_method", "method", default="GET").upper()
     incident_code = _pick_text_from_dicts(search_dicts, "incident_code", default="")
     error_message = _pick_text_from_dicts(search_dicts, "error_message", "error", default="")
     incident_message = _pick_text_from_dicts(
@@ -557,6 +614,7 @@ def run(
         "run_record_id": effective_run_record_id,
         "linked_run": linked_run or effective_run_record_id,
         "incident_record_id": incident_record_id,
+        "incident_key": incident_key,
         "parent_command_id": command_id or parent_command_id,
         "command_id": command_id,
         "step_index": current_step_index + 1,
@@ -595,57 +653,60 @@ def run(
             {
                 "capability": "resolve_incident",
                 "priority": 1,
-                "input": dict(next_input_base),
+                "input": _finalize_output_payload(dict(next_input_base)),
             }
         )
 
-    return {
-        "ok": True,
-        "capability": "complete_flow_incident",
-        "status": "done",
-        "flow_id": flow_id,
-        "root_event_id": root_event_id,
-        "source_event_id": source_event_id,
-        "incident_record_id": incident_record_id,
-        "completed": True,
-        "message": "incident_flow_completed",
-        "closed_at": _now_ts(),
-        "run_record_id": effective_run_record_id,
-        "linked_run": linked_run or effective_run_record_id,
-        "workspace_id": workspace_id,
-        "tenant_id": tenant_id,
-        "app_name": app_name,
-        "command_id": command_id,
-        "parent_command_id": parent_command_id,
-        "decision": decision,
-        "decision_status": decision_status,
-        "decision_reason": decision_reason,
-        "next_action": next_action,
-        "auto_resolve": auto_resolve,
-        "severity": severity,
-        "category": category,
-        "reason": reason,
-        "retry_reason": retry_reason,
-        "source_capability": source_capability,
-        "original_capability": original_capability,
-        "failed_capability": failed_capability,
-        "target_capability": target_capability,
-        "failed_url": failed_url,
-        "failed_method": failed_method,
-        "incident_code": incident_code,
-        "error_message": error_message,
-        "incident_message": incident_message,
-        "http_status": http_status,
-        "status_code": status_code,
-        "retry_count": retry_count,
-        "retry_max": retry_max,
-        "final_failure": final_failure,
-        "next_commands": next_commands,
-        "terminal": len(next_commands) == 0,
-        "spawn_summary": {
+    return _finalize_output_payload(
+        {
             "ok": True,
-            "spawned": len(next_commands),
-            "skipped": 0,
-            "errors": [],
-        },
-    }
+            "capability": "complete_flow_incident",
+            "status": "done",
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
+            "source_event_id": source_event_id,
+            "incident_record_id": incident_record_id,
+            "incident_key": incident_key,
+            "completed": True,
+            "message": "incident_flow_completed",
+            "closed_at": _now_ts(),
+            "run_record_id": effective_run_record_id,
+            "linked_run": linked_run or effective_run_record_id,
+            "workspace_id": workspace_id,
+            "tenant_id": tenant_id,
+            "app_name": app_name,
+            "command_id": command_id,
+            "parent_command_id": parent_command_id,
+            "decision": decision,
+            "decision_status": decision_status,
+            "decision_reason": decision_reason,
+            "next_action": next_action,
+            "auto_resolve": auto_resolve,
+            "severity": severity,
+            "category": category,
+            "reason": reason,
+            "retry_reason": retry_reason,
+            "source_capability": source_capability,
+            "original_capability": original_capability,
+            "failed_capability": failed_capability,
+            "target_capability": target_capability,
+            "failed_url": failed_url,
+            "failed_method": failed_method,
+            "incident_code": incident_code,
+            "error_message": error_message,
+            "incident_message": incident_message,
+            "http_status": http_status,
+            "status_code": status_code,
+            "retry_count": retry_count,
+            "retry_max": retry_max,
+            "final_failure": final_failure,
+            "next_commands": next_commands,
+            "terminal": len(next_commands) == 0,
+            "spawn_summary": {
+                "ok": True,
+                "spawned": len(next_commands),
+                "skipped": 0,
+                "errors": [],
+            },
+        }
+    )
