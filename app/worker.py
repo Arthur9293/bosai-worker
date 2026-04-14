@@ -9351,62 +9351,77 @@ def _event_build_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     print("[event_build_command_input] final_input=", json.dumps(command_input, ensure_ascii=False))
     return command_input
     
-def _event_mark_ignored(event_record_id: str, message: str) -> Dict[str, Any]:
+def _event_mark_error(event_record_id: str, message: str) -> Dict[str, Any]:
+    ts = utc_now_iso()
+    msg = str(message or "")[:1000]
+
     return _airtable_update_best_effort(
         EVENTS_TABLE_NAME,
         event_record_id,
         [
             {
-                "Status_select": "Ignored",
-                "Status": "Ignored",
-                "Processed_At": utc_now_iso(),
-                "Error_Message": message,
+                "Status_select": "Error",
+                "Status": "Error",
+                "Processed_At": ts,
+                "Error_Message": msg,
+                "Last_Error": msg,
             },
             {
-                "Status_select": "Ignored",
-                "Processed_At": utc_now_iso(),
-                "Error_Message": message,
+                "Status_select": "Error",
+                "Status": "Error",
+                "Processed_At": ts,
+                "Error_Message": msg,
             },
             {
-                "Status": "Ignored",
-                "Processed_At": utc_now_iso(),
-                "Error_Message": message,
+                "Status_select": "Error",
+                "Processed_At": ts,
+                "Error_Message": msg,
             },
             {
-                "Status_select": "Ignored",
+                "Status_select": "Error",
+                "Processed_At": ts,
             },
             {
-                "Status": "Ignored",
+                "Status": "Error",
+                "Processed_At": ts,
             },
         ],
     )
 
-def _event_mark_error(event_record_id: str, message: str) -> Dict[str, Any]:
+
+def _event_mark_ignored(event_record_id: str, message: str) -> Dict[str, Any]:
+    ts = utc_now_iso()
+    msg = str(message or "")[:1000]
+
     return _airtable_update_best_effort(
         EVENTS_TABLE_NAME,
         event_record_id,
         [
             {
-                "Status_select": "Error",
-                "Status": "Error",
-                "Processed_At": utc_now_iso(),
-                "Error_Message": message,
+                "Status_select": "Ignored",
+                "Status": "Ignored",
+                "Processed_At": ts,
+                "Error_Message": msg,
+                "Last_Error": msg,
             },
             {
-                "Status_select": "Error",
-                "Processed_At": utc_now_iso(),
-                "Error_Message": message,
+                "Status_select": "Ignored",
+                "Status": "Ignored",
+                "Processed_At": ts,
+                "Error_Message": msg,
             },
             {
-                "Status": "Error",
-                "Processed_At": utc_now_iso(),
-                "Error_Message": message,
+                "Status_select": "Ignored",
+                "Processed_At": ts,
+                "Error_Message": msg,
             },
             {
-                "Status_select": "Error",
+                "Status_select": "Ignored",
+                "Processed_At": ts,
             },
             {
-                "Status": "Error",
+                "Status": "Ignored",
+                "Processed_At": ts,
             },
         ],
     )
