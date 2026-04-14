@@ -3585,21 +3585,8 @@ def _safe_json_dumps(obj: Any) -> str:
     except Exception:
         return json.dumps({"value": str(obj)}, ensure_ascii=False)
 
-
 def _formula_escape(value: Any) -> str:
     return str(value or "").replace("\\", "\\\\").replace("'", "\\'")
-
-
-def _safe_int(value: Any, default: int = 0) -> int:
-    try:
-        if value is None or value == "":
-            return default
-        if isinstance(value, bool):
-            return int(value)
-        return int(float(value))
-    except Exception:
-        return default
-
 
 def _unwrap_airtable_record(record: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not isinstance(record, dict):
