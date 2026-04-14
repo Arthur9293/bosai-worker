@@ -10449,19 +10449,19 @@ def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, An
         {
             "step": 1,
             "capability": "http_exec",
-            "goal": "fetch_probe",
+            "goal": "first_probe",
             "url": probe_url,
         },
         {
             "step": 2,
             "capability": "http_exec",
-            "goal": "confirm_probe",
+            "goal": "second_probe",
             "url": confirm_url,
         },
         {
             "step": 3,
-            "capability": "decision_demo",
-            "goal": "final_decision",
+            "capability": "complete_flow_demo",
+            "goal": "complete_flow",
         },
     ]
 
@@ -10496,6 +10496,10 @@ def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, An
         },
     )
 
+    # SAFE:
+    # planner_demo ne spawn QUE le premier probe.
+    # La suite sera pilotée par:
+    # http_exec success -> decision_demo -> second_probe -> decision_demo -> complete_flow_demo
     return {
         "ok": True,
         "message": "planner_demo_executed",
@@ -10511,38 +10515,15 @@ def capability_planner_demo(req: RunRequest, run_record_id: str) -> Dict[str, An
                     "root_event_id": root_event_id,
                     "workspace_id": workspace_id,
                     "step_index": 1,
-                    "goal": "fetch_probe",
+                    "goal": "first_probe",
                 },
-            },
-            {
-                "capability": "http_exec",
-                "priority": 1,
-                "input": {
-                    "url": confirm_url,
-                    "method": "GET",
-                    "flow_id": flow_id,
-                    "root_event_id": root_event_id,
-                    "workspace_id": workspace_id,
-                    "step_index": 2,
-                    "goal": "confirm_probe",
-                },
-            },
-            {
-                "capability": "decision_demo",
-                "priority": 1,
-                "input": {
-                    "flow_id": flow_id,
-                    "root_event_id": root_event_id,
-                    "workspace_id": workspace_id,
-                    "step_index": 3,
-                    "goal": "final_decision",
-                },
-            },
+            }
         ],
         "flow_id": flow_id,
         "root_event_id": root_event_id,
         "run_record_id": run_record_id,
     }
+    
 def capability_lead_decision(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     payload = _normalize_flow_keys(req.input or {})
 
