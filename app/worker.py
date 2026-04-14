@@ -7231,9 +7231,6 @@ def _spawn_next_commands_from_result(
     skipped = 0
     errors: List[str] = []
 
-    # =========================
-    # Resolve flow IDs
-    # =========================
     resolved_flow_id = str(
         result_obj.get("flow_id")
         or result_obj.get("root_event_id")
@@ -7247,6 +7244,20 @@ def _spawn_next_commands_from_result(
         or resolved_flow_id
         or ""
     ).strip()
+
+    resolved_source_event_id = str(
+        result_obj.get("source_event_id")
+        or result_obj.get("event_id")
+        or resolved_root_event_id
+        or resolved_flow_id
+        or ""
+    ).strip()
+
+    resolved_workspace_id = str(
+        result_obj.get("workspace_id")
+        or workspace_id
+        or "production"
+    ).strip() or "production"
 
     if not resolved_flow_id:
         previous = result_obj.get("previous")
@@ -7267,9 +7278,19 @@ def _spawn_next_commands_from_result(
                 or ""
             ).strip()
 
-    # =========================
-    # Spawn next commands
-    # =========================
+    if not resolved_source_event_id:
+        previous = result_obj.get("previous")
+        if isinstance(previous, dict):
+            resolved_source_event_id = str(
+                previous.get("source_event_id")
+                or previous.get("event_id")
+                or previous.get("root_event_id")
+                or previous.get("flow_id")
+                or resolved_root_event_id
+                or resolved_flow_id
+                or ""
+            ).strip()
+
     for idx, item in enumerate(next_commands, start=1):
 
         if not isinstance(item, dict):
@@ -7278,30 +7299,34 @@ def _spawn_next_commands_from_result(
             continue
 
         capability = str(item.get("capability") or "").strip()
-        cmd_input = item.get("input") or {}
+        raw_input = item.get("input")
+        if not isinstance(raw_input, dict):
+            raw_input = item.get("command_input")
+        if not isinstance(raw_input, dict):
+            skipped += 1
+            errors.append(f"next_commands[{idx}] invalid_input")
+            continue
+
         priority = int(item.get("priority") or 1)
 
         if not capability:
             skipped += 1
             errors.append(f"next_commands[{idx}] missing_capability")
             continue
-            
 
         print("[ORCH] capability =", capability, flush=True)
         print("[ORCH] allowlisted =", capability in EXECUTABLE_CAPABILITY_ALLOWLIST, flush=True)
         print("[ORCH] allowlist =", EXECUTABLE_CAPABILITY_ALLOWLIST, flush=True)
-        
+
         if capability not in EXECUTABLE_CAPABILITY_ALLOWLIST:
             skipped += 1
             errors.append(f"next_commands[{idx}] disallowed_capability:{capability}")
             continue
 
-        if not isinstance(cmd_input, dict):
-            skipped += 1
-            errors.append(f"next_commands[{idx}] invalid_input")
-            continue
-
-        cmd_input = dict(cmd_input)
+        cmd_input = dict(raw_input)
+        cmd_input = _normalize_keys_deep(cmd_input)
+        cmd_input = _unwrap_command_payload(cmd_input)
+        cmd_input = _normalize_flow_keys(cmd_input)
 
         if resolved_flow_id and not str(cmd_input.get("flow_id") or "").strip():
             cmd_input["flow_id"] = resolved_flow_id
@@ -7309,9 +7334,43 @@ def _spawn_next_commands_from_result(
         if resolved_root_event_id and not str(cmd_input.get("root_event_id") or "").strip():
             cmd_input["root_event_id"] = resolved_root_event_id
 
-        # =========================================
-        # HTTP fallback propagation
-        # =========================================
+        if resolved_source_event_id and not str(cmd_input.get("source_event_id") or "").strip():
+            cmd_input["source_event_id"] = resolved_source_event_id
+
+        if resolved_source_event_id and not str(cmd_input.get("event_id") or "").strip():
+            cmd_input["event_id"] = resolved_source_event_id
+
+        if resolved_workspace_id and not str(cmd_input.get("workspace_id") or "").strip():
+            cmd_input["workspace_id"] = resolved_workspace_id
+
+        if resolved_workspace_id and not str(cmd_input.get("workspace") or "").strip():
+            cmd_input["workspace"] = resolved_workspace_id
+
+        if parent_command_id and not str(cmd_input.get("parent_command_id") or "").strip():
+            cmd_input["parent_command_id"] = parent_command_id
+
+        if not str(cmd_input.get("run_record_id") or "").strip():
+            linked_run_value = str(
+                result_obj.get("run_record_id")
+                or result_obj.get("linked_run")
+                or ""
+            ).strip()
+            if linked_run_value:
+                cmd_input["run_record_id"] = linked_run_value
+
+        if not str(cmd_input.get("linked_run") or "").strip():
+            linked_run_value = str(
+                result_obj.get("linked_run")
+                or result_obj.get("run_record_id")
+                or ""
+            ).strip()
+            if linked_run_value:
+                cmd_input["linked_run"] = linked_run_value
+
+        cmd_input.pop("command_id", None)
+        cmd_input.pop("commandid", None)
+        cmd_input.pop("commandId", None)
+
         if capability == "http_exec":
             fallback_url = str(
                 cmd_input.get("url")
@@ -7344,7 +7403,10 @@ def _spawn_next_commands_from_result(
             if fallback_goal and not str(cmd_input.get("goal") or "").strip():
                 cmd_input["goal"] = fallback_goal
 
-        cmd_input = _normalize_flow_keys(cmd_input)
+            cmd_input = _normalize_http_exec_input(cmd_input)
+
+        cmd_input = _ensure_incident_identity(cmd_input, result_obj)
+        cmd_input = _sanitize_payload_for_airtable(cmd_input)
 
         child_idem = f"{parent_idempotency_key}:next:{idx}:{capability}"
 
@@ -7373,7 +7435,7 @@ def _spawn_next_commands_from_result(
                     "Priority": priority,
                     "Input_JSON": json.dumps(cmd_input, ensure_ascii=False),
                     "Idempotency_Key": child_idem,
-                    "Workspace_ID": workspace_id,
+                    "Workspace_ID": resolved_workspace_id,
                     "Parent_Command_ID": parent_command_id,
                     "Root_Event_ID": resolved_root_event_id,
                     "Step_Index": current_depth + idx,
@@ -7387,7 +7449,7 @@ def _spawn_next_commands_from_result(
                     "Priority": priority,
                     "Input_JSON": json.dumps(cmd_input, ensure_ascii=False),
                     "Idempotency_Key": child_idem,
-                    "Workspace_ID": workspace_id,
+                    "Workspace_ID": resolved_workspace_id,
                     "Parent_Command_ID": parent_command_id,
                     "Flow_ID": resolved_flow_id,
                     "http_target": flat_http_target,
@@ -7399,7 +7461,7 @@ def _spawn_next_commands_from_result(
                     "Priority": priority,
                     "Input_JSON": json.dumps(cmd_input, ensure_ascii=False),
                     "Idempotency_Key": child_idem,
-                    "Workspace_ID": workspace_id,
+                    "Workspace_ID": resolved_workspace_id,
                     "http_target": flat_http_target,
                     "HTTP_Method": flat_http_method,
                 },
