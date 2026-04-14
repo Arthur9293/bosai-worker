@@ -37,9 +37,10 @@ def _now_ts() -> str:
 
 def _to_str(v: Any) -> str:
     try:
-        return str(v or "")
+        text = str(v or "")
     except Exception:
         return ""
+    return text.replace("\\_", "_").replace('\\"', '"').strip()
 
 
 def _to_int(v: Any, default: int = 0) -> int:
@@ -48,7 +49,10 @@ def _to_int(v: Any, default: int = 0) -> int:
             return default
         return int(v)
     except Exception:
-        return default
+        try:
+            return int(str(v).strip())
+        except Exception:
+            return default
 
 
 def _to_bool(v: Any, default: bool = False) -> bool:
@@ -56,6 +60,7 @@ def _to_bool(v: Any, default: bool = False) -> bool:
         return v
     if v is None:
         return default
+
     try:
         text = str(v).strip().lower()
     except Exception:
@@ -74,7 +79,7 @@ def _json_load_maybe(value: Any) -> Any:
     if value is None:
         return None
 
-    text = str(value).strip()
+    text = _to_str(value)
     if not text:
         return None
 
@@ -94,6 +99,7 @@ def _json_load_maybe(value: Any) -> Any:
         if candidate in seen:
             continue
         seen.add(candidate)
+
         try:
             parsed = json.loads(candidate)
         except Exception:
@@ -131,12 +137,9 @@ def _pick_text(*values: Any) -> str:
 
         if isinstance(value, dict):
             for key in (
-                "id",
-                "record_id",
                 "incident_record_id",
-                "name",
-                "value",
-                "text",
+                "record_id",
+                "id",
                 "flow_id",
                 "root_event_id",
                 "source_event_id",
@@ -146,6 +149,11 @@ def _pick_text(*values: Any) -> str:
                 "linked_run",
                 "command_id",
                 "parent_command_id",
+                "url",
+                "method",
+                "text",
+                "value",
+                "name",
             ):
                 if key in value:
                     text = _pick_text(value.get(key))
@@ -153,7 +161,7 @@ def _pick_text(*values: Any) -> str:
                         return text
             continue
 
-        text = _to_str(value).strip()
+        text = _to_str(value)
         if text:
             return text
 
@@ -167,24 +175,12 @@ def _pick_value(*values: Any) -> Any:
     return None
 
 
-def _merge_missing(target: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, Any]:
-    if not isinstance(target, dict):
-        target = {}
-    if not isinstance(source, dict):
-        return target
-
-    for key, value in source.items():
-        if key not in target or _is_empty(target.get(key)):
-            target[key] = value
-    return target
-
-
 def _extract_record_id(value: Any) -> str:
     if value is None:
         return ""
 
     if isinstance(value, str):
-        text = value.strip()
+        text = _to_str(value)
         if text.startswith("rec"):
             return text
         parsed = _json_load_maybe(text)
@@ -210,7 +206,13 @@ def _extract_record_id(value: Any) -> str:
             if rid:
                 return rid
 
-        for key in ("response", "result", "incident_create_res", "incident_result"):
+        for key in (
+            "incident_create_res",
+            "incident_result",
+            "incident_update_res",
+            "response",
+            "result",
+        ):
             rid = _extract_record_id(value.get(key))
             if rid:
                 return rid
@@ -218,34 +220,52 @@ def _extract_record_id(value: Any) -> str:
     return ""
 
 
-def _extract_search_dicts(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    result: List[Dict[str, Any]] = []
+def _collect_candidate_dicts(value: Any, out: List[Dict[str, Any]]) -> None:
+    if value is None:
+        return
 
-    def _append_candidate(value: Any) -> None:
-        if isinstance(value, str):
-            value = _json_load_maybe(value)
-        if isinstance(value, dict) and value:
-            result.append(dict(value))
+    if isinstance(value, str):
+        parsed = _json_load_maybe(value)
+        if parsed is not None and parsed is not value:
+            _collect_candidate_dicts(parsed, out)
+        return
 
-    if isinstance(payload, dict):
-        result.append(dict(payload))
+    if isinstance(value, list):
+        for item in value:
+            _collect_candidate_dicts(item, out)
+        return
+
+    if not isinstance(value, dict):
+        return
+
+    out.append(dict(value))
 
     for key in (
-        "incident_result",
-        "incident_create_res",
-        "incident_update_res",
-        "original_input",
-        "body",
-        "payload",
-        "result",
         "input",
         "command_input",
         "incident",
+        "incident_create_res",
+        "incident_result",
+        "incident_update_res",
+        "original_input",
+        "result",
         "response",
+        "payload",
+        "body",
+        "data",
     ):
-        nested = payload.get(key) if isinstance(payload, dict) else None
-        _append_candidate(nested)
+        if key in value:
+            _collect_candidate_dicts(value.get(key), out)
 
+    # Explore the rest as well, to catch deeply nested Airtable payloads.
+    for nested in value.values():
+        if isinstance(nested, (dict, list, str)):
+            _collect_candidate_dicts(nested, out)
+
+
+def _extract_search_dicts(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    _collect_candidate_dicts(payload, result)
     return result
 
 
@@ -283,6 +303,9 @@ def _finalize_output_payload(value: Any) -> Any:
     if isinstance(value, list):
         return [_finalize_output_payload(item) for item in value]
 
+    if isinstance(value, str):
+        return value.replace("\\_", "_").replace('\\"', '"')
+
     return value
 
 
@@ -299,19 +322,14 @@ def _normalize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(nested, dict):
             merged = dict(normalized)
             merged.pop(key, None)
-            merged = _merge_missing(merged, nested)
+            for nested_key, nested_value in nested.items():
+                if nested_key not in merged or _is_empty(merged.get(nested_key)):
+                    merged[nested_key] = nested_value
             normalized = merged
 
     search_dicts = _extract_search_dicts(normalized)
 
-    flow_id = _pick_text_from_dicts(
-        search_dicts,
-        "flow_id",
-        "flowid",
-        "flowId",
-        default="",
-    )
-
+    flow_id = _pick_text_from_dicts(search_dicts, "flow_id", "flowid", "flowId", default="")
     root_event_id = _pick_text_from_dicts(
         search_dicts,
         "root_event_id",
@@ -322,7 +340,6 @@ def _normalize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "eventId",
         default=flow_id,
     )
-
     source_event_id = _pick_text_from_dicts(
         search_dicts,
         "source_event_id",
@@ -333,7 +350,6 @@ def _normalize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "eventId",
         default=root_event_id or flow_id,
     )
-
     workspace_id = _pick_text_from_dicts(
         search_dicts,
         "workspace_id",
@@ -342,7 +358,6 @@ def _normalize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "workspace",
         default="production",
     )
-
     run_record_id = _pick_text_from_dicts(
         search_dicts,
         "run_record_id",
@@ -352,7 +367,6 @@ def _normalize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "linkedrun",
         default="",
     )
-
     linked_run = _pick_text_from_dicts(
         search_dicts,
         "linked_run",
@@ -361,15 +375,7 @@ def _normalize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "runrecordid",
         default=run_record_id,
     )
-
-    command_id = _pick_text_from_dicts(
-        search_dicts,
-        "command_id",
-        "commandid",
-        "commandId",
-        default="",
-    )
-
+    command_id = _pick_text_from_dicts(search_dicts, "command_id", "commandid", "commandId", default="")
     parent_command_id = _pick_text_from_dicts(
         search_dicts,
         "parent_command_id",
@@ -377,7 +383,6 @@ def _normalize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "parentCommandId",
         default=command_id,
     )
-
     incident_record_id = _pick_text_from_dicts(
         search_dicts,
         "incident_record_id",
@@ -415,11 +420,7 @@ def _normalize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     normalized["command_id"] = command_id
     normalized["parent_command_id"] = parent_command_id
     normalized["incident_record_id"] = incident_record_id
-    normalized["incident_key"] = _pick_text_from_dicts(
-        search_dicts,
-        "incident_key",
-        default="",
-    )
+    normalized["incident_key"] = _pick_text_from_dicts(search_dicts, "incident_key", default="")
     normalized["step_index"] = _to_int(
         _pick_value_from_dicts(search_dicts, "step_index", "stepindex", "stepIndex"),
         0,
@@ -571,9 +572,8 @@ def run(
     )
 
     http_status_value = _pick_value_from_dicts(search_dicts, "http_status", "status_code")
-    http_status: Optional[int]
     try:
-        http_status = int(http_status_value) if http_status_value not in (None, "") else None
+        http_status: Optional[int] = int(http_status_value) if http_status_value not in (None, "") else None
     except Exception:
         http_status = None
 
@@ -585,18 +585,43 @@ def run(
     )
 
     retry_count = _to_int(
-        _pick_value_from_dicts(search_dicts, "retry_count"),
+        _pick_value_from_dicts(search_dicts, "retry_count", "retrycount"),
         0,
     )
     retry_max = _to_int(
-        _pick_value_from_dicts(search_dicts, "retry_max"),
+        _pick_value_from_dicts(search_dicts, "retry_max", "retrymax"),
         0,
     )
 
     current_step_index = _to_int(
-        _pick_value_from_dicts(search_dicts, "step_index"),
+        _pick_value_from_dicts(search_dicts, "step_index", "stepindex"),
         0,
     )
+
+    # Inferences défensives pour ne pas perdre le contexte au dernier maillon.
+    if not category and (http_status or 0) >= 400:
+        category = "http_failure"
+
+    if not incident_code and (http_status or 0) >= 400:
+        incident_code = "http_status_error"
+
+    if not severity:
+        if (http_status or 0) >= 500:
+            severity = "high"
+        elif (http_status or 0) >= 400:
+            severity = "medium"
+
+    if not final_failure and (http_status or 0) >= 500 and retry_count >= retry_max:
+        final_failure = True
+
+    if not decision_status and incident_record_id and final_failure:
+        decision_status = "Escalated"
+
+    if not decision_reason and incident_record_id and final_failure:
+        decision_reason = "internal_escalation_sent"
+
+    if not next_action:
+        next_action = "complete_flow_incident"
 
     auto_resolve = False
     decision = _pick_text(payload.get("decision"), "keep_escalated")
