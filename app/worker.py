@@ -7636,49 +7636,64 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             "parent_command_id": parent_command_id or "",
             "command_id": current_command_id or command_id or "",
         }
+    
+    def _clean_runtime_payload(
+        payload_obj: Any,
+        *,
+        keep_command_id: bool = False,
+    ) -> Dict[str, Any]:
+        if not isinstance(payload_obj, dict):
+            return {}
+
+        cleaned = dict(payload_obj)
+        cleaned = _normalize_keys_deep(cleaned)
+        cleaned = _unwrap_command_payload(cleaned)
+        cleaned = _normalize_flow_keys(cleaned)
+        cleaned = _ensure_incident_identity(cleaned)
+        cleaned = _sanitize_payload_for_airtable(cleaned)
+
+        if not keep_command_id:
+            cleaned.pop("command_id", None)
+
+        return cleaned
+
     def _inject_context_into_input(
         input_obj: Dict[str, Any],
         ctx: Dict[str, str],
+        *,
+        include_command_id: bool = False,
     ) -> Dict[str, Any]:
         out = dict(input_obj or {})
 
         if ctx.get("flow_id"):
             out["flow_id"] = ctx["flow_id"]
-            out["flowid"] = ctx["flow_id"]
 
         if ctx.get("root_event_id"):
             out["root_event_id"] = ctx["root_event_id"]
-            out["rooteventid"] = ctx["root_event_id"]
 
         if ctx.get("source_event_id"):
             out["source_event_id"] = ctx["source_event_id"]
-            out["sourceeventid"] = ctx["source_event_id"]
 
         if ctx.get("event_id"):
             out["event_id"] = ctx["event_id"]
-            out["eventid"] = ctx["event_id"]
 
         if ctx.get("workspace_id"):
             out["workspace_id"] = ctx["workspace_id"]
-            out["workspaceid"] = ctx["workspace_id"]
             out["workspace"] = ctx["workspace_id"]
 
         if ctx.get("run_record_id"):
             out["run_record_id"] = ctx["run_record_id"]
-            out["runrecordid"] = ctx["run_record_id"]
 
         if ctx.get("linked_run"):
             out["linked_run"] = ctx["linked_run"]
-            out["linkedrun"] = ctx["linked_run"]
 
         if ctx.get("parent_command_id"):
             out["parent_command_id"] = ctx["parent_command_id"]
-            out["parentcommandid"] = ctx["parent_command_id"]
 
-        if ctx.get("command_id"):
+        if include_command_id and ctx.get("command_id"):
             out["command_id"] = ctx["command_id"]
-            out["commandid"] = ctx["command_id"]
 
+        out = _clean_runtime_payload(out, keep_command_id=include_command_id)
         return out
 
     def _inject_context_into_result(
@@ -7696,8 +7711,12 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         if not _pick(out.get("source_event_id"), out.get("sourceeventid"), out.get("sourceEventId")) and ctx.get("source_event_id"):
             out["source_event_id"] = ctx["source_event_id"]
 
+        if not _pick(out.get("event_id"), out.get("eventid"), out.get("eventId")) and ctx.get("event_id"):
+            out["event_id"] = ctx["event_id"]
+
         if not _pick(out.get("workspace_id"), out.get("workspaceid"), out.get("workspaceId"), out.get("workspace")) and ctx.get("workspace_id"):
             out["workspace_id"] = ctx["workspace_id"]
+            out["workspace"] = ctx["workspace_id"]
 
         if not _pick(out.get("run_record_id"), out.get("runrecordid"), out.get("runRecordId")) and ctx.get("run_record_id"):
             out["run_record_id"] = ctx["run_record_id"]
@@ -7708,6 +7727,8 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         if not _pick(out.get("command_id"), out.get("commandid"), out.get("commandId")) and ctx.get("command_id"):
             out["command_id"] = ctx["command_id"]
 
+        out = _ensure_incident_identity(out, ctx)
+        out = _sanitize_payload_for_airtable(out)
         return out
 
     def _inject_context_into_next_commands(
@@ -7729,7 +7750,8 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             if not isinstance(child_input, dict):
                 child_input = {}
 
-            child_input = _unwrap_command_input(dict(child_input))
+            child_input = dict(child_input)
+            child_input = _clean_runtime_payload(child_input, keep_command_id=False)
 
             if not _pick(
                 child_input.get("parent_command_id"),
@@ -7737,14 +7759,9 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                 child_input.get("parentCommandId"),
             ):
                 child_input["parent_command_id"] = current_command_id
-                child_input["parentcommandid"] = current_command_id
 
             child_ctx = _normalize_command_context(
-                command_id=_pick(
-                    child_input.get("command_id"),
-                    child_input.get("commandid"),
-                    "",
-                ),
+                command_id="",
                 fields={},
                 cmd_input={**parent_ctx, **child_input},
                 fallback_workspace=parent_ctx.get("workspace_id") or "production",
@@ -7754,7 +7771,18 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             if not child_ctx.get("parent_command_id"):
                 child_ctx["parent_command_id"] = current_command_id
 
-            child_input = _inject_context_into_input(child_input, child_ctx)
+            child_input = _inject_context_into_input(
+                child_input,
+                child_ctx,
+                include_command_id=False,
+            )
+            child_input.pop("command_id", None)
+            child_input = _ensure_incident_identity(child_input, parent_ctx)
+            child_input = _sanitize_payload_for_airtable(child_input)
+
+            child_copy.pop("command_input", None)
+            child_copy.pop("parentcommandid", None)
+            child_copy.pop("commandid", None)
             child_copy["input"] = child_input
 
             if not _pick(
@@ -7763,7 +7791,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             ):
                 child_copy["parent_command_id"] = current_command_id
 
-            fixed.append(child_copy)
+            fixed.append(_sanitize_payload_for_airtable(child_copy))
 
         return fixed
 
@@ -7842,6 +7870,8 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         error_message: str,
         result_obj: Dict[str, Any],
     ) -> None:
+        clean_result_obj = _sanitize_payload_for_airtable(result_obj)
+
         _airtable_update_best_effort(
             COMMANDS_TABLE_NAME,
             command_id,
@@ -7850,7 +7880,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                     "Status_select": "Error",
                     "Finished_At": utc_now_iso(),
                     "Error_Message": error_message,
-                    "Result_JSON": _json_dump_local(result_obj),
+                    "Result_JSON": _json_dump_local(clean_result_obj),
                     "Linked_Run": [run_record_id],
                     "Next_Retry_At": None,
                     "Is_Locked": False,
@@ -7971,10 +8001,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         if not isinstance(raw_cmd_input, dict):
             raw_cmd_input = {}
 
-        raw_cmd_input = _normalize_keys_deep(raw_cmd_input)
-        raw_cmd_input = _unwrap_command_input(raw_cmd_input)
-        raw_cmd_input = _ensure_incident_identity(raw_cmd_input)
-
+        raw_cmd_input = _clean_runtime_payload(raw_cmd_input, keep_command_id=True)
         preserved_raw_cmd_input = dict(raw_cmd_input)
 
         cmd_ctx = _normalize_command_context(
@@ -7990,8 +8017,13 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         )
 
         cmd_ctx = _ensure_incident_identity(cmd_ctx, raw_cmd_input)
-        cmd_input = _inject_context_into_input(raw_cmd_input, cmd_ctx)
+        cmd_input = _inject_context_into_input(
+            raw_cmd_input,
+            cmd_ctx,
+            include_command_id=True,
+        )
         cmd_input = _ensure_incident_identity(cmd_input, cmd_ctx)
+        cmd_input = _sanitize_payload_for_airtable(cmd_input)
 
         print("[command_orchestrator] cmd_input capability =", capability, flush=True)
         print("[command_orchestrator] cmd_input payload =", cmd_input, flush=True)
@@ -8025,13 +8057,12 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         if not isinstance(validated_cmd_input, dict):
             validated_cmd_input = {}
 
-        validated_cmd_input = _normalize_keys_deep(validated_cmd_input)
-        validated_cmd_input = _unwrap_command_input(validated_cmd_input)
+        validated_cmd_input = _clean_runtime_payload(validated_cmd_input, keep_command_id=True)
 
         if capability in ORCHESTRATION_CAPABILITIES:
             merged_cmd_input = dict(preserved_raw_cmd_input)
             merged_cmd_input.update(validated_cmd_input)
-            cmd_input = merged_cmd_input
+            cmd_input = _clean_runtime_payload(merged_cmd_input, keep_command_id=True)
         else:
             cmd_input = validated_cmd_input
 
@@ -8042,11 +8073,23 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             fallback_workspace=cmd_ctx.get("workspace_id") or "production",
             fallback_run_record_id=cmd_ctx.get("run_record_id") or run_record_id,
         )
-        cmd_input = _inject_context_into_input(cmd_input, cmd_ctx)
+        cmd_input = _inject_context_into_input(
+            cmd_input,
+            cmd_ctx,
+            include_command_id=True,
+        )
+        cmd_input = _ensure_incident_identity(cmd_input, cmd_ctx)
+        cmd_input = _sanitize_payload_for_airtable(cmd_input)
 
         if not is_valid:
             if capability in ORCHESTRATION_CAPABILITIES and preserved_raw_cmd_input:
-                cmd_input = _inject_context_into_input(preserved_raw_cmd_input, cmd_ctx)
+                cmd_input = _inject_context_into_input(
+                    preserved_raw_cmd_input,
+                    cmd_ctx,
+                    include_command_id=True,
+                )
+                cmd_input = _ensure_incident_identity(cmd_input, cmd_ctx)
+                cmd_input = _sanitize_payload_for_airtable(cmd_input)
             else:
                 failed += 1
                 _command_mark_retry_or_dead_best_effort(
@@ -8092,13 +8135,16 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                     "next_commands": [],
                 }
 
+            result_obj = _normalize_keys_deep(result_obj)
             result_obj = _inject_context_into_result(result_obj, cmd_ctx)
+            result_obj = _propagate_incident_identity(result_obj, cmd_input)
 
             result_obj["next_commands"] = _inject_context_into_next_commands(
                 result_obj.get("next_commands"),
                 cmd_ctx,
                 cid,
             )
+            result_obj = _sanitize_payload_for_airtable(result_obj)
 
             if not _worker_still_owns_lock(cid, req.worker, lock_token):
                 blocked += 1
@@ -8114,29 +8160,24 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
 
             workspace_id = _pick(
                 result_obj.get("workspace_id"),
-                result_obj.get("workspaceid"),
                 cmd_ctx.get("workspace_id"),
                 fields.get("Workspace_ID"),
                 "production",
             )
             root_event_id = _pick(
                 result_obj.get("root_event_id"),
-                result_obj.get("rooteventid"),
                 result_obj.get("flow_id"),
-                result_obj.get("flowid"),
                 cmd_ctx.get("root_event_id"),
                 cmd_ctx.get("flow_id"),
                 _infer_root_event_id(fields, idem),
             )
             flow_id = _pick(
                 result_obj.get("flow_id"),
-                result_obj.get("flowid"),
                 cmd_ctx.get("flow_id"),
                 root_event_id,
             )
             source_event_id = _pick(
                 result_obj.get("source_event_id"),
-                result_obj.get("sourceeventid"),
                 cmd_ctx.get("source_event_id"),
                 root_event_id,
                 flow_id,
@@ -8158,6 +8199,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
                     run_record_id,
                 )
                 result_obj["command_id"] = _pick(result_obj.get("command_id"), cid)
+                result_obj = _sanitize_payload_for_airtable(result_obj)
 
             result_is_ok = not (result_obj.get("ok") is False)
 
@@ -8222,6 +8264,8 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
 
                 if not result_obj.get("command_id"):
                     result_obj["command_id"] = cid
+
+                result_obj = _sanitize_payload_for_airtable(result_obj)
 
             if result_is_ok:
                 _command_mark_done_best_effort(cid, run_record_id, result_obj)
@@ -8323,7 +8367,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
         result["post_ops"] = post_ops
 
     return result
-
+    
 def capability_escalation_engine(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     def _lock_acquire_adapter(lock_key: str, owner: str = "", holder: str = "", *args, **kwargs):
         chosen_holder = str(owner or holder or getattr(req, "worker", "") or "escalation_engine").strip()
