@@ -545,7 +545,6 @@ def _extract_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
         payload.get("parentcommandid"),
         payload.get("parentcommand_id"),
         payload.get("parentCommandId"),
-        command_id,
     )
 
     return {
@@ -1527,6 +1526,11 @@ def _build_next_input(base: Dict[str, Any], **extra: Any) -> Dict[str, Any]:
     payload = _normalize_keys_deep(payload)
     payload = _unwrap_command_payload(payload)
     payload = _normalize_flow_keys(payload)
+
+    # on évite de propager l'identité de la commande courante
+    # au prochain maillon de chaîne
+    payload.pop("command_id", None)
+
     return payload
 
 
