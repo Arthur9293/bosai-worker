@@ -9,6 +9,29 @@ from typing import Any, Dict, List, Optional
 DEFAULT_MAX_DEPTH = 8
 AIRTABLE_RECORD_ID_RE = re.compile(r"^rec[a-zA-Z0-9]{14}$")
 
+LEGACY_OUTPUT_KEYS = {
+    "flowid",
+    "flowId",
+    "rooteventid",
+    "rootEventId",
+    "sourceeventid",
+    "sourceEventId",
+    "eventid",
+    "eventId",
+    "workspaceid",
+    "workspaceId",
+    "runrecordid",
+    "runRecordId",
+    "linkedrun",
+    "linkedRun",
+    "commandid",
+    "commandId",
+    "parentcommandid",
+    "parentCommandId",
+    "incidentrecordid",
+    "incidentRecordId",
+}
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -628,6 +651,110 @@ def _best_effort_update_incident(
     return {"ok": False, "attempts": results}
 
 
+def _compact_incident_create_res(res: Dict[str, Any], incident_record_id: str) -> Dict[str, Any]:
+    if not isinstance(res, dict):
+        return {"ok": False}
+
+    compact: Dict[str, Any] = {
+        "ok": bool(res.get("ok")),
+    }
+
+    if res.get("skipped") is not None:
+        compact["skipped"] = bool(res.get("skipped"))
+
+    reason = _to_str(res.get("reason")).strip()
+    if reason:
+        compact["reason"] = reason
+
+    record_id = _to_str(res.get("record_id") or incident_record_id).strip()
+    if record_id:
+        compact["record_id"] = record_id
+
+    error = _to_str(res.get("error")).strip()
+    if error:
+        compact["error"] = error
+
+    return compact
+
+
+def _compact_incident_update_res(
+    res: Dict[str, Any],
+    incident_record_id: str,
+) -> Dict[str, Any]:
+    if not isinstance(res, dict):
+        return {"ok": False}
+
+    compact: Dict[str, Any] = {
+        "ok": bool(res.get("ok")),
+    }
+
+    reason = _to_str(res.get("reason")).strip()
+    if reason:
+        compact["reason"] = reason
+
+    error = _to_str(res.get("error")).strip()
+    if error:
+        compact["error"] = error
+
+    if compact["ok"] and incident_record_id:
+        compact["record_id"] = incident_record_id
+        compact["status"] = "Escalated"
+
+    return compact
+
+
+def _compact_logs_update_res(res: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(res, dict):
+        return {"ok": False}
+
+    compact: Dict[str, Any] = {
+        "ok": bool(res.get("ok")),
+        "skipped": bool(res.get("skipped")),
+    }
+
+    reason = _to_str(res.get("reason")).strip()
+    if reason:
+        compact["reason"] = reason
+
+    error = _to_str(res.get("error")).strip()
+    if error:
+        compact["error"] = error
+
+    return compact
+
+
+def _finalize_output_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        cleaned: Dict[str, Any] = {}
+        for key, nested in value.items():
+            if key in LEGACY_OUTPUT_KEYS:
+                continue
+            cleaned[key] = _finalize_output_payload(nested)
+        return cleaned
+
+    if isinstance(value, list):
+        return [_finalize_output_payload(item) for item in value]
+
+    return value
+
+
+def _build_next_input(base: Dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(base)
+
+    for noisy_key in (
+        "incident_create_res",
+        "incident_update_res",
+        "logs_update_res",
+        "attempts",
+        "response",
+        "fields",
+        "command_id",
+    ):
+        payload.pop(noisy_key, None)
+
+    return _finalize_output_payload(payload)
+
+
 def capability_internal_escalate(
     req,
     run_record_id,
@@ -645,31 +772,33 @@ def capability_internal_escalate(
         0,
     )
     if depth >= DEFAULT_MAX_DEPTH:
-        return {
-            "ok": False,
-            "capability": "internal_escalate",
-            "status": "error",
-            "error": "max_depth_reached",
-            "flow_id": _pick_text_from_dicts(search_dicts, "flow_id", default=""),
-            "root_event_id": _pick_text_from_dicts(
-                search_dicts,
-                "root_event_id",
-                "event_id",
-                "id",
-                default="",
-            ),
-            "run_record_id": _to_str(
-                run_record_id
-                or _pick_text_from_dicts(search_dicts, "run_record_id", "linked_run", default="")
-            ).strip(),
-            "terminal": True,
-            "spawn_summary": {
-                "ok": True,
-                "spawned": 0,
-                "skipped": 0,
-                "errors": [],
-            },
-        }
+        return _finalize_output_payload(
+            {
+                "ok": False,
+                "capability": "internal_escalate",
+                "status": "error",
+                "error": "max_depth_reached",
+                "flow_id": _pick_text_from_dicts(search_dicts, "flow_id", default=""),
+                "root_event_id": _pick_text_from_dicts(
+                    search_dicts,
+                    "root_event_id",
+                    "event_id",
+                    "id",
+                    default="",
+                ),
+                "run_record_id": _to_str(
+                    run_record_id
+                    or _pick_text_from_dicts(search_dicts, "run_record_id", "linked_run", default="")
+                ).strip(),
+                "terminal": True,
+                "spawn_summary": {
+                    "ok": True,
+                    "spawned": 0,
+                    "skipped": 0,
+                    "errors": [],
+                },
+            }
+        )
 
     flow_id = _pick_text_from_dicts(
         search_dicts,
@@ -719,6 +848,12 @@ def capability_internal_escalate(
             incident_record_id = _extract_record_id(data)
             if incident_record_id:
                 break
+
+    incident_key = _pick_text_from_dicts(
+        search_dicts,
+        "incident_key",
+        default="",
+    )
 
     log_record_id = _pick_text_from_dicts(
         search_dicts,
@@ -821,7 +956,11 @@ def capability_internal_escalate(
 
     original_capability = _pick_text_from_dicts(search_dicts, "original_capability", default="")
     failed_capability = _pick_text_from_dicts(search_dicts, "failed_capability", default=original_capability)
-    source_capability = _pick_text_from_dicts(search_dicts, "source_capability", default=failed_capability or original_capability)
+    source_capability = _pick_text_from_dicts(
+        search_dicts,
+        "source_capability",
+        default=failed_capability or original_capability,
+    )
 
     workspace_id = _pick_text_from_dicts(
         search_dicts,
@@ -858,8 +997,15 @@ def capability_internal_escalate(
     incident_created_now = False
 
     try:
-        if not incident_record_id and incidents_table_name and airtable_create:
-            incident_create_res = _best_effort_create_incident(
+        if incident_record_id:
+            incident_create_res = {
+                "ok": True,
+                "skipped": True,
+                "reason": "incident_already_present",
+                "record_id": incident_record_id,
+            }
+        elif incidents_table_name and airtable_create:
+            raw_create_res = _best_effort_create_incident(
                 airtable_create=airtable_create,
                 incidents_table_name=incidents_table_name,
                 title=incident_title,
@@ -879,15 +1025,9 @@ def capability_internal_escalate(
                 incident_code=incident_code,
                 final_failure=final_failure,
             )
-            incident_record_id = _to_str(incident_create_res.get("record_id")).strip()
+            incident_record_id = _to_str(raw_create_res.get("record_id")).strip()
             incident_created_now = bool(incident_record_id)
-        elif incident_record_id:
-            incident_create_res = {
-                "ok": True,
-                "skipped": True,
-                "reason": "incident_already_present",
-                "record_id": incident_record_id,
-            }
+            incident_create_res = _compact_incident_create_res(raw_create_res, incident_record_id)
         elif not incidents_table_name:
             incident_create_res = {"ok": False, "reason": "missing_incidents_table_name"}
         else:
@@ -899,7 +1039,7 @@ def capability_internal_escalate(
     incident_update_res: Dict[str, Any] = {"ok": False, "skipped": True}
     try:
         if incidents_table_name and incident_record_id:
-            incident_update_res = _best_effort_update_incident(
+            raw_update_res = _best_effort_update_incident(
                 airtable_update=airtable_update,
                 incidents_table_name=incidents_table_name,
                 incident_record_id=incident_record_id,
@@ -909,6 +1049,7 @@ def capability_internal_escalate(
                 parent_command_id=parent_command_id,
                 workspace_id=workspace_id,
             )
+            incident_update_res = _compact_incident_update_res(raw_update_res, incident_record_id)
         elif not incidents_table_name:
             incident_update_res = {
                 "ok": False,
@@ -948,6 +1089,7 @@ def capability_internal_escalate(
         "sla_status": sla_status_raw,
         "final_failure": final_failure,
         "incident_record_id": incident_record_id,
+        "incident_key": incident_key,
         "incident_create_ok": bool(incident_record_id),
         "incident_created_now": incident_created_now,
         "log_record_id": log_record_id,
@@ -960,7 +1102,6 @@ def capability_internal_escalate(
         "tenant_id": tenant_id,
         "app_name": app_name,
         "parent_command_id": parent_command_id,
-        "command_id": parent_command_id,
         "original_capability": original_capability,
         "failed_capability": failed_capability,
         "source_capability": source_capability,
@@ -972,12 +1113,13 @@ def capability_internal_escalate(
         if log_record_id:
             print("[INTERNAL_ESCALATE] log_record_id =", log_record_id)
 
-            logs_update_res = _best_effort_update_logs_error(
+            raw_logs_update_res = _best_effort_update_logs_error(
                 airtable_update=airtable_update,
                 logs_errors_table_name=logs_errors_table_name,
                 log_record_id=log_record_id,
                 escalation_result=escalation_result,
             )
+            logs_update_res = _compact_logs_update_res(raw_logs_update_res)
 
             if not logs_update_res.get("ok") and not logs_update_res.get("skipped"):
                 print(
@@ -994,95 +1136,98 @@ def capability_internal_escalate(
         logs_update_res = {"ok": False, "skipped": False, "error": repr(e)}
         print("[INTERNAL_ESCALATE] logs_errors exception =", repr(e))
 
-    next_input = {
-        "flow_id": flow_id,
-        "root_event_id": root_event_id,
-        "source_event_id": source_event_id,
-        "event_id": source_event_id or root_event_id or flow_id,
-        "incident_record_id": incident_record_id,
-        "log_record_id": log_record_id,
-        "step_index": _to_int(_pick_value_from_dicts(search_dicts, "step_index"), 0) + 1,
-        "_depth": depth + 1,
-        "goal": "escalation_sent",
-        "workspace_id": workspace_id,
-        "workspace": workspace_id,
-        "tenant_id": tenant_id,
-        "app_name": app_name,
-        "parent_command_id": parent_command_id,
-        "command_id": parent_command_id,
-        "linked_command": parent_command_id,
-        "severity": severity_raw,
-        "category": category,
-        "reason": reason,
-        "incident_code": incident_code,
-        "final_failure": final_failure,
-        "failed_url": failed_url,
-        "target_url": failed_url,
-        "http_target": failed_url,
-        "url": failed_url,
-        "failed_method": failed_method,
-        "method": failed_method,
-        "http_status": http_status,
-        "status_code": http_status,
-        "error_message": error_message,
-        "incident_message": incident_message,
-        "retry_reason": retry_reason,
-        "retry_count": retry_count,
-        "retry_max": retry_max,
-        "run_record_id": effective_run_record_id,
-        "linked_run": effective_run_record_id,
-        "decision_status": "Escalated",
-        "decision_reason": "internal_escalation_sent",
-        "next_action": "complete_flow_incident",
-        "incident_create_ok": bool(incident_record_id),
-        "incident_create_res": incident_create_res,
-        "original_capability": original_capability,
-        "failed_capability": failed_capability,
-        "source_capability": source_capability,
-    }
+    next_input = _build_next_input(
+        {
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
+            "source_event_id": source_event_id,
+            "event_id": source_event_id or root_event_id or flow_id,
+            "incident_record_id": incident_record_id,
+            "incident_key": incident_key,
+            "log_record_id": log_record_id,
+            "step_index": _to_int(_pick_value_from_dicts(search_dicts, "step_index"), 0) + 1,
+            "_depth": depth + 1,
+            "goal": "escalation_sent",
+            "workspace_id": workspace_id,
+            "workspace": workspace_id,
+            "tenant_id": tenant_id,
+            "app_name": app_name,
+            "parent_command_id": parent_command_id,
+            "linked_command": parent_command_id,
+            "severity": severity_raw,
+            "category": category,
+            "reason": reason,
+            "incident_code": incident_code,
+            "final_failure": final_failure,
+            "failed_url": failed_url,
+            "target_url": failed_url,
+            "http_target": failed_url,
+            "url": failed_url,
+            "failed_method": failed_method,
+            "method": failed_method,
+            "http_status": http_status,
+            "status_code": http_status,
+            "error_message": error_message,
+            "incident_message": incident_message,
+            "retry_reason": retry_reason,
+            "retry_count": retry_count,
+            "retry_max": retry_max,
+            "run_record_id": effective_run_record_id,
+            "linked_run": effective_run_record_id,
+            "decision_status": "Escalated",
+            "decision_reason": "internal_escalation_sent",
+            "next_action": "complete_flow_incident",
+            "original_capability": original_capability,
+            "failed_capability": failed_capability,
+            "source_capability": source_capability,
+        }
+    )
 
-    return {
-        "ok": True,
-        "capability": "internal_escalate",
-        "status": "done",
-        "mode": "internal_escalate",
-        "delivered": True,
-        "flow_id": flow_id,
-        "root_event_id": root_event_id,
-        "source_event_id": source_event_id,
-        "incident_record_id": incident_record_id,
-        "incident_create_ok": bool(incident_record_id),
-        "incident_created_now": incident_created_now,
-        "incident_create_res": incident_create_res,
-        "log_record_id": log_record_id,
-        "message": "internal_escalation_sent",
-        "run_record_id": effective_run_record_id,
-        "linked_run": effective_run_record_id,
-        "command_id": parent_command_id,
-        "decision_status": "Escalated",
-        "decision_reason": "internal_escalation_sent",
-        "next_action": "complete_flow_incident",
-        "final_failure": final_failure,
-        "logs_update_ok": bool(logs_update_res.get("ok")),
-        "logs_update_skipped": bool(logs_update_res.get("skipped")),
-        "logs_update_res": logs_update_res,
-        "incident_update_ok": bool(incident_update_res.get("ok")),
-        "incident_update_res": incident_update_res,
-        "next_commands": [
-            {
-                "capability": "complete_flow_incident",
-                "priority": 1,
-                "input": next_input,
-            }
-        ],
-        "terminal": False,
-        "spawn_summary": {
+    return _finalize_output_payload(
+        {
             "ok": True,
-            "spawned": 1,
-            "skipped": 0,
-            "errors": [],
-        },
-    }
+            "capability": "internal_escalate",
+            "status": "done",
+            "mode": "internal_escalate",
+            "delivered": True,
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
+            "source_event_id": source_event_id,
+            "incident_record_id": incident_record_id,
+            "incident_key": incident_key,
+            "incident_create_ok": bool(incident_record_id),
+            "incident_created_now": incident_created_now,
+            "incident_create_res": incident_create_res,
+            "log_record_id": log_record_id,
+            "message": "internal_escalation_sent",
+            "run_record_id": effective_run_record_id,
+            "linked_run": effective_run_record_id,
+            "command_id": parent_command_id,
+            "decision_status": "Escalated",
+            "decision_reason": "internal_escalation_sent",
+            "next_action": "complete_flow_incident",
+            "final_failure": final_failure,
+            "logs_update_ok": bool(logs_update_res.get("ok")),
+            "logs_update_skipped": bool(logs_update_res.get("skipped")),
+            "logs_update_res": logs_update_res,
+            "incident_update_ok": bool(incident_update_res.get("ok")),
+            "incident_update_res": incident_update_res,
+            "next_commands": [
+                {
+                    "capability": "complete_flow_incident",
+                    "priority": 1,
+                    "input": next_input,
+                }
+            ],
+            "terminal": False,
+            "spawn_summary": {
+                "ok": True,
+                "spawned": 1,
+                "skipped": 0,
+                "errors": [],
+            },
+        }
+    )
 
 
 def run(
