@@ -3579,11 +3579,6 @@ def _airtable_create_best_effort(table_name: str, candidates: List[Dict[str, Any
 # ============================================================
 # System runs
 # ============================================================
-def _safe_json_dumps(obj: Any) -> str:
-    try:
-        return json.dumps(obj, ensure_ascii=False)
-    except Exception:
-        return json.dumps({"value": str(obj)}, ensure_ascii=False)
 
 def _formula_escape(value: Any) -> str:
     return str(value or "").replace("\\", "\\\\").replace("'", "\\'")
