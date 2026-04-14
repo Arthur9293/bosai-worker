@@ -6727,29 +6727,115 @@ def _command_lock_heartbeat(command_id: str, lock_token: str) -> None:
             }
         ],
     )
+
+
+def _extract_command_persistence_fields(result_obj: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(result_obj, dict):
+        return {}
+
+    def _pick(*values: Any) -> str:
+        for value in values:
+            if isinstance(value, list):
+                for item in value:
+                    text = str(item or "").strip()
+                    if text:
+                        return text
+                continue
+            text = str(value or "").strip()
+            if text:
+                return text
+        return ""
+
+    incident_result = result_obj.get("incident_result")
+    if not isinstance(incident_result, dict):
+        incident_result = {}
+
+    fields: Dict[str, Any] = {}
+
+    workspace_id = _pick(
+        result_obj.get("workspace_id"),
+        result_obj.get("workspaceId"),
+        result_obj.get("Workspace_ID"),
+    )
+    flow_id = _pick(
+        result_obj.get("flow_id"),
+        result_obj.get("flowId"),
+        result_obj.get("Flow_ID"),
+    )
+    root_event_id = _pick(
+        result_obj.get("root_event_id"),
+        result_obj.get("rootEventId"),
+        result_obj.get("Root_Event_ID"),
+        result_obj.get("event_id"),
+        result_obj.get("eventId"),
+    )
+    source_event_id = _pick(
+        result_obj.get("source_event_id"),
+        result_obj.get("sourceEventId"),
+        result_obj.get("Source_Event_ID"),
+        result_obj.get("event_id"),
+        result_obj.get("eventId"),
+    )
+    linked_incident = _pick(
+        result_obj.get("linked_incident"),
+        result_obj.get("incident_id"),
+        incident_result.get("linked_incident"),
+        incident_result.get("incident_id"),
+        result_obj.get("incident_record_id"),
+        result_obj.get("incident_key"),
+    )
+
+    if workspace_id:
+        fields["Workspace_ID"] = workspace_id
+    if flow_id:
+        fields["Flow_ID"] = flow_id
+    if root_event_id:
+        fields["Root_Event_ID"] = root_event_id
+    if source_event_id:
+        fields["Source_Event_ID"] = source_event_id
+    if linked_incident:
+        fields["Linked_Incident"] = linked_incident
+
+    return fields
     
 def _command_mark_done_best_effort(command_id: str, run_record_id: str, result_obj: Dict[str, Any]) -> Dict[str, Any]:
     now = utc_now_iso()
-    safe_result_obj = _truncate_large_result_payload(result_obj)
-    result_json = json.dumps(safe_result_obj, ensure_ascii=False)
+
+    safe_result_obj = dict(result_obj or {}) if isinstance(result_obj, dict) else {}
+    safe_result_obj = _normalize_keys_deep(safe_result_obj)
+    safe_result_obj = _propagate_incident_identity(safe_result_obj)
+    safe_result_obj = _sanitize_payload_for_airtable(safe_result_obj)
+
+    result_json = _safe_json_dumps(safe_result_obj)
     http_status = _extract_http_status_from_result(safe_result_obj)
+    link_fields = _extract_command_persistence_fields(safe_result_obj)
+
+    rich_fields = {
+        "Status_select": "Done",
+        "Finished_At": now,
+        "Result_JSON": result_json,
+        "Last_Error": "",
+        "Error_Message": "",
+        "Linked_Run": [run_record_id],
+        "Is_Locked": False,
+        "Lock_Expires_At": None,
+        "Lock_Token": "",
+        "Last_Heartbeat_At": now,
+        **link_fields,
+    }
+
+    if http_status is not None:
+        rich_fields["Last_HTTP_Status"] = http_status
 
     return _airtable_update_best_effort(
         COMMANDS_TABLE_NAME,
         command_id,
         [
+            dict(rich_fields),
             {
-                "Status_select": "Done",
-                "Finished_At": now,
-                "Result_JSON": result_json,
-                "Last_Error": "",
-                "Error_Message": "",
-                "Linked_Run": [run_record_id],
-                "Is_Locked": False,
-                "Lock_Expires_At": None,
-                "Lock_Token": "",
-                "Last_Heartbeat_At": now,
-                "Last_HTTP_Status": http_status,
+                k: v
+                for k, v in rich_fields.items()
+                if k not in ("Source_Event_ID", "Linked_Incident")
             },
             {
                 "Status_select": "Done",
@@ -6757,8 +6843,7 @@ def _command_mark_done_best_effort(command_id: str, run_record_id: str, result_o
                 "Result_JSON": result_json,
                 "Linked_Run": [run_record_id],
                 "Last_HTTP_Status": http_status,
-            },
-            {
+            } if http_status is not None else {
                 "Status_select": "Done",
                 "Finished_At": now,
                 "Result_JSON": result_json,
@@ -6828,9 +6913,29 @@ def _command_mark_unsupported_best_effort(command_id: str, run_record_id: str, m
         ],
     )
 
-def _command_mark_retry_or_dead_best_effort(command_id: str, run_record_id: str, fields: Dict[str, Any], message: str) -> Dict[str, Any]:
+def _command_mark_retry_or_dead_best_effort(
+    command_id: str,
+    run_record_id: str,
+    fields: Dict[str, Any],
+    message: str,
+    result_obj: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     now = utc_now_iso()
-    payload = json.dumps({"error": message}, ensure_ascii=False)
+
+    safe_result_obj = dict(result_obj or {}) if isinstance(result_obj, dict) else {}
+    if not safe_result_obj:
+        safe_result_obj = {"error": message, "error_message": message}
+    else:
+        safe_result_obj.setdefault("error", message)
+        safe_result_obj.setdefault("error_message", message)
+
+    safe_result_obj = _normalize_keys_deep(safe_result_obj)
+    safe_result_obj = _propagate_incident_identity(safe_result_obj)
+    safe_result_obj = _sanitize_payload_for_airtable(safe_result_obj)
+
+    result_json = _safe_json_dumps(safe_result_obj)
+    http_status = _extract_http_status_from_result(safe_result_obj)
+    link_fields = _extract_command_persistence_fields(safe_result_obj)
 
     try:
         retry_count = int(fields.get("Retry_Count", 0) or 0)
@@ -6847,25 +6952,43 @@ def _command_mark_retry_or_dead_best_effort(command_id: str, run_record_id: str,
     elif retry_max <= 0:
         retry_max = 3
 
+    retry_backoff_sec = _to_int(fields.get("Retry_Backoff_Sec"), 60)
+    if retry_backoff_sec <= 0:
+        retry_backoff_sec = 60
+
     if retry_count < retry_max:
         next_at = _compute_next_retry_at(fields)
+
+        rich_retry_fields = {
+            "Status_select": "Retry",
+            "Retry_Count": retry_count + 1,
+            "Retry_Max": retry_max,
+            "Retry_Backoff_Sec": retry_backoff_sec,
+            "Next_Retry_At": next_at,
+            "Finished_At": now,
+            "Last_Error": message,
+            "Error_Message": message,
+            "Result_JSON": result_json,
+            "Linked_Run": [run_record_id],
+            "Is_Locked": False,
+            "Lock_Expires_At": None,
+            "Lock_Token": "",
+            "Last_Heartbeat_At": now,
+            **link_fields,
+        }
+
+        if http_status is not None:
+            rich_retry_fields["Last_HTTP_Status"] = http_status
+
         return _airtable_update_best_effort(
             COMMANDS_TABLE_NAME,
             command_id,
             [
+                dict(rich_retry_fields),
                 {
-                    "Status_select": "Retry",
-                    "Retry_Count": retry_count + 1,
-                    "Next_Retry_At": next_at,
-                    "Finished_At": now,
-                    "Last_Error": message,
-                    "Error_Message": message,
-                    "Result_JSON": payload,
-                    "Linked_Run": [run_record_id],
-                    "Is_Locked": False,
-                    "Lock_Expires_At": None,
-                    "Lock_Token": "",
-                    "Last_Heartbeat_At": now,
+                    k: v
+                    for k, v in rich_retry_fields.items()
+                    if k not in ("Source_Event_ID", "Linked_Incident")
                 },
                 {
                     "Status_select": "Retry",
@@ -6879,21 +7002,32 @@ def _command_mark_retry_or_dead_best_effort(command_id: str, run_record_id: str,
             ],
         )
 
+    rich_dead_fields = {
+        "Status_select": "Dead",
+        "Finished_At": now,
+        "Last_Error": message,
+        "Error_Message": message,
+        "Result_JSON": result_json,
+        "Linked_Run": [run_record_id],
+        "Is_Locked": False,
+        "Lock_Expires_At": None,
+        "Lock_Token": "",
+        "Last_Heartbeat_At": now,
+        **link_fields,
+    }
+
+    if http_status is not None:
+        rich_dead_fields["Last_HTTP_Status"] = http_status
+
     return _airtable_update_best_effort(
         COMMANDS_TABLE_NAME,
         command_id,
         [
+            dict(rich_dead_fields),
             {
-                "Status_select": "Dead",
-                "Finished_At": now,
-                "Last_Error": message,
-                "Error_Message": message,
-                "Result_JSON": payload,
-                "Linked_Run": [run_record_id],
-                "Is_Locked": False,
-                "Lock_Expires_At": None,
-                "Lock_Token": "",
-                "Last_Heartbeat_At": now,
+                k: v
+                for k, v in rich_dead_fields.items()
+                if k not in ("Source_Event_ID", "Linked_Incident")
             },
             {
                 "Status_select": "Dead",
@@ -6949,10 +7083,8 @@ def _command_mark_retry_or_dead_from_result_best_effort(
     retry_fields["Retry_Backoff_Sec"] = retry_delay_seconds
 
     if retryable and not final_failure:
-        # Le helper du dessous incrémente déjà de +1
         retry_fields["Retry_Count"] = current_retry_count
     else:
-        # Forcer le chemin terminal
         retry_fields["Retry_Count"] = max(retry_count_after_failure, retry_max)
 
     return _command_mark_retry_or_dead_best_effort(
@@ -6960,8 +7092,9 @@ def _command_mark_retry_or_dead_from_result_best_effort(
         run_record_id=run_record_id,
         fields=retry_fields,
         message=message,
+        result_obj=result_obj,
     )
-
+    
 def capability_retry_queue(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     inp = req.input or {}
     limit = int(inp.get("limit", 50) or 50)
