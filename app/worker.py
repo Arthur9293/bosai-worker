@@ -1581,6 +1581,7 @@ def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
         or normalized.get("SourceEventId")
         or event_id
         or root_event_id
+        or flow_id
         or ""
     ).strip()
 
@@ -1651,11 +1652,17 @@ def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not root_event_id and event_id:
         root_event_id = event_id
 
+    if not root_event_id and flow_id:
+        root_event_id = flow_id
+
     if not source_event_id:
-        source_event_id = event_id or root_event_id
+        source_event_id = event_id or root_event_id or flow_id
 
     if not event_id:
-        event_id = source_event_id or root_event_id
+        event_id = source_event_id or root_event_id or flow_id
+
+    if not flow_id:
+        flow_id = root_event_id or event_id or source_event_id
 
     if flow_id:
         normalized["flow_id"] = flow_id
