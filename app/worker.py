@@ -1271,7 +1271,7 @@ def airtable_update_lead_by_lead_id(lead_id: str, fields_to_update: Dict[str, An
 
     record = airtable_find_first(
         table_name=LEADS_TABLE_NAME,
-        filter_formula=f"{{Lead_ID}}='{lead_id}'",
+        formula=f"{{Lead_ID}}='{lead_id}'",
     )
 
     if not record:
