@@ -6234,60 +6234,168 @@ def create_command_record(
     workspace_id: Optional[str] = None,
     parent_run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    if not capability:
+    if not capability or not str(capability).strip():
         raise ValueError("capability is required")
 
-    payload = input_data or {}
+    resolved_capability = str(capability).strip()
+    command_input = dict(input_data or {})
 
-    flow_id = str(payload.get("flow_id") or "").strip()
-    root_event_id = str(payload.get("root_event_id") or "").strip()
+    command_input = _normalize_keys_deep(command_input)
+    command_input = _unwrap_command_payload(command_input)
+    command_input = _normalize_flow_keys(command_input)
 
-    command_id = f"cmd_{uuid.uuid4().hex[:12]}"
-    idem_key = f"spawn:{capability}:{flow_id or 'no_flow'}:{uuid.uuid4().hex[:10]}"
+    resolved_workspace_id = str(
+        workspace_id
+        or command_input.get("workspace_id")
+        or command_input.get("workspace")
+        or "production"
+    ).strip() or "production"
 
-    fields: Dict[str, Any] = {
-        "Command_ID": command_id,
-        "Capability": capability,
-        "Status": "Queued",
-        "Priority": int(priority or 1),
-        "Input_JSON": json.dumps(payload, ensure_ascii=False),
-        "Idempotency_Key": idem_key,
-    }
+    flow_id = str(
+        command_input.get("flow_id")
+        or command_input.get("root_event_id")
+        or command_input.get("event_id")
+        or ""
+    ).strip()
 
-    if workspace_id:
-        fields["Workspace_ID"] = workspace_id
-    if flow_id:
-        fields["Flow_ID"] = flow_id
-    if root_event_id:
-        fields["Root_Event_ID"] = root_event_id
-    if parent_run_id:
-        fields["Parent_Run_ID"] = parent_run_id
+    root_event_id = str(
+        command_input.get("root_event_id")
+        or command_input.get("event_id")
+        or flow_id
+        or ""
+    ).strip()
 
-    print("[AIRTABLE CREATE DEBUG PRE] entering create")
-    print("[AIRTABLE CREATE DEBUG PRE] table_name =", table_name)
-    print("[AIRTABLE CREATE DEBUG PRE] AIRTABLE_API_URL =", AIRTABLE_API_URL)
-    print("[AIRTABLE CREATE DEBUG PRE] fields keys =", list(fields.keys()) if isinstance(fields, dict) else type(fields))
-    print("[AIRTABLE CREATE DEBUG PRE] AIRTABLE_BASE_ID =", AIRTABLE_BASE_ID)
-    
-    url = f"{AIRTABLE_API_URL}/{AIRTABLE_BASE_ID}/{quote(table_name)}"
-    headers = airtable_headers()
+    source_event_id = str(
+        command_input.get("source_event_id")
+        or command_input.get("event_id")
+        or root_event_id
+        or flow_id
+        or ""
+    ).strip()
 
-    print("[AIRTABLE CREATE DEBUG] table_name =", table_name)
-    print("[AIRTABLE CREATE DEBUG] url =", url)
-    print("[AIRTABLE CREATE DEBUG] fields =", fields)
-    
-    resp = requests.post(
-        url,
-        headers=headers,
-        json={"fields": fields},
-        timeout=20,
+    parent_command_id = str(
+        command_input.get("parent_command_id")
+        or command_input.get("parentcommandid")
+        or ""
+    ).strip()
+
+    step_index = _to_int(
+        command_input.get("step_index")
+        if command_input.get("step_index") is not None
+        else command_input.get("stepindex"),
+        0,
     )
 
-    print("[AIRTABLE CREATE DEBUG] status_code =", resp.status_code)
-    print("[AIRTABLE CREATE DEBUG] response_text =", resp.text)
-    
-    resp.raise_for_status()
-    return resp.json()
+    retry_count = _to_int(
+        command_input.get("retry_count")
+        if command_input.get("retry_count") is not None
+        else command_input.get("retrycount"),
+        0,
+    )
+
+    if not flow_id and root_event_id:
+        flow_id = root_event_id
+
+    if not root_event_id and flow_id:
+        root_event_id = flow_id
+
+    if not source_event_id:
+        source_event_id = root_event_id or flow_id
+
+    if flow_id:
+        command_input["flow_id"] = flow_id
+
+    if root_event_id:
+        command_input["root_event_id"] = root_event_id
+
+    if source_event_id:
+        command_input["source_event_id"] = source_event_id
+        if not str(command_input.get("event_id") or "").strip():
+            command_input["event_id"] = source_event_id
+
+    command_input["workspace_id"] = resolved_workspace_id
+    command_input["workspace"] = resolved_workspace_id
+
+    if parent_run_id and not str(command_input.get("run_record_id") or "").strip():
+        command_input["run_record_id"] = str(parent_run_id).strip()
+
+    if parent_run_id and not str(command_input.get("linked_run") or "").strip():
+        command_input["linked_run"] = str(parent_run_id).strip()
+
+    if parent_command_id:
+        command_input["parent_command_id"] = parent_command_id
+
+    if resolved_capability == "http_exec":
+        command_input = _normalize_http_exec_input(command_input)
+
+        resolved_url = _resolve_http_exec_url_from_command_input(command_input)
+        if not resolved_url:
+            raise ValueError("http_exec requires url/http_target")
+
+    command_input = _ensure_incident_identity(command_input)
+    command_input = _sanitize_payload_for_airtable(command_input)
+
+    idempotency_key = (
+        f"spawn:{resolved_capability}:"
+        f"{flow_id or root_event_id or 'no_flow'}:"
+        f"step{step_index}:"
+        f"retry{retry_count}:"
+        f"{uuid.uuid4().hex[:10]}"
+    )
+
+    existing = find_command_by_idem(idempotency_key)
+    if existing:
+        return {
+            "ok": True,
+            "mode": "existing_command",
+            "command_record_id": str(existing.get("id") or "").strip(),
+            "capability": resolved_capability,
+            "workspace_id": resolved_workspace_id,
+            "idempotency_key": idempotency_key,
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
+            "source_event_id": source_event_id,
+            "parent_command_id": parent_command_id,
+        }
+
+    candidates = _build_command_fields_candidates(
+        capability=resolved_capability,
+        command_input=command_input,
+        workspace_id=resolved_workspace_id,
+        event_record_id=source_event_id or root_event_id or flow_id or parent_run_id or "",
+        idempotency_key=idempotency_key,
+        priority=max(1, int(priority or 1)),
+    )
+
+    create_res = _airtable_create_best_effort(COMMANDS_TABLE_NAME, candidates)
+    if not create_res.get("ok"):
+        return {
+            "ok": False,
+            "error": f"command_create_failed:{create_res.get('error')}",
+            "capability": resolved_capability,
+            "workspace_id": resolved_workspace_id,
+            "idempotency_key": idempotency_key,
+            "flow_id": flow_id,
+            "root_event_id": root_event_id,
+            "source_event_id": source_event_id,
+            "parent_command_id": parent_command_id,
+            "command_input": command_input,
+            "create_res": create_res,
+        }
+
+    return {
+        "ok": True,
+        "mode": "created_command",
+        "command_record_id": str(create_res.get("record_id") or "").strip(),
+        "capability": resolved_capability,
+        "workspace_id": resolved_workspace_id,
+        "idempotency_key": idempotency_key,
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "source_event_id": source_event_id,
+        "parent_command_id": parent_command_id,
+        "parent_run_id": str(parent_run_id or "").strip(),
+    }
 
 def _new_lock_token() -> str:
     return uuid.uuid4().hex
