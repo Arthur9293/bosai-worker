@@ -4753,17 +4753,10 @@ def _workspace_allowed_capabilities_from_record(row: Dict[str, Any]) -> List[str
         if parsed:
             explicit_caps.extend(parsed)
 
-    plan_key = _normalize_plan_key_value(
-        row.get("Plan_Code")
-        or row.get("plan_code")
-        or row.get("Plan_Key")
-        or row.get("plan_key")
-        or row.get("Plan_Name")
-        or row.get("plan_name")
-        or ""
-    )
+    plan_info = _workspace_plan_gate_info(row)
+    resolved_plan_key = str(plan_info.get("resolved_plan_key") or "").strip()
 
-    matrix_caps = sorted(PLAN_CAPABILITY_MATRIX.get(plan_key, set()))
+    matrix_caps = sorted(PLAN_CAPABILITY_MATRIX.get(resolved_plan_key, set()))
 
     merged: List[str] = []
     seen = set()
@@ -4778,7 +4771,8 @@ def _workspace_allowed_capabilities_from_record(row: Dict[str, Any]) -> List[str
         merged.append(name)
 
     return merged
-    
+
+
 def _enforce_workspace_access_for_run(
     request: Request,
     headers_lc: Dict[str, str],
@@ -4793,9 +4787,8 @@ def _enforce_workspace_access_for_run(
     if not record:
         record = _find_workspace_record_by_workspace_id(workspace_id)
 
-    row = _unwrap_airtable_record(record)
-
-    if not row:
+    unwrapped = _unwrap_airtable_record(record)
+    if not unwrapped:
         raise HTTPException(
             status_code=404,
             detail={
@@ -4803,6 +4796,12 @@ def _enforce_workspace_access_for_run(
                 "workspace_id": workspace_id,
             },
         )
+
+    row = (
+        unwrapped.get("fields", {})
+        if isinstance(unwrapped, dict) and isinstance(unwrapped.get("fields"), dict)
+        else unwrapped
+    ) or {}
 
     if not _workspace_is_active_record(row):
         raise HTTPException(
@@ -4815,7 +4814,9 @@ def _enforce_workspace_access_for_run(
 
     allowed_capabilities = _workspace_allowed_capabilities_from_record(row)
     allowed_capabilities = [
-        _normalize_capability_name(item) for item in allowed_capabilities if item
+        _normalize_capability_name(item)
+        for item in allowed_capabilities
+        if _normalize_capability_name(item)
     ]
 
     if capability_name and allowed_capabilities:
