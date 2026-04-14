@@ -13734,6 +13734,208 @@ async def run(request: Request, response: Response) -> RunResponse:
     headers_lc = {k.lower(): v for k, v in request.headers.items()}
     print("[RUN DEBUG] headers_lc =", headers_lc, flush=True)
 
+    def _pick_text(*values: Any) -> str:
+        for value in values:
+            if isinstance(value, list):
+                for item in value:
+                    text = str(item or "").strip()
+                    if text:
+                        return text
+                continue
+            text = str(value or "").strip()
+            if text:
+                return text
+        return ""
+
+    def _safe_dict(value: Any) -> Dict[str, Any]:
+        if isinstance(value, dict):
+            return dict(value)
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                return dict(parsed) if isinstance(parsed, dict) else {}
+            except Exception:
+                return {}
+        return {}
+
+    def _ensure_input_context(input_obj: Dict[str, Any], workspace_id: str) -> Dict[str, Any]:
+        out = _safe_dict(input_obj)
+        out = _normalize_keys_deep(out)
+        out = _normalize_flow_keys(out)
+        out = _inject_workspace(out, workspace_id)
+
+        flow_id, root_event_id = _resolve_flow_ids(out)
+
+        source_event_id = _pick_text(
+            out.get("source_event_id"),
+            out.get("sourceEventId"),
+            out.get("event_id"),
+            out.get("eventId"),
+            root_event_id,
+            flow_id,
+        )
+
+        if flow_id and not _pick_text(out.get("flow_id"), out.get("flowid"), out.get("flowId")):
+            out["flow_id"] = flow_id
+
+        if root_event_id and not _pick_text(out.get("root_event_id"), out.get("rooteventid"), out.get("rootEventId")):
+            out["root_event_id"] = root_event_id
+
+        if source_event_id and not _pick_text(out.get("source_event_id"), out.get("sourceeventid"), out.get("sourceEventId")):
+            out["source_event_id"] = source_event_id
+
+        if source_event_id and not _pick_text(out.get("event_id"), out.get("eventid"), out.get("eventId")):
+            out["event_id"] = source_event_id
+
+        out["workspace_id"] = workspace_id
+        out["workspace"] = workspace_id
+
+        return out
+
+    def _ensure_result_context(
+        result_obj: Dict[str, Any],
+        *,
+        workspace_id: str,
+        run_record_id: str,
+        req_input: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        out = _safe_dict(result_obj)
+        out = _normalize_keys_deep(out)
+        out = _normalize_flow_keys(out)
+
+        req_input = _safe_dict(req_input)
+
+        req_flow_id, req_root_event_id = _resolve_flow_ids(req_input)
+
+        req_source_event_id = _pick_text(
+            req_input.get("source_event_id"),
+            req_input.get("sourceEventId"),
+            req_input.get("event_id"),
+            req_input.get("eventId"),
+            req_root_event_id,
+            req_flow_id,
+        )
+
+        out_flow_id = _pick_text(
+            out.get("flow_id"),
+            out.get("flowid"),
+            out.get("flowId"),
+            req_flow_id,
+        )
+        out_root_event_id = _pick_text(
+            out.get("root_event_id"),
+            out.get("rooteventid"),
+            out.get("rootEventId"),
+            out.get("event_id"),
+            out.get("eventId"),
+            req_root_event_id,
+            out_flow_id,
+        )
+        out_source_event_id = _pick_text(
+            out.get("source_event_id"),
+            out.get("sourceeventid"),
+            out.get("sourceEventId"),
+            out.get("event_id"),
+            out.get("eventId"),
+            req_source_event_id,
+            out_root_event_id,
+            out_flow_id,
+        )
+
+        if out_flow_id:
+            out["flow_id"] = out_flow_id
+        if out_root_event_id:
+            out["root_event_id"] = out_root_event_id
+        if out_source_event_id:
+            out["source_event_id"] = out_source_event_id
+            out["event_id"] = out_source_event_id
+
+        out["workspace_id"] = workspace_id
+        out["workspace"] = workspace_id
+        out.setdefault("run_record_id", run_record_id)
+        out.setdefault("linked_run", run_record_id)
+
+        try:
+            out = _ensure_incident_identity(out, req_input)
+        except Exception:
+            pass
+
+        return out
+
+    def _enrich_next_command(
+        next_cmd: Dict[str, Any],
+        *,
+        parent_result: Dict[str, Any],
+        workspace_id: str,
+        run_record_id: str,
+    ) -> Dict[str, Any]:
+        child = dict(next_cmd or {})
+        child = _normalize_keys_deep(child)
+
+        child_input = child.get("input")
+        if not isinstance(child_input, dict):
+            child_input = child.get("command_input")
+        if not isinstance(child_input, dict):
+            child_input = {}
+
+        child_input = _safe_dict(child_input)
+        child_input = _normalize_keys_deep(child_input)
+        child_input = _normalize_flow_keys(child_input)
+
+        parent_flow_id = _pick_text(
+            parent_result.get("flow_id"),
+            parent_result.get("flowid"),
+            parent_result.get("flowId"),
+        )
+        parent_root_event_id = _pick_text(
+            parent_result.get("root_event_id"),
+            parent_result.get("rooteventid"),
+            parent_result.get("rootEventId"),
+            parent_result.get("event_id"),
+            parent_result.get("eventId"),
+            parent_flow_id,
+        )
+        parent_source_event_id = _pick_text(
+            parent_result.get("source_event_id"),
+            parent_result.get("sourceEventId"),
+            parent_result.get("event_id"),
+            parent_result.get("eventId"),
+            parent_root_event_id,
+            parent_flow_id,
+        )
+
+        if not _pick_text(child_input.get("flow_id"), child_input.get("flowid"), child_input.get("flowId")) and parent_flow_id:
+            child_input["flow_id"] = parent_flow_id
+
+        if not _pick_text(child_input.get("root_event_id"), child_input.get("rooteventid"), child_input.get("rootEventId")) and parent_root_event_id:
+            child_input["root_event_id"] = parent_root_event_id
+
+        if not _pick_text(child_input.get("source_event_id"), child_input.get("sourceeventid"), child_input.get("sourceEventId")) and parent_source_event_id:
+            child_input["source_event_id"] = parent_source_event_id
+
+        if not _pick_text(child_input.get("event_id"), child_input.get("eventid"), child_input.get("eventId")):
+            child_input["event_id"] = _pick_text(
+                child_input.get("source_event_id"),
+                parent_source_event_id,
+                parent_root_event_id,
+                parent_flow_id,
+            )
+
+        child_input["workspace_id"] = workspace_id
+        child_input["workspace"] = workspace_id
+        child_input.setdefault("run_record_id", run_record_id)
+        child_input.setdefault("linked_run", run_record_id)
+
+        try:
+            child_input = _ensure_incident_identity(child_input, parent_result)
+        except Exception:
+            pass
+
+        child["input"] = child_input
+        child.pop("command_input", None)
+
+        return child
+
     try:
         payload = await request.json()
     except Exception:
@@ -13748,11 +13950,7 @@ async def run(request: Request, response: Response) -> RunResponse:
     if not isinstance(payload, dict):
         payload = {}
 
-    # ------------------------------------------------------------
-    # Normalize input early
-    # ------------------------------------------------------------
     payload_input = payload.get("input") or {}
-
     if isinstance(payload_input, str):
         try:
             payload_input = json.loads(payload_input)
@@ -13768,9 +13966,6 @@ async def run(request: Request, response: Response) -> RunResponse:
         or ""
     ).strip()
 
-    # ------------------------------------------------------------
-    # Workspace auth / resolution
-    # ------------------------------------------------------------
     workspace_record = resolve_workspace_from_headers(headers_lc)
     print("[RUN DEBUG] workspace_record =", workspace_record, flush=True)
 
@@ -13817,10 +14012,7 @@ async def run(request: Request, response: Response) -> RunResponse:
             workspace_record=None,
         )
 
-    # ------------------------------------------------------------
-    # Inject workspace ONLY inside input
-    # ------------------------------------------------------------
-    payload_input = _inject_workspace(payload_input, workspace_id)
+    payload_input = _ensure_input_context(payload_input, workspace_id)
     payload["input"] = payload_input
 
     if not isinstance(payload, dict):
@@ -13832,9 +14024,6 @@ async def run(request: Request, response: Response) -> RunResponse:
         except Exception:
             payload["input"] = {}
 
-    # ------------------------------------------------------------
-    # Auto idempotency_key if missing
-    # ------------------------------------------------------------
     if not payload.get("idempotency_key"):
         flow_id = str(payload_input.get("flow_id") or "").strip()
         root_event_id = str(payload_input.get("root_event_id") or "").strip()
@@ -13848,9 +14037,6 @@ async def run(request: Request, response: Response) -> RunResponse:
     if (time.time() - started) > RUN_MAX_SECONDS:
         raise HTTPException(status_code=408, detail="Request timed out before start.")
 
-    # ------------------------------------------------------------
-    # Idempotency replay BEFORE quota projection
-    # ------------------------------------------------------------
     existing = idempotency_lookup(req)
     if existing:
         fields = existing.get("fields", {}) or {}
@@ -13867,6 +14053,12 @@ async def run(request: Request, response: Response) -> RunResponse:
         )
 
         if isinstance(previous_result, dict):
+            previous_result = _ensure_result_context(
+                previous_result,
+                workspace_id=workspace_id,
+                run_record_id=str(fields.get("Run_ID", "") or ""),
+                req_input=req.input if isinstance(req.input, dict) else {},
+            )
             previous_result.setdefault("workspace_usage", current_usage_snapshot)
 
         return RunResponse(
@@ -13879,9 +14071,6 @@ async def run(request: Request, response: Response) -> RunResponse:
             result={"idempotent_replay": True, "previous": previous_result},
         )
 
-    # ------------------------------------------------------------
-    # Capability gating by plan BEFORE quota projection
-    # ------------------------------------------------------------
     gate_info = _is_capability_allowed_for_workspace(
         workspace_id=workspace_id,
         capability_name=req.capability,
@@ -13911,9 +14100,6 @@ async def run(request: Request, response: Response) -> RunResponse:
 
     workspace_preflight = None
 
-    # ------------------------------------------------------------
-    # Workspace quota preflight BEFORE real execution
-    # ------------------------------------------------------------
     try:
         workspace_preflight = _enforce_workspace_limits_or_raise(
             workspace_id=workspace_id,
@@ -13961,9 +14147,19 @@ async def run(request: Request, response: Response) -> RunResponse:
             unsupported_result = {
                 "ok": False,
                 "error": "unsupported_capability",
+                "error_message": "unsupported_capability",
                 "workspace_preflight": workspace_preflight,
+                "workspace_id": workspace_id,
                 "run_record_id": run_record_id,
+                "linked_run": run_record_id,
             }
+
+            unsupported_result = _ensure_result_context(
+                unsupported_result,
+                workspace_id=workspace_id,
+                run_record_id=run_record_id,
+                req_input=req.input if isinstance(req.input, dict) else {},
+            )
 
             finish_system_run(run_record_id, "Unsupported", unsupported_result)
 
@@ -14001,34 +14197,49 @@ async def run(request: Request, response: Response) -> RunResponse:
             result_obj = {
                 "ok": False,
                 "error": "capability_returned_none_or_invalid",
+                "error_message": "capability_returned_none_or_invalid",
                 "capability": req.capability,
                 "run_record_id": run_record_id,
             }
 
+        result_obj = _ensure_result_context(
+            result_obj,
+            workspace_id=workspace_id,
+            run_record_id=run_record_id,
+            req_input=req.input if isinstance(req.input, dict) else {},
+        )
         result_obj.setdefault("workspace_preflight", workspace_preflight)
 
         next_cmds = result_obj.get("next_commands")
 
         if isinstance(next_cmds, list) and next_cmds:
             spawned_results = []
+            enriched_next_commands: List[Dict[str, Any]] = []
 
             for cmd in next_cmds:
                 try:
-                    cmd = _normalize_keys_deep(cmd)
+                    if not isinstance(cmd, dict):
+                        continue
+
+                    enriched_cmd = _enrich_next_command(
+                        cmd,
+                        parent_result=result_obj,
+                        workspace_id=workspace_id,
+                        run_record_id=run_record_id,
+                    )
+                    enriched_next_commands.append(enriched_cmd)
 
                     spawn_res = _create_command_from_next_command(
-                        next_cmd=cmd,
+                        next_cmd=enriched_cmd,
                         parent_run_id=run_record_id,
-                        workspace_id=(req.input or {}).get("workspace_id")
-                        if isinstance(req.input, dict)
-                        else None,
+                        workspace_id=workspace_id,
                     )
                     spawned_results.append(spawn_res)
 
                     print(
                         "[worker.spawn] next_command -> command",
                         {
-                            "capability": cmd.get("capability") if isinstance(cmd, dict) else None,
+                            "capability": enriched_cmd.get("capability") if isinstance(enriched_cmd, dict) else None,
                             "ok": spawn_res.get("ok"),
                             "mode": spawn_res.get("mode"),
                             "command_record_id": spawn_res.get("command_record_id"),
@@ -14044,6 +14255,7 @@ async def run(request: Request, response: Response) -> RunResponse:
                     spawned_results.append(err)
                     print("[worker.spawn] failed to create command:", err, flush=True)
 
+            result_obj["next_commands"] = enriched_next_commands
             result_obj["spawn_summary"] = {
                 "ok": all(bool(x.get("ok")) for x in spawned_results) if spawned_results else True,
                 "spawned": len([x for x in spawned_results if x.get("ok")]),
@@ -14056,9 +14268,6 @@ async def run(request: Request, response: Response) -> RunResponse:
 
         finish_system_run(run_record_id, "Done", result_obj)
 
-        # ------------------------------------------------------------
-        # Post-run usage snapshot AFTER accounting
-        # ------------------------------------------------------------
         workspace_usage = _workspace_usage_snapshot(
             workspace_id=workspace_id,
             capability=req.capability,
@@ -14093,7 +14302,7 @@ async def run(request: Request, response: Response) -> RunResponse:
             worker=req.worker,
             input_obj=req.input if isinstance(req.input, dict) else {},
             metadata={
-                "result_ok": bool(result_obj.get("ok")),
+                "result_ok": not (result_obj.get("ok") is False),
                 "workspace_preflight": workspace_preflight,
                 "workspace_usage": workspace_usage,
                 "spawn_summary": result_obj.get("spawn_summary"),
@@ -14104,6 +14313,21 @@ async def run(request: Request, response: Response) -> RunResponse:
         )
 
         result_obj["usage_ledger_write"] = ledger_write_result
+
+        try:
+            airtable_update(
+                SYSTEM_RUNS_TABLE_NAME,
+                run_record_id,
+                {
+                    "Result_JSON": _safe_json_dumps(result_obj),
+                },
+            )
+        except Exception as final_patch_err:
+            print(
+                "[RUN WARNING] unable to patch Result_JSON with usage_ledger_write =",
+                repr(final_patch_err),
+                flush=True,
+            )
 
         try:
             _touch_workspace_last_seen(workspace_id)
@@ -14123,15 +14347,24 @@ async def run(request: Request, response: Response) -> RunResponse:
     except HTTPException as e:
         try:
             if not unsupported_already_finished:
+                error_payload = {
+                    "ok": False,
+                    "error": str(e.detail),
+                    "error_message": str(e.detail),
+                    "workspace_preflight": workspace_preflight,
+                    "run_record_id": run_record_id,
+                }
+                error_payload = _ensure_result_context(
+                    error_payload,
+                    workspace_id=workspace_id,
+                    run_record_id=run_record_id,
+                    req_input=req.input if isinstance(req.input, dict) else {},
+                )
+
                 fail_system_run(
                     run_record_id,
                     str(e.detail),
-                    {
-                        "ok": False,
-                        "error": str(e.detail),
-                        "workspace_preflight": workspace_preflight,
-                        "run_record_id": run_record_id,
-                    },
+                    error_payload,
                 )
 
                 _usage_ledger_write_best_effort(
@@ -14159,15 +14392,24 @@ async def run(request: Request, response: Response) -> RunResponse:
         traceback.print_exc()
 
         try:
+            error_payload = {
+                "ok": False,
+                "error": repr(e),
+                "error_message": repr(e),
+                "workspace_preflight": workspace_preflight,
+                "run_record_id": run_record_id,
+            }
+            error_payload = _ensure_result_context(
+                error_payload,
+                workspace_id=workspace_id,
+                run_record_id=run_record_id,
+                req_input=req.input if isinstance(req.input, dict) else {},
+            )
+
             fail_system_run(
                 run_record_id,
                 repr(e),
-                {
-                    "ok": False,
-                    "error": repr(e),
-                    "workspace_preflight": workspace_preflight,
-                    "run_record_id": run_record_id,
-                },
+                error_payload,
             )
 
             _usage_ledger_write_best_effort(
