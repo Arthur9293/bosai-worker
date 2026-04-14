@@ -6303,6 +6303,7 @@ def create_command_record(
     if not source_event_id:
         source_event_id = root_event_id or flow_id
 
+    # Canonical keys only
     if flow_id:
         command_input["flow_id"] = flow_id
 
@@ -6311,11 +6312,14 @@ def create_command_record(
 
     if source_event_id:
         command_input["source_event_id"] = source_event_id
-        if not str(command_input.get("event_id") or "").strip():
-            command_input["event_id"] = source_event_id
+
+    if not str(command_input.get("event_id") or "").strip() and source_event_id:
+        command_input["event_id"] = source_event_id
 
     command_input["workspace_id"] = resolved_workspace_id
     command_input["workspace"] = resolved_workspace_id
+    command_input["step_index"] = step_index
+    command_input["retry_count"] = retry_count
 
     if parent_run_id and not str(command_input.get("run_record_id") or "").strip():
         command_input["run_record_id"] = str(parent_run_id).strip()
@@ -6333,8 +6337,42 @@ def create_command_record(
         if not resolved_url:
             raise ValueError("http_exec requires url/http_target")
 
+        command_input["url"] = resolved_url
+        command_input["method"] = str(
+            command_input.get("method")
+            or "GET"
+        ).strip().upper() or "GET"
+
     command_input = _ensure_incident_identity(command_input)
-    command_input = _sanitize_payload_for_airtable(command_input)
+
+    # IMPORTANT:
+    # Do NOT sanitize the business JSON payload before storing Input_JSON.
+    # Keep a canonical copy for Airtable storage.
+    canonical_command_input = json.loads(
+        json.dumps(command_input, ensure_ascii=False, default=str)
+    )
+
+    # Remove legacy aliases/noisy duplicates from stored Input_JSON
+    for legacy_key in (
+        "flowid",
+        "flowId",
+        "rooteventid",
+        "rootEventId",
+        "sourceeventid",
+        "sourceEventId",
+        "eventid",
+        "eventId",
+        "workspaceid",
+        "workspaceId",
+        "stepindex",
+        "retrycount",
+        "parentcommandid",
+        "parentCommandId",
+        "URL",
+        "HTTPMethod",
+        "httptarget",
+    ):
+        canonical_command_input.pop(legacy_key, None)
 
     idempotency_key = (
         f"spawn:{resolved_capability}:"
@@ -6361,7 +6399,7 @@ def create_command_record(
 
     candidates = _build_command_fields_candidates(
         capability=resolved_capability,
-        command_input=command_input,
+        command_input=canonical_command_input,
         workspace_id=resolved_workspace_id,
         event_record_id=source_event_id or root_event_id or flow_id or parent_run_id or "",
         idempotency_key=idempotency_key,
@@ -6380,7 +6418,7 @@ def create_command_record(
             "root_event_id": root_event_id,
             "source_event_id": source_event_id,
             "parent_command_id": parent_command_id,
-            "command_input": command_input,
+            "command_input": canonical_command_input,
             "create_res": create_res,
         }
 
