@@ -7523,6 +7523,36 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
 
         return current
 
+    def _clean_runtime_payload(
+        payload_obj: Any,
+        *,
+        keep_command_id: bool = False,
+    ) -> Dict[str, Any]:
+        if not isinstance(payload_obj, dict):
+            return {}
+
+        cleaned = dict(payload_obj)
+        cleaned = _normalize_keys_deep(cleaned)
+        cleaned = _unwrap_command_input(cleaned)
+        cleaned = _normalize_flow_keys(cleaned)
+        cleaned = _ensure_incident_identity(cleaned)
+        cleaned = _sanitize_payload_for_airtable(cleaned)
+
+        if not keep_command_id:
+            cleaned.pop("command_id", None)
+
+        cleaned.pop("flowid", None)
+        cleaned.pop("rooteventid", None)
+        cleaned.pop("sourceeventid", None)
+        cleaned.pop("eventid", None)
+        cleaned.pop("workspaceid", None)
+        cleaned.pop("runrecordid", None)
+        cleaned.pop("linkedrun", None)
+        cleaned.pop("parentcommandid", None)
+        cleaned.pop("commandid", None)
+
+        return cleaned
+
     def _resolve_command_priority(fields: Dict[str, Any]) -> int:
         return max(
             1,
@@ -7636,26 +7666,6 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             "parent_command_id": parent_command_id or "",
             "command_id": current_command_id or command_id or "",
         }
-    
-    def _clean_runtime_payload(
-        payload_obj: Any,
-        *,
-        keep_command_id: bool = False,
-    ) -> Dict[str, Any]:
-        if not isinstance(payload_obj, dict):
-            return {}
-
-        cleaned = dict(payload_obj)
-        cleaned = _normalize_keys_deep(cleaned)
-        cleaned = _unwrap_command_payload(cleaned)
-        cleaned = _normalize_flow_keys(cleaned)
-        cleaned = _ensure_incident_identity(cleaned)
-        cleaned = _sanitize_payload_for_airtable(cleaned)
-
-        if not keep_command_id:
-            cleaned.pop("command_id", None)
-
-        return cleaned
 
     def _inject_context_into_input(
         input_obj: Dict[str, Any],
@@ -7781,8 +7791,7 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             child_input = _sanitize_payload_for_airtable(child_input)
 
             child_copy.pop("command_input", None)
-            child_copy.pop("parentcommandid", None)
-            child_copy.pop("commandid", None)
+            child_copy.pop("command_id", None)
             child_copy["input"] = child_input
 
             if not _pick(
@@ -7791,7 +7800,8 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
             ):
                 child_copy["parent_command_id"] = current_command_id
 
-            fixed.append(_sanitize_payload_for_airtable(child_copy))
+            child_copy = _sanitize_payload_for_airtable(child_copy)
+            fixed.append(child_copy)
 
         return fixed
 
