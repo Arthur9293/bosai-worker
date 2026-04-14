@@ -3506,16 +3506,28 @@ def _unwrap_command_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
 
-    for nested_key in ("command_input", "commandinput", "input"):
-        nested = payload.get(nested_key)
-        if isinstance(nested, dict):
-            merged = dict(nested)
-            for k, v in payload.items():
-                if k != nested_key and k not in merged:
-                    merged[k] = v
-            return merged
+    current = dict(payload)
 
-    return payload
+    for _ in range(4):
+        changed = False
+
+        for nested_key in ("command_input", "commandinput", "input", "body"):
+            nested = current.get(nested_key)
+
+            if isinstance(nested, dict):
+                merged = dict(nested)
+
+                for k, v in current.items():
+                    if k != nested_key and k not in merged:
+                        merged[k] = v
+
+                current = merged
+                changed = True
+
+        if not changed:
+            break
+
+    return current
 
 
 # ============================================================
