@@ -1800,7 +1800,6 @@ def _safe_records_from_view(table_name: str, view_name: str, limit: int) -> Tupl
 def _read_command_status(fields: Dict[str, Any]) -> str:
     return str(fields.get("Status_select", fields.get("Status", "")) or "").strip()
 
-
 def _extract_retry_fields_from_text(raw_text: str) -> Dict[str, Any]:
     if not raw_text:
         return {}
@@ -1971,6 +1970,16 @@ def _extract_retry_fields_from_text(raw_text: str) -> Dict[str, Any]:
         r'"depth"\s*:\s*(\d+)',
     )
 
+    next_retry_at = _pick_str(
+        r'"next_retry_at"\s*:\s*"([^"]+)"',
+        r'"nextretryat"\s*:\s*"([^"]+)"',
+    )
+
+    max_depth = _pick_int(
+        r'"max_depth"\s*:\s*(\d+)',
+        r'"maxdepth"\s*:\s*(\d+)',
+    )
+
     out: Dict[str, Any] = {}
 
     if flow_id:
@@ -2032,6 +2041,10 @@ def _extract_retry_fields_from_text(raw_text: str) -> Dict[str, Any]:
         out["step_index"] = step_index
     if depth is not None:
         out["_depth"] = depth
+    if next_retry_at:
+        out["next_retry_at"] = next_retry_at
+    if max_depth is not None:
+        out["max_depth"] = max_depth
 
     if out:
         out["original_input"] = {
