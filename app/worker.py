@@ -629,7 +629,7 @@ def bosai_scheduler_loop() -> None:
                 req_evt = RunRequest.from_payload(evt_payload)
                 evt_run_record_id, _ = create_system_run(req_evt)
 
-                evt_result = process_events(limit=20)
+                evt_result = process_events_internal(limit=20)
                 SCHEDULER_LAST_EVENT_RESULT = (
                     evt_result if isinstance(evt_result, dict) else {"raw": str(evt_result)}
                 )
