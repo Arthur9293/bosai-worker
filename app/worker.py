@@ -11331,7 +11331,7 @@ def capability_event_engine(req: RunRequest, run_record_id: str) -> Dict[str, An
     except Exception:
         limit = 20
 
-    result = process_events(limit=limit)
+    result = process_events_internal(limit=limit)
     if isinstance(result, dict) and "run_record_id" not in result:
         result["run_record_id"] = run_record_id
     return result
