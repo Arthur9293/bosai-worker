@@ -23,6 +23,85 @@ ORCHESTRATION_CAPABILITIES = {
     "complete_flow_demo",
 }
 
+# Clés legacy / bruit qu’on ne veut plus voir dans les payloads stockés.
+LEGACY_OR_NOISY_KEYS = {
+    "flowid",
+    "flowId",
+    "Flow_ID",
+    "FlowId",
+    "rooteventid",
+    "rootEventId",
+    "root_eventid",
+    "Root_Event_ID",
+    "RootEventId",
+    "sourceeventid",
+    "sourceEventId",
+    "Source_Event_ID",
+    "eventid",
+    "eventId",
+    "Event_ID",
+    "workspaceid",
+    "workspaceId",
+    "Workspace_ID",
+    "runrecordid",
+    "runRecordId",
+    "Run_Record_ID",
+    "linkedrun",
+    "linkedRun",
+    "Linked_Run",
+    "commandid",
+    "commandId",
+    "Command_ID",
+    "parentcommandid",
+    "parentCommandId",
+    "Parent_Command_ID",
+    "parentcommand_id",
+    "incidentrecordid",
+    "incidentRecordId",
+    "Incident_Record_ID",
+    "stepindex",
+    "stepIndex",
+    "Step_Index",
+    "StepIndex",
+    "retrycount",
+    "retrymax",
+    "retryreason",
+    "targeturl",
+    "failedurl",
+    "failedmethod",
+    "httptarget",
+    "httpstatus",
+    "statuscode",
+    "incidentcode",
+    "decisionstatus",
+    "decisionreason",
+    "nextaction",
+    "priorityscore",
+    "autoexecutable",
+    "finalfailure",
+    "targetcapability",
+    "originalcapability",
+    "failedcapability",
+    "sourcecapability",
+    "tenantid",
+    "appname",
+    "endpointname",
+    # bruit runtime
+    "next_commands",
+    "spawn_summary",
+    "terminal",
+    "ok",
+    "status",
+    "route",
+    "ts",
+    "update_res",
+    "incident_exists",
+    "deduplicate_action",
+    "action",
+    "update_ok",
+    "update_reason",
+}
+
 
 def _now_ts() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -253,6 +332,22 @@ def _normalize_keys_deep(value: Any) -> Any:
     return value
 
 
+def _materialize_json_like_strings(value: Any) -> Any:
+    if isinstance(value, str):
+        parsed = _json_load_maybe(value)
+        if isinstance(parsed, (dict, list)):
+            return _materialize_json_like_strings(parsed)
+        return value
+
+    if isinstance(value, list):
+        return [_materialize_json_like_strings(item) for item in value]
+
+    if isinstance(value, dict):
+        return {k: _materialize_json_like_strings(v) for k, v in value.items()}
+
+    return value
+
+
 def _unwrap_command_payload(value: Any) -> Any:
     if not isinstance(value, dict):
         return value
@@ -458,6 +553,35 @@ def _normalize_flow_keys(payload: Dict[str, Any]) -> Dict[str, Any]:
         normalized.pop(legacy_key, None)
 
     return normalized
+
+
+def _drop_legacy_and_empty_deep(value: Any) -> Any:
+    if isinstance(value, str):
+        parsed = _json_load_maybe(value)
+        if isinstance(parsed, (dict, list)):
+            return _drop_legacy_and_empty_deep(parsed)
+        return value
+
+    if isinstance(value, list):
+        cleaned_list: List[Any] = []
+        for item in value:
+            cleaned_item = _drop_legacy_and_empty_deep(item)
+            if cleaned_item not in ("", None, [], {}):
+                cleaned_list.append(cleaned_item)
+        return cleaned_list
+
+    if isinstance(value, dict):
+        cleaned_dict: Dict[str, Any] = {}
+        for key, nested in value.items():
+            if key in LEGACY_OR_NOISY_KEYS:
+                continue
+            cleaned_nested = _drop_legacy_and_empty_deep(nested)
+            if cleaned_nested in ("", None, [], {}):
+                continue
+            cleaned_dict[key] = cleaned_nested
+        return cleaned_dict
+
+    return value
 
 
 def _extract_input(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -777,6 +901,101 @@ def _strip_runtime_keys(value: Dict[str, Any]) -> Dict[str, Any]:
     return cleaned
 
 
+def _compact_request(value: Any) -> Dict[str, Any]:
+    parsed = _materialize_json_like_strings(value)
+    if not isinstance(parsed, dict):
+        return {}
+
+    compact = {
+        "method": _pick_text(parsed.get("method"), parsed.get("http_method")),
+        "url": _pick_text(parsed.get("url")),
+    }
+
+    compact = {k: v for k, v in compact.items() if v not in ("", None)}
+    return compact
+
+
+def _compact_response(value: Any) -> Dict[str, Any]:
+    parsed = _materialize_json_like_strings(value)
+    if not isinstance(parsed, dict):
+        return {}
+
+    compact: Dict[str, Any] = {}
+
+    status_code = _pick_int(parsed.get("status_code"))
+    if status_code is not None:
+        compact["status_code"] = status_code
+
+    if parsed.get("ok") is not None:
+        compact["ok"] = _to_bool(parsed.get("ok"), False)
+
+    elapsed_ms = _pick_int(parsed.get("elapsed_ms"))
+    if elapsed_ms is not None:
+        compact["elapsed_ms"] = elapsed_ms
+
+    return compact
+
+
+def _build_storage_payload(canonical: Dict[str, Any]) -> Dict[str, Any]:
+    payload = {
+        "flow_id": _pick_text(canonical.get("flow_id")),
+        "root_event_id": _pick_text(canonical.get("root_event_id")),
+        "source_event_id": _pick_text(canonical.get("source_event_id")),
+        "event_id": _pick_text(canonical.get("event_id")),
+        "workspace_id": _pick_text(canonical.get("workspace_id")),
+        "workspace": _pick_text(canonical.get("workspace")),
+        "run_record_id": _pick_text(canonical.get("run_record_id")),
+        "linked_run": _pick_text(canonical.get("linked_run")),
+        "parent_command_id": _pick_text(canonical.get("parent_command_id")),
+        "incident_record_id": _pick_text(canonical.get("incident_record_id")),
+        "incident_key": _pick_text(canonical.get("incident_key")),
+        "category": _pick_text(canonical.get("category")),
+        "severity": _pick_text(canonical.get("severity")),
+        "reason": _pick_text(canonical.get("reason")),
+        "retry_reason": _pick_text(canonical.get("retry_reason")),
+        "decision_status": _pick_text(canonical.get("decision_status")),
+        "decision_reason": _pick_text(canonical.get("decision_reason")),
+        "next_action": _pick_text(canonical.get("next_action")),
+        "auto_executable": _to_bool(canonical.get("auto_executable"), False),
+        "priority_score": _to_int(canonical.get("priority_score"), 0),
+        "original_capability": _pick_text(canonical.get("original_capability")),
+        "failed_capability": _pick_text(canonical.get("failed_capability")),
+        "source_capability": _pick_text(canonical.get("source_capability")),
+        "failed_url": _pick_text(canonical.get("failed_url")),
+        "target_url": _pick_text(canonical.get("target_url")),
+        "url": _pick_text(canonical.get("url")),
+        "http_target": _pick_text(canonical.get("http_target")),
+        "failed_method": _pick_text(canonical.get("failed_method"), canonical.get("method")),
+        "method": _pick_text(canonical.get("method"), canonical.get("failed_method")),
+        "incident_code": _pick_text(canonical.get("incident_code")),
+        "error": _pick_text(canonical.get("error")),
+        "error_message": _pick_text(canonical.get("error_message")),
+        "incident_message": _pick_text(canonical.get("incident_message")),
+        "http_status": _pick_int(canonical.get("http_status"), canonical.get("status_code")),
+        "status_code": _pick_int(canonical.get("status_code"), canonical.get("http_status")),
+        "retry_count": _to_int(canonical.get("retry_count"), 0),
+        "retry_max": _to_int(canonical.get("retry_max"), 0),
+        "final_failure": _to_bool(canonical.get("final_failure"), False),
+        "tenant_id": _pick_text(canonical.get("tenant_id")),
+        "app_name": _pick_text(canonical.get("app_name")),
+        "source": _pick_text(canonical.get("source")),
+        "goal": _pick_text(canonical.get("goal")),
+        "log_record_id": _pick_text(canonical.get("log_record_id")),
+        "endpoint_name": _pick_text(canonical.get("endpoint_name")),
+        "request": _compact_request(canonical.get("request")),
+        "response": _compact_response(canonical.get("response")),
+    }
+
+    payload = _normalize_keys_deep(payload)
+    payload = _unwrap_command_payload(payload)
+    payload = _normalize_flow_keys(payload)
+    payload.pop("command_id", None)
+    payload.pop("original_input", None)
+    payload = _drop_legacy_and_empty_deep(payload)
+
+    return payload if isinstance(payload, dict) else {}
+
+
 def _canonical_incident_context(
     data: Dict[str, Any],
     meta: Dict[str, Any],
@@ -787,6 +1006,7 @@ def _canonical_incident_context(
 ) -> Dict[str, Any]:
     raw_original_input = _json_load_maybe(data.get("original_input"))
     original_input = raw_original_input if isinstance(raw_original_input, dict) else {}
+    original_input = _materialize_json_like_strings(original_input)
     original_input = _normalize_keys_deep(original_input)
     original_input = _unwrap_command_payload(original_input)
     original_input = _normalize_flow_keys(original_input)
@@ -796,12 +1016,14 @@ def _canonical_incident_context(
     if not request_obj:
         raw_request_from_original = _json_load_maybe(original_input.get("request"))
         request_obj = raw_request_from_original if isinstance(raw_request_from_original, dict) else {}
+    request_obj = _materialize_json_like_strings(request_obj)
 
     raw_response = _json_load_maybe(data.get("response"))
     response_obj = raw_response if isinstance(raw_response, dict) else {}
     if not response_obj:
         raw_response_from_original = _json_load_maybe(original_input.get("response"))
         response_obj = raw_response_from_original if isinstance(raw_response_from_original, dict) else {}
+    response_obj = _materialize_json_like_strings(response_obj)
 
     flow_id = _pick_text(
         meta.get("flow_id"),
@@ -881,7 +1103,7 @@ def _canonical_incident_context(
         original_input.get("target_url"),
         original_input.get("url"),
         original_input.get("http_target"),
-        request_obj.get("url"),
+        request_obj.get("url") if isinstance(request_obj, dict) else "",
     )
 
     original_capability = _pick_capability(
@@ -916,7 +1138,7 @@ def _canonical_incident_context(
         data.get("method"),
         original_input.get("failed_method"),
         original_input.get("method"),
-        request_obj.get("method"),
+        request_obj.get("method") if isinstance(request_obj, dict) else "",
         "GET",
     ).upper()
 
@@ -927,7 +1149,7 @@ def _canonical_incident_context(
         data.get("statuscode"),
         original_input.get("http_status"),
         original_input.get("status_code"),
-        response_obj.get("status_code"),
+        response_obj.get("status_code") if isinstance(response_obj, dict) else None,
     )
 
     status_code = _pick_int(
@@ -937,7 +1159,7 @@ def _canonical_incident_context(
         data.get("httpstatus"),
         original_input.get("status_code"),
         original_input.get("http_status"),
-        response_obj.get("status_code"),
+        response_obj.get("status_code") if isinstance(response_obj, dict) else None,
         http_status,
     )
 
@@ -1099,10 +1321,12 @@ def _canonical_incident_context(
     }
 
     canonical = _normalize_keys_deep(canonical)
+    canonical = _materialize_json_like_strings(canonical)
     canonical = _unwrap_command_payload(canonical)
     canonical = _normalize_flow_keys(canonical)
+    canonical = _drop_legacy_and_empty_deep(canonical)
 
-    return canonical
+    return canonical if isinstance(canonical, dict) else {}
 
 
 def _build_incident_key(data: Dict[str, Any], meta: Dict[str, Any]) -> str:
@@ -1240,9 +1464,11 @@ def _record_matches_candidate(candidate: Dict[str, Any], record: Dict[str, Any])
 
     payload = _json_load_maybe(fields.get("Payload_JSON"))
     payload = payload if isinstance(payload, dict) else {}
+    payload = _materialize_json_like_strings(payload)
     payload = _normalize_keys_deep(payload)
     payload = _unwrap_command_payload(payload)
     payload = _normalize_flow_keys(payload)
+    payload = _drop_legacy_and_empty_deep(payload)
 
     candidate_flow = _pick_text(candidate.get("flow_id"))
     record_flow = _pick_text(fields.get("Flow_ID"), payload.get("flow_id"))
@@ -1366,7 +1592,6 @@ def _find_existing_incident(
                     },
                     flush=True,
                 )
-
             return exact_records[0]
 
         fallback_formula = _build_fallback_formula(canonical_candidate)
@@ -1396,6 +1621,7 @@ def _find_existing_incident(
             fields = _extract_airtable_fields(record)
             payload = _json_load_maybe(fields.get("Payload_JSON"))
             payload = payload if isinstance(payload, dict) else {}
+            payload = _materialize_json_like_strings(payload)
 
             summary = {
                 "id": _extract_airtable_record_id(record),
@@ -1458,6 +1684,8 @@ def _update_existing_incident_best_effort(
     linked_run = [run_record_id] if run_record_id.startswith("rec") else []
     linked_command = [parent_command_id] if parent_command_id.startswith("rec") else []
 
+    storage_payload = _build_storage_payload(data)
+
     attempts: List[Dict[str, Any]] = [
         {
             "Last_Seen_At": now_ts,
@@ -1470,7 +1698,7 @@ def _update_existing_incident_best_effort(
             "Flow_ID": _pick_text(data.get("flow_id")),
             "Root_Event_ID": _pick_text(data.get("root_event_id")),
             "Source_Event_ID": _pick_text(data.get("source_event_id")),
-            "Payload_JSON": _safe_json(data),
+            "Payload_JSON": _safe_json(storage_payload),
         },
         {
             "Last_Seen_At": now_ts,
@@ -1521,17 +1749,18 @@ def _update_existing_incident_best_effort(
 
 
 def _build_next_input(base: Dict[str, Any], **extra: Any) -> Dict[str, Any]:
-    payload = _strip_runtime_keys(base)
-    payload.update(extra)
-    payload = _normalize_keys_deep(payload)
-    payload = _unwrap_command_payload(payload)
-    payload = _normalize_flow_keys(payload)
+    transition = _build_storage_payload(base)
+    transition.update(extra)
+    transition = _normalize_keys_deep(transition)
+    transition = _materialize_json_like_strings(transition)
+    transition = _unwrap_command_payload(transition)
+    transition = _normalize_flow_keys(transition)
 
-    # on évite de propager l'identité de la commande courante
-    # au prochain maillon de chaîne
-    payload.pop("command_id", None)
+    # on évite de propager l'identité de la commande courante au prochain maillon
+    transition.pop("command_id", None)
 
-    return payload
+    transition = _drop_legacy_and_empty_deep(transition)
+    return transition if isinstance(transition, dict) else {}
 
 
 def run(
@@ -1547,6 +1776,7 @@ def run(
     raw_payload = _json_load_maybe(raw_payload)
     payload = raw_payload if isinstance(raw_payload, dict) else {}
     payload = _normalize_keys_deep(payload)
+    payload = _materialize_json_like_strings(payload)
     payload = _unwrap_command_payload(payload)
     payload = _normalize_flow_keys(payload)
 
@@ -1554,6 +1784,7 @@ def run(
     raw_data = _json_load_maybe(raw_data)
     data = raw_data if isinstance(raw_data, dict) else {}
     data = _normalize_keys_deep(data)
+    data = _materialize_json_like_strings(data)
     data = _unwrap_command_payload(data)
     data = _normalize_flow_keys(data)
 
@@ -1593,8 +1824,10 @@ def run(
     )
 
     canonical_for_key = _normalize_keys_deep(canonical_for_key)
+    canonical_for_key = _materialize_json_like_strings(canonical_for_key)
     canonical_for_key = _unwrap_command_payload(canonical_for_key)
     canonical_for_key = _normalize_flow_keys(canonical_for_key)
+    canonical_for_key = _drop_legacy_and_empty_deep(canonical_for_key)
 
     incident_key = _build_incident_key(
         canonical_for_key,
