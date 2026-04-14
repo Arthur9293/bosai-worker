@@ -14818,40 +14818,6 @@ def get_incidents(flow_id: str = Query(default="")):
     except Exception as exc:
         raise HTTPException(status_code=500, detail={"detail": "Internal error", "error": repr(exc)})
         
-@app.get("/commands/{record_id}")
-def get_command_detail(record_id: str) -> Dict[str, Any]:
-    try:
-        rec = airtable_get_record(COMMANDS_TABLE_NAME, record_id)
-        f = rec.get("fields", {}) or {}
-        return {
-            "ok": True,
-            "command": {
-                "id": rec.get("id"),
-                "capability": f.get("Capability"),
-                "status": _read_command_status(f),
-                "priority": f.get("Priority"),
-                "retry_count": f.get("Retry_Count"),
-                "retry_max": f.get("Retry_Max"),
-                "scheduled_at": f.get("Scheduled_At"),
-                "next_retry_at": f.get("Next_Retry_At"),
-                "is_locked": f.get("Is_Locked"),
-                "locked_by": f.get("Locked_By"),
-                "idempotency_key": f.get("Idempotency_Key"),
-                "linked_run": f.get("Linked_Run"),
-                "input_json": f.get("Input_JSON"),
-                "result_json": f.get("Result_JSON"),
-                "error_message": f.get("Error_Message"),
-                "last_error": f.get("Last_Error"),
-                "started_at": f.get("Started_At"),
-                "finished_at": f.get("Finished_At"),
-            },
-            "ts": utc_now_iso(),
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"command_detail_failed: {repr(e)}")
-
 @app.get("/commands/{command_id}")
 def get_command_by_id(command_id: str) -> Dict[str, Any]:
     try:
