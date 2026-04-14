@@ -9642,80 +9642,162 @@ def _event_mark_processed(
     command_record_id: str = "",
     command_created: bool = False,
     idempotency_key: str = "",
-):
-    attempts = []
-
-    linked_command_value = [command_record_id] if command_record_id else None
+) -> Dict[str, Any]:
     processed_at_value = utc_now_iso()
+    linked_command_value = [command_record_id] if command_record_id else None
 
-    candidate_fields_list = [
-        {
-            "Status_select": "Processed",
-            "Processed_At": processed_at_value,
-        },
-        {
-            "Status_select": "Processed",
-            "Processed_At": processed_at_value,
-            "Command_Created": True if command_created else False,
-        },
-        {
-            "Status_select": "Processed",
-            "Processed_At": processed_at_value,
-            "Idempotency_Key": idempotency_key,
-        },
-        {
-            "Status_select": "Processed",
-            "Processed_At": processed_at_value,
-            "Command_Created": True if command_created else False,
-            "Idempotency_Key": idempotency_key,
-        },
-        {
-            "Status_select": "Processed",
-            "Processed_At": processed_at_value,
-            "Linked_Command": linked_command_value,
-        } if linked_command_value else {
-            "Status_select": "Processed",
-            "Processed_At": processed_at_value,
-        },
-        {
-            "Status_select": "Processed",
-            "Processed_At": processed_at_value,
-            "Linked_Command": linked_command_value,
-            "Command_Created": True if command_created else False,
-            "Idempotency_Key": idempotency_key,
-        } if linked_command_value else {
-            "Status_select": "Processed",
-            "Processed_At": processed_at_value,
-            "Command_Created": True if command_created else False,
-            "Idempotency_Key": idempotency_key,
-        },
-    ]
+    candidates: List[Dict[str, Any]] = []
 
-    for fields in candidate_fields_list:
-        clean_fields = {
-            k: v for k, v in fields.items()
-            if v not in ("", None)
-        }
-
-        try:
-            airtable_update(EVENTS_TABLE_NAME, event_record_id, clean_fields)
-            print("[event_mark_processed]", event_record_id, clean_fields)
-            return {"ok": True, "fields": clean_fields}
-        except Exception as e:
-            attempts.append(
-                {
-                    "ok": False,
-                    "fields": clean_fields,
-                    "error": repr(e),
-                }
-            )
-            print("[event_mark_processed][ERROR]", repr(e))
-
-    return {
-        "ok": False,
-        "event_record_id": event_record_id,
-        "attempts": attempts,
+    # 1) version la plus complète
+    full_fields: Dict[str, Any] = {
+        "Status_select": "Processed",
+        "Status": "Processed",
+        "Processed_At": processed_at_value,
+        "Command_Created": bool(command_created),
     }
+    if idempotency_key:
+        full_fields["Idempotency_Key"] = idempotency_key
+    if command_record_id:
+        full_fields["Command_Record_ID"] = command_record_id
+        full_fields["Linked_Command"] = linked_command_value
+
+    candidates.append(full_fields)
+
+    # 2) sans Command_Record_ID
+    fields_no_command_record_id: Dict[str, Any] = {
+        "Status_select": "Processed",
+        "Status": "Processed",
+        "Processed_At": processed_at_value,
+        "Command_Created": bool(command_created),
+    }
+    if idempotency_key:
+        fields_no_command_record_id["Idempotency_Key"] = idempotency_key
+    if linked_command_value:
+        fields_no_command_record_id["Linked_Command"] = linked_command_value
+
+    candidates.append(fields_no_command_record_id)
+
+    # 3) sans Linked_Command / Command_Record_ID
+    fields_status_core: Dict[str, Any] = {
+        "Status_select": "Processed",
+        "Status": "Processed",
+        "Processed_At": processed_at_value,
+        "Command_Created": bool(command_created),
+    }
+    if idempotency_key:
+        fields_status_core["Idempotency_Key"] = idempotency_key
+
+    candidates.append(fields_status_core)
+
+    # 4) juste synchro des deux status
+    candidates.append(
+        {
+            "Status_select": "Processed",
+            "Status": "Processed",
+            "Processed_At": processed_at_value,
+        }
+    )
+
+    # 5) fallback Status_select seulement
+    candidates.append(
+        {
+            "Status_select": "Processed",
+            "Processed_At": processed_at_value,
+        }
+    )
+
+    # 6) fallback Status seulement
+    candidates.append(
+        {
+            "Status": "Processed",
+            "Processed_At": processed_at_value,
+        }
+    )
+
+    result = _airtable_update_best_effort(
+        EVENTS_TABLE_NAME,
+        event_record_id,
+        candidates,
+    )
+
+    print("[event_mark_processed]", event_record_id, result)
+    return result
+
+
+def _event_mark_error(event_record_id: str, message: str) -> Dict[str, Any]:
+    ts = utc_now_iso()
+    msg = str(message or "")[:1000]
+
+    return _airtable_update_best_effort(
+        EVENTS_TABLE_NAME,
+        event_record_id,
+        [
+            {
+                "Status_select": "Error",
+                "Status": "Error",
+                "Processed_At": ts,
+                "Error_Message": msg,
+                "Last_Error": msg,
+            },
+            {
+                "Status_select": "Error",
+                "Status": "Error",
+                "Processed_At": ts,
+                "Error_Message": msg,
+            },
+            {
+                "Status_select": "Error",
+                "Processed_At": ts,
+                "Error_Message": msg,
+            },
+            {
+                "Status_select": "Error",
+                "Processed_At": ts,
+            },
+            {
+                "Status": "Error",
+                "Processed_At": ts,
+            },
+        ],
+    )
+
+
+def _event_mark_ignored(event_record_id: str, message: str) -> Dict[str, Any]:
+    ts = utc_now_iso()
+    msg = str(message or "")[:1000]
+
+    return _airtable_update_best_effort(
+        EVENTS_TABLE_NAME,
+        event_record_id,
+        [
+            {
+                "Status_select": "Ignored",
+                "Status": "Ignored",
+                "Processed_At": ts,
+                "Error_Message": msg,
+                "Last_Error": msg,
+            },
+            {
+                "Status_select": "Ignored",
+                "Status": "Ignored",
+                "Processed_At": ts,
+                "Error_Message": msg,
+            },
+            {
+                "Status_select": "Ignored",
+                "Processed_At": ts,
+                "Error_Message": msg,
+            },
+            {
+                "Status_select": "Ignored",
+                "Processed_At": ts,
+            },
+            {
+                "Status": "Ignored",
+                "Processed_At": ts,
+            },
+        ],
+    )
     
 def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
     fields = event_record.get("fields", {}) or {}
