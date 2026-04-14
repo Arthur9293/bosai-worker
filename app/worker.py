@@ -3252,48 +3252,6 @@ def resolve_workspace_from_headers(headers: Dict[str, str]) -> Optional[Dict[str
 
     return records[0]
 
-def _enforce_workspace_access_for_run(
-    request: Request,
-    headers_lc: Dict[str, str],
-    workspace_id: str,
-    capability_name: str,
-    workspace_record: Optional[Dict[str, Any]] = None,
-) -> None:
-    ws = _normalize_workspace_id(workspace_id)
-
-    provided_workspace_key = _safe_str(
-        headers_lc.get("x-bosai-key")
-        or headers_lc.get("x-api-key")
-        or headers_lc.get("x_api_key")
-    )
-
-    # Mode client explicite par API key workspace
-    # => enforcement complet : exists + active + capability allowed + key valid
-    if workspace_record or provided_workspace_key:
-        _validate_workspace_from_registry(
-            request=request,
-            workspace_id=ws,
-            capability=capability_name or None,
-        )
-        return
-
-    # Mode legacy interne / scheduler
-    # => on garde la compatibilité :
-    #    - si le workspace n'existe pas encore dans Workspaces, on n'échoue pas
-    #    - s'il existe, on enforce active + allowed_capabilities
-    config = _get_workspace_config(ws)
-    if not config.get("exists"):
-        return
-
-    if not _workspace_is_active(config):
-        raise HTTPException(status_code=403, detail=f"workspace not active: {ws}")
-
-    allowed = config.get("allowed_capabilities") or []
-    if capability_name and allowed and capability_name not in allowed:
-        raise HTTPException(
-            status_code=403,
-            detail=f"capability not allowed for workspace: {capability_name}",
-        )
     
 def _verify_hmac_signature(raw_body: bytes, signature_header: Optional[str]) -> bool:
     if not RUN_SHARED_SECRET:
