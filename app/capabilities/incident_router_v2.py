@@ -445,7 +445,7 @@ def _resolve_final_failure(data: Dict[str, Any]) -> bool:
         0,
     )
 
-    if http_status >= 400 and retry_count >= retry_max:
+    if retry_max > 0 and http_status >= 400 and retry_count >= retry_max:
         return True
 
     return False
@@ -629,6 +629,70 @@ def _build_incident_key(
     return "|".join(parts)
 
 
+def _build_child_input(
+    *,
+    meta: Dict[str, Any],
+    normalized: Dict[str, Any],
+    flow_id: str,
+    root_event_id: str,
+    source_event_id: str,
+    effective_run_record_id: str,
+    effective_linked_run: str,
+    incident_key: str,
+    decision_status: str,
+    decision_reason: str,
+    next_action: str,
+    auto_executable: bool,
+    priority_score: int,
+    depth: int,
+) -> Dict[str, Any]:
+    # Whitelist-only child payload.
+    # Do not merge raw input, do not forward original_input,
+    # and do not propagate command_id as a child runtime key.
+    child_input = {
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "source_event_id": source_event_id,
+        "workspace_id": meta.get("workspace_id", "") or "production",
+        "workspace": meta.get("workspace_id", "") or "production",
+        "tenant_id": meta.get("tenant_id", ""),
+        "app_name": meta.get("app_name", "") or "bosai-worker",
+        "source": meta.get("source", "") or "incident_router_v2",
+        "step_index": _to_int(meta.get("step_index"), 0) + 1,
+        "_depth": depth + 1,
+        "run_record_id": effective_run_record_id,
+        "linked_run": effective_linked_run,
+        "parent_command_id": meta.get("command_id") or meta.get("parent_command_id") or "",
+        "incident_record_id": normalized.get("incident_record_id", ""),
+        "log_record_id": normalized.get("log_record_id", ""),
+        "category": normalized.get("category", ""),
+        "reason": normalized.get("reason", ""),
+        "severity": normalized.get("severity", ""),
+        "http_status": _to_int(normalized.get("http_status"), 0),
+        "final_failure": _to_bool(normalized.get("final_failure"), False),
+        "incident_code": normalized.get("incident_code", ""),
+        "original_capability": normalized.get("original_capability", ""),
+        "failed_capability": normalized.get("failed_capability", ""),
+        "source_capability": normalized.get("failed_capability")
+        or normalized.get("original_capability")
+        or "",
+        "failed_url": normalized.get("failed_url", ""),
+        "failed_method": normalized.get("failed_method", ""),
+        "retry_count": _to_int(normalized.get("retry_count"), 0),
+        "retry_max": _to_int(normalized.get("retry_max"), 0),
+        "error": normalized.get("error", ""),
+        "error_message": normalized.get("error_message", ""),
+        "incident_message": normalized.get("error_message", ""),
+        "decision_status": decision_status,
+        "decision_reason": decision_reason,
+        "next_action": next_action,
+        "auto_executable": bool(auto_executable),
+        "priority_score": _to_int(priority_score, 0),
+        "incident_key": incident_key,
+    }
+    return _finalize_output_payload(child_input)
+
+
 def run(
     req: Optional[Any] = None,
     run_record_id: str = "",
@@ -712,67 +776,29 @@ def run(
 
     next_commands = []
 
-    next_input = _finalize_output_payload(
-        {
-            **data,
-            "flow_id": flow_id,
-            "root_event_id": root_event_id,
-            "source_event_id": source_event_id,
-            "event_id": source_event_id,
-            "workspace_id": meta["workspace_id"],
-            "workspace": meta["workspace_id"],
-            "tenant_id": meta["tenant_id"],
-            "app_name": meta["app_name"],
-            "source": meta["source"],
-            "step_index": meta["step_index"] + 1,
-            "_depth": depth + 1,
-            "run_record_id": effective_run_record_id,
-            "linked_run": effective_linked_run,
-            "parent_command_id": meta["command_id"] or meta["parent_command_id"],
-            "command_id": meta["command_id"],
-            "incident_record_id": normalized["incident_record_id"],
-            "log_record_id": normalized["log_record_id"],
-            "category": normalized["category"],
-            "reason": normalized["reason"],
-            "severity": normalized["severity"],
-            "http_status": normalized["http_status"],
-            "final_failure": normalized["final_failure"],
-            "error": normalized["error"],
-            "error_message": normalized["error_message"],
-            "incident_message": normalized["error_message"],
-            "incident_code": normalized["incident_code"],
-            "original_capability": normalized["original_capability"],
-            "failed_capability": normalized["failed_capability"],
-            "source_capability": (
-                normalized["failed_capability"]
-                or normalized["original_capability"]
-            ),
-            "failed_url": normalized["failed_url"],
-            "target_url": normalized["failed_url"],
-            "http_target": normalized["failed_url"],
-            "url": normalized["failed_url"],
-            "failed_method": normalized["failed_method"],
-            "method": normalized["failed_method"],
-            "retry_count": normalized["retry_count"],
-            "retry_max": normalized["retry_max"],
-            "goal": _to_str(data.get("goal") or "").strip(),
-            "decision": _to_str(data.get("decision") or "").strip(),
-            "decision_status": decision_status,
-            "decision_reason": decision_reason,
-            "next_action": next_action,
-            "auto_executable": auto_executable,
-            "priority_score": priority_score,
-            "incident_key": incident_key,
-        }
-    )
-
     if routing["route"] == "incident":
+        child_input = _build_child_input(
+            meta=meta,
+            normalized=normalized,
+            flow_id=flow_id,
+            root_event_id=root_event_id,
+            source_event_id=source_event_id,
+            effective_run_record_id=effective_run_record_id,
+            effective_linked_run=effective_linked_run,
+            incident_key=incident_key,
+            decision_status=decision_status,
+            decision_reason=decision_reason,
+            next_action=next_action,
+            auto_executable=auto_executable,
+            priority_score=priority_score,
+            depth=depth,
+        )
         next_commands.append(
             _finalize_output_payload(
                 {
                     "capability": "incident_deduplicate",
                     "priority": 1,
-                    "input": next_input,
+                    "input": child_input,
                 }
             )
         )
