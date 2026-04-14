@@ -13614,14 +13614,16 @@ def _is_capability_allowed_for_workspace(
     ) or {}
 
     plan_info = _workspace_plan_gate_info(row)
-    resolved_plan_key = str(plan_info.get("resolved_plan_key") or "").strip()
-
-    allowed_set = PLAN_CAPABILITY_MATRIX.get(resolved_plan_key, set())
+    allowed_capabilities = _workspace_allowed_capabilities_from_record(row)
     allowed_capabilities = sorted(
-        str(x).strip() for x in allowed_set if str(x).strip()
+        {
+            _normalize_capability_name(item)
+            for item in allowed_capabilities
+            if _normalize_capability_name(item)
+        }
     )
 
-    normalized_capability = str(capability_name or "").strip()
+    normalized_capability = _normalize_capability_name(capability_name)
 
     if not normalized_capability:
         return {
@@ -13634,7 +13636,7 @@ def _is_capability_allowed_for_workspace(
             "allowed_capabilities": allowed_capabilities,
         }
 
-    allowed = normalized_capability in allowed_set
+    allowed = normalized_capability in allowed_capabilities
 
     return {
         "ok": True,
@@ -13642,7 +13644,7 @@ def _is_capability_allowed_for_workspace(
         "workspace_id": workspace_id,
         "capability": normalized_capability,
         "allowed": allowed,
-        "reason": "" if allowed else "capability_not_allowed_for_plan",
+        "reason": "" if allowed else "capability_not_allowed_for_workspace",
         **plan_info,
         "allowed_capabilities": allowed_capabilities,
     }
