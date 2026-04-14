@@ -3048,6 +3048,7 @@ def _ensure_incident_identity(
 
     return _normalize_flow_keys(out)
 
+
 def _propagate_incident_identity(
     result_obj: Optional[Dict[str, Any]],
     parent_input: Optional[Dict[str, Any]] = None,
@@ -3074,22 +3075,20 @@ def _propagate_incident_identity(
 
         if isinstance(child_input, dict):
             child_payload = dict(child_input)
-            target_field = "input"
         elif isinstance(child_command_input, dict):
             child_payload = dict(child_command_input)
-            target_field = "command_input"
         else:
             child_payload = {}
-            target_field = "input"
 
         child_payload = _normalize_flow_keys(child_payload)
         child_payload = _ensure_incident_identity(child_payload, out)
         child_payload = _normalize_flow_keys(child_payload)
 
-        new_item[target_field] = child_payload
+        # Canonical form: always keep child payload in "input"
+        new_item["input"] = child_payload
 
-        if target_field == "input" and "command_input" in new_item and not isinstance(new_item.get("command_input"), dict):
-            new_item.pop("command_input", None)
+        # Remove duplicate alternate payload to avoid divergence
+        new_item.pop("command_input", None)
 
         fixed_next_commands.append(new_item)
 
