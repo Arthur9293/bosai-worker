@@ -5284,13 +5284,18 @@ def _extract_system_run_link_fields(result_obj: Optional[Dict[str, Any]]) -> Dic
 
 
 def finish_system_run(record_id: str, status: str, result_obj: Dict[str, Any]) -> None:
+    persisted_result = dict(result_obj or {}) if isinstance(result_obj, dict) else {}
+    persisted_result = _normalize_keys_deep(persisted_result)
+    persisted_result = _propagate_incident_identity(persisted_result)
+    persisted_result = _sanitize_payload_for_airtable(persisted_result)
+
     base_fields = {
         "Status_select": status,
         "Finished_At": utc_now_iso(),
-        "Result_JSON": _safe_json_dumps(result_obj),
+        "Result_JSON": _safe_json_dumps(persisted_result),
     }
 
-    linked_fields = _extract_system_run_link_fields(result_obj)
+    linked_fields = _extract_system_run_link_fields(persisted_result)
     enriched_fields = {
         **base_fields,
         **linked_fields,
@@ -5312,7 +5317,7 @@ def finish_system_run(record_id: str, status: str, result_obj: Dict[str, Any]) -
 
     _post_run_accounting_best_effort(
         system_run_record_id=record_id,
-        result_obj=result_obj,
+        result_obj=persisted_result,
     )
 
 
@@ -5325,6 +5330,11 @@ def fail_system_run(
         dict(error_obj) if isinstance(error_obj, dict) else {}
     )
     result_payload.setdefault("error", error_message)
+    result_payload.setdefault("error_message", error_message)
+
+    result_payload = _normalize_keys_deep(result_payload)
+    result_payload = _propagate_incident_identity(result_payload)
+    result_payload = _sanitize_payload_for_airtable(result_payload)
 
     base_fields = {
         "Status_select": "Error",
@@ -5356,7 +5366,6 @@ def fail_system_run(
         system_run_record_id=record_id,
         result_obj=result_payload,
     )
-
 
 def idempotency_lookup(req: RunRequest) -> Optional[Dict[str, Any]]:
     formula = (
