@@ -3998,10 +3998,6 @@ def _workspace_is_active_record(fields: Dict[str, Any]) -> bool:
 # ============================================================
 # Workspace plan enrichment
 # ============================================================
-
-PLANS_TABLE_NAME = os.getenv("PLANS_TABLE_NAME", "Plans").strip() or "Plans"
-
-
 def _first_linked_record_id(value: Any) -> str:
     if value is None:
         return ""
