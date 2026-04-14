@@ -384,7 +384,13 @@ def _best_effort_update_logs_error(
     escalation_result: Dict[str, Any],
 ) -> Dict[str, Any]:
     if not log_record_id:
-        return {"ok": False, "reason": "missing_log_record_id"}
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "missing_log_record_id",
+            "chosen_fields": {},
+            "attempts": [],
+        }
 
     result_json = _safe_json(escalation_result)
 
@@ -406,12 +412,14 @@ def _best_effort_update_logs_error(
         if res.get("ok"):
             return {
                 "ok": True,
+                "skipped": False,
                 "chosen_fields": fields,
                 "attempts": results,
             }
 
     return {
         "ok": False,
+        "skipped": False,
         "chosen_fields": {},
         "attempts": results,
     }
@@ -959,7 +967,7 @@ def capability_internal_escalate(
         "ts": utc_now_iso(),
     }
 
-    logs_update_res: Dict[str, Any] = {"ok": False, "skipped": True}
+    logs_update_res: Dict[str, Any] = {"ok": True, "skipped": True, "reason": "not_attempted"}
     try:
         if log_record_id:
             print("[INTERNAL_ESCALATE] log_record_id =", log_record_id)
@@ -971,15 +979,19 @@ def capability_internal_escalate(
                 escalation_result=escalation_result,
             )
 
-            if not logs_update_res.get("ok"):
+            if not logs_update_res.get("ok") and not logs_update_res.get("skipped"):
                 print(
-                    "[INTERNAL_ESCALATE] logs_errors update skipped =",
+                    "[INTERNAL_ESCALATE] logs_errors update issue =",
                     _safe_json(logs_update_res),
                 )
         else:
-            logs_update_res = {"ok": False, "reason": "missing_log_record_id"}
+            logs_update_res = {
+                "ok": True,
+                "skipped": True,
+                "reason": "missing_log_record_id",
+            }
     except Exception as e:
-        logs_update_res = {"ok": False, "error": repr(e)}
+        logs_update_res = {"ok": False, "skipped": False, "error": repr(e)}
         print("[INTERNAL_ESCALATE] logs_errors exception =", repr(e))
 
     next_input = {
@@ -1052,6 +1064,7 @@ def capability_internal_escalate(
         "next_action": "complete_flow_incident",
         "final_failure": final_failure,
         "logs_update_ok": bool(logs_update_res.get("ok")),
+        "logs_update_skipped": bool(logs_update_res.get("skipped")),
         "logs_update_res": logs_update_res,
         "incident_update_ok": bool(incident_update_res.get("ok")),
         "incident_update_res": incident_update_res,
