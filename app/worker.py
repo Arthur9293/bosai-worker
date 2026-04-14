@@ -2903,8 +2903,8 @@ def _ensure_incident_identity(
     if not isinstance(payload, dict):
         return {}
 
-    out = dict(payload)
-    parent = inherited if isinstance(inherited, dict) else {}
+    out = _normalize_flow_keys(dict(payload))
+    parent = _normalize_flow_keys(dict(inherited)) if isinstance(inherited, dict) else {}
 
     capability = _incident_text(out.get("capability"))
     target_capability = _incident_text(out.get("target_capability"))
@@ -2923,6 +2923,8 @@ def _ensure_incident_identity(
             bool(_incident_text(parent.get("incident_key"))),
             bool(_incident_text(out.get("incident_code"))),
             bool(_incident_text(out.get("incident_record_id"))),
+            bool(_incident_text(parent.get("incident_code"))),
+            bool(_incident_text(parent.get("incident_record_id"))),
         ]
     )
 
@@ -2943,6 +2945,13 @@ def _ensure_incident_identity(
 
     if origin.get("source_event_id") and not _incident_text(out.get("source_event_id")):
         out["source_event_id"] = origin["source_event_id"]
+
+    if not _incident_text(out.get("event_id")):
+        out["event_id"] = (
+            _incident_text(out.get("source_event_id"))
+            or _incident_text(out.get("root_event_id"))
+            or _incident_text(out.get("flow_id"))
+        )
 
     if origin.get("workspace_id") and not _incident_text(out.get("workspace_id")):
         out["workspace_id"] = origin["workspace_id"]
@@ -2984,8 +2993,7 @@ def _ensure_incident_identity(
     if origin.get("final_failure") and not _incident_bool(out.get("final_failure")):
         out["final_failure"] = True
 
-    return out
-
+    return _normalize_flow_keys(out)
 
 def _propagate_incident_identity(
     result_obj: Optional[Dict[str, Any]],
@@ -2998,7 +3006,7 @@ def _propagate_incident_identity(
 
     next_commands = out.get("next_commands")
     if not isinstance(next_commands, list):
-        return out
+        return _normalize_flow_keys(out)
 
     fixed_next_commands: List[Dict[str, Any]] = []
 
@@ -3007,16 +3015,33 @@ def _propagate_incident_identity(
             continue
 
         new_item = dict(item)
-        child_input = new_item.get("input")
-        if not isinstance(child_input, dict):
-            child_input = {}
 
-        child_input = _ensure_incident_identity(dict(child_input), out)
-        new_item["input"] = child_input
+        child_input = new_item.get("input")
+        child_command_input = new_item.get("command_input")
+
+        if isinstance(child_input, dict):
+            child_payload = dict(child_input)
+            target_field = "input"
+        elif isinstance(child_command_input, dict):
+            child_payload = dict(child_command_input)
+            target_field = "command_input"
+        else:
+            child_payload = {}
+            target_field = "input"
+
+        child_payload = _normalize_flow_keys(child_payload)
+        child_payload = _ensure_incident_identity(child_payload, out)
+        child_payload = _normalize_flow_keys(child_payload)
+
+        new_item[target_field] = child_payload
+
+        if target_field == "input" and "command_input" in new_item and not isinstance(new_item.get("command_input"), dict):
+            new_item.pop("command_input", None)
+
         fixed_next_commands.append(new_item)
 
     out["next_commands"] = fixed_next_commands
-    return out
+    return _normalize_flow_keys(out)
     
 def airtable_create(table_name: str, fields: Dict[str, Any]) -> Dict[str, Any]:
     if not AIRTABLE_API_KEY or not AIRTABLE_BASE_ID:
