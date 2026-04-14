@@ -10932,7 +10932,7 @@ def capability_planner_monitoring(req: RunRequest, run_record_id: str) -> Dict[s
     }
 
 def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
-    print("HTTP_EXEC_WRAPPER_V7_ENTERED", flush=True)
+    print("HTTP_EXEC_WRAPPER_V8_ENTERED", flush=True)
 
     payload = _normalize_flow_keys(req.input or {})
     workspace_id = _resolve_workspace_id(req=req)
@@ -11049,12 +11049,56 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
     if "next_commands" not in result or not isinstance(result.get("next_commands"), list):
         result["next_commands"] = []
 
-    if "terminal" not in result:
-        result["terminal"] = not bool(result["next_commands"])
-
     result_ok = not (result.get("ok") is False)
     retryable = _is_truthy(result.get("retryable"))
     final_failure = _is_truthy(result.get("final_failure"))
+
+    probe_chain_goals = {
+        "fetch_probe",
+        "confirm_probe",
+        "first_probe",
+        "second_probe",
+    }
+
+    should_resume_with_decision_demo = (
+        result_ok
+        and not retryable
+        and not final_failure
+        and bool(flow_id)
+        and bool(root_event_id)
+        and not bool(result.get("next_commands"))
+        and goal in probe_chain_goals
+    )
+
+    if should_resume_with_decision_demo:
+        result["next_commands"] = [
+            {
+                "capability": "decision_demo",
+                "priority": 1,
+                "input": {
+                    "flow_id": flow_id,
+                    "root_event_id": root_event_id,
+                    "source_event_id": source_event_id,
+                    "event_id": source_event_id,
+                    "workspace_id": workspace_id,
+                    "workspace": workspace_id,
+                    "step_index": step_index + 1,
+                    "goal": f"resume_after_{goal}" if goal else "resume_after_http_exec",
+                    "previous_goal": goal,
+                    "previous_http_status": status_code,
+                    "run_record_id": run_record_id,
+                    "linked_run": run_record_id,
+                },
+            }
+        ]
+        result["terminal"] = False
+        result["auto_chained_decision_demo"] = True
+        result["chain_reason"] = f"http_exec_success_after_{goal}"
+    else:
+        if result.get("next_commands"):
+            result["terminal"] = False
+        elif "terminal" not in result:
+            result["terminal"] = True
 
     if result_ok:
         step_status = "done"
@@ -11099,6 +11143,7 @@ def capability_http_exec_wrapped(req: RunRequest, run_record_id: str) -> Dict[st
                 "last_error": result.get("error"),
                 "retryable": retryable,
                 "final_failure": final_failure,
+                "auto_chained_decision_demo": bool(result.get("auto_chained_decision_demo")),
             },
             result_obj=result,
             linked_run=[run_record_id],
