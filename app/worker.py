@@ -13132,7 +13132,7 @@ def create_event(evt: EventCreate) -> Dict[str, Any]:
     }
 
 @app.post("/events/process")
-def process_events_endpoint(limit: int = 50) -> Dict[str, Any]:
+def process_events_internal(limit: int = 50) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=50, minimum=1, maximum=100)
 
     # Source de vérité = Status_select
