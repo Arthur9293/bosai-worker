@@ -10280,6 +10280,7 @@ def _create_command_from_next_command(
     capability = str(
         next_cmd.get("capability")
         or next_cmd.get("target_capability")
+        or next_cmd.get("mapped_capability")
         or ""
     ).strip()
 
@@ -10287,22 +10288,60 @@ def _create_command_from_next_command(
         "httpexec": "http_exec",
         "retryrouter": "retry_router",
         "incidentrouter": "incident_router",
+        "incidentrouterv2": "incident_router_v2",
         "decisionrouter": "decision_router",
         "incidentcreate": "incident_create",
     }
-    capability = capability_aliases.get(capability, capability)
+    capability = capability_aliases.get(capability.replace("_", "").lower(), capability)
 
     if not capability:
         return {"ok": False, "error": "missing_capability"}
 
-    raw_input = (
-        next_cmd.get("command_input")
-        or next_cmd.get("input")
-        or {}
-    )
+    # ------------------------------------------------------------
+    # tolerant raw input extraction
+    # ------------------------------------------------------------
+    raw_input = next_cmd.get("command_input")
+    if raw_input in (None, "", {}):
+        raw_input = next_cmd.get("input")
+
+    if isinstance(raw_input, str):
+        raw_input = _json_load_maybe(raw_input)
 
     if not isinstance(raw_input, dict):
-        return {"ok": False, "error": "invalid_input"}
+        # fallback: treat next_cmd itself as payload minus orchestration/meta keys
+        meta_keys = {
+            "capability",
+            "target_capability",
+            "mapped_capability",
+            "priority",
+            "idempotency_key",
+            "command_input",
+            "input",
+            "parent_command_id",
+            "parentcommandid",
+            "parent_run_id",
+            "parentrunid",
+            "mode",
+            "ok",
+            "status",
+            "error",
+            "error_message",
+            "reason",
+            "ts",
+        }
+        raw_input = {
+            k: v for k, v in next_cmd.items()
+            if k not in meta_keys
+        }
+
+    if not isinstance(raw_input, dict):
+        return {
+            "ok": False,
+            "error": "invalid_input",
+            "capability": capability,
+            "parent_run_id": parent_run_id,
+            "next_cmd": next_cmd,
+        }
 
     parent_command_id = str(
         next_cmd.get("parent_command_id")
@@ -10315,6 +10354,19 @@ def _create_command_from_next_command(
     command_input = _normalize_keys_deep(command_input)
     command_input = _unwrap_command_payload(command_input)
     command_input = _normalize_flow_keys(command_input)
+
+    # if unwrap returned non-dict, try once more safely
+    if isinstance(command_input, str):
+        command_input = _json_load_maybe(command_input)
+
+    if not isinstance(command_input, dict):
+        return {
+            "ok": False,
+            "error": "invalid_input_after_normalization",
+            "capability": capability,
+            "parent_run_id": parent_run_id,
+            "raw_input": raw_input,
+        }
 
     priority = _to_int(next_cmd.get("priority"), 1)
 
@@ -10335,8 +10387,18 @@ def _create_command_from_next_command(
         or ""
     ).strip()
 
-    retry_count = _to_int(command_input.get("retry_count"), 0)
-    step_index = _to_int(command_input.get("step_index"), 0)
+    retry_count = _to_int(
+        command_input.get("retry_count")
+        if command_input.get("retry_count") is not None
+        else command_input.get("retrycount"),
+        0,
+    )
+    step_index = _to_int(
+        command_input.get("step_index")
+        if command_input.get("step_index") is not None
+        else command_input.get("stepindex"),
+        0,
+    )
 
     effective_workspace_id = str(
         workspace_id
@@ -10377,13 +10439,16 @@ def _create_command_from_next_command(
     if not str(command_input.get("linked_run") or "").strip():
         command_input["linked_run"] = parent_run_id
 
-    # remove legacy compact aliases to keep Input_JSON clean
+    # remove legacy compact aliases
     command_input.pop("flowid", None)
     command_input.pop("rooteventid", None)
     command_input.pop("eventid", None)
     command_input.pop("sourceeventid", None)
     command_input.pop("workspaceid", None)
 
+    # ------------------------------------------------------------
+    # capability-specific normalization
+    # ------------------------------------------------------------
     if capability == "http_exec":
         command_input = _normalize_http_exec_input(command_input)
 
@@ -10396,6 +10461,9 @@ def _create_command_from_next_command(
                 "parent_run_id": parent_run_id,
                 "command_input": command_input,
             }
+
+    if capability in ("incident_router_v2", "incident_router", "incident_create"):
+        command_input = _ensure_incident_identity(command_input)
 
     # re-assert after capability-specific normalization
     if not str(command_input.get("flow_id") or "").strip():
@@ -10511,6 +10579,7 @@ def _create_command_from_next_command(
             "capability": capability,
             "parent_run_id": parent_run_id,
             "create_res": create_res,
+            "command_input": command_input,
         }
 
     return {
