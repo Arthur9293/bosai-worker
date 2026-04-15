@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 import requests
 
-print("HTTP_EXEC_MODULE_LOADED_V5")
+print("HTTP_EXEC_MODULE_LOADED_V6")
 
 HTTP_EXEC_ENABLED = True
 DEFAULT_RETRY_MAX = 3
@@ -30,6 +30,37 @@ FORBIDDEN_HOSTS = {
     "169.254.169.254",
     "metadata.google.internal",
     "metadata",
+}
+
+REQUEST_METADATA_KEYS = {
+    "flow_id",
+    "flowid",
+    "root_event_id",
+    "rooteventid",
+    "source_event_id",
+    "sourceeventid",
+    "event_id",
+    "eventid",
+    "workspace_id",
+    "workspaceid",
+    "workspace",
+    "step_index",
+    "stepindex",
+    "retry_count",
+    "retrycount",
+    "retry_max",
+    "retrymax",
+    "retry_delay_seconds",
+    "retrydelayseconds",
+    "retry_delay_sec",
+    "parent_command_id",
+    "parentcommandid",
+    "run_record_id",
+    "runrecordid",
+    "linked_run",
+    "linkedrun",
+    "goal",
+    "_depth",
 }
 
 
@@ -111,7 +142,36 @@ def _normalize_method(value: Any) -> str:
     return method
 
 
+def _json_load_maybe(value: Any) -> Any:
+    if value is None or value == "":
+        return None
+    if isinstance(value, (dict, list)):
+        return deepcopy(value)
+    if not isinstance(value, str):
+        return value
+
+    text = value.strip()
+    if not text:
+        return None
+
+    try:
+        return json.loads(text)
+    except Exception:
+        return value
+
+
+def _clean_transport_key(key: str) -> str:
+    return str(key or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _is_transport_metadata_key(key: str) -> bool:
+    return _clean_transport_key(key) in REQUEST_METADATA_KEYS
+
+
 def _normalize_headers(value: Any) -> Dict[str, str]:
+    if isinstance(value, str):
+        value = _json_load_maybe(value)
+
     if not isinstance(value, dict):
         return {}
 
@@ -120,25 +180,44 @@ def _normalize_headers(value: Any) -> Dict[str, str]:
         key = str(k).strip()
         if not key:
             continue
+        if _is_transport_metadata_key(key):
+            continue
         result[key] = "" if v is None else str(v)
     return result
 
 
 def _normalize_params(value: Any) -> Dict[str, Any]:
+    if isinstance(value, str):
+        value = _json_load_maybe(value)
+
     if not isinstance(value, dict):
         return {}
-    return dict(value)
+
+    result: Dict[str, Any] = {}
+    for k, v in value.items():
+        key = str(k).strip()
+        if not key:
+            continue
+        if _is_transport_metadata_key(key):
+            continue
+        result[key] = v
+    return result
 
 
 def _normalize_json_body(value: Any) -> Optional[Any]:
     if value is None or value == "":
         return None
-    return value
+    parsed = _json_load_maybe(value)
+    if parsed is None or parsed == "":
+        return None
+    return parsed
 
 
 def _normalize_text_body(value: Any) -> Optional[str]:
     if value is None or value == "":
         return None
+    if isinstance(value, str):
+        return value
     if isinstance(value, (dict, list)):
         return _safe_json_dumps(value)
     return str(value)
@@ -164,6 +243,181 @@ def _sanitize_headers_for_logs(headers: Dict[str, Any]) -> Dict[str, Any]:
         else:
             sanitized[key] = v
     return sanitized
+
+
+def _normalize_success_statuses(value: Any) -> Optional[List[int]]:
+    parsed = _json_load_maybe(value)
+    raw_list: List[Any]
+
+    if isinstance(parsed, list):
+        raw_list = parsed
+    elif isinstance(parsed, str):
+        raw_list = [x.strip() for x in parsed.split(",") if str(x).strip()]
+    else:
+        return None
+
+    result: List[int] = []
+    for item in raw_list:
+        n = _to_int(item, -999999)
+        if n != -999999 and n not in result:
+            result.append(n)
+
+    return result or None
+
+
+def _canonicalize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    src = deepcopy(payload or {})
+    if not isinstance(src, dict):
+        return {}
+
+    out = dict(src)
+
+    url = _pick_text(
+        src.get("url"),
+        src.get("http_target"),
+        src.get("httptarget"),
+        src.get("URL"),
+        src.get("target_url"),
+        src.get("failed_url"),
+    )
+    if url:
+        out["url"] = url
+        out["http_target"] = url
+        out["URL"] = url
+
+    method = _normalize_method(
+        _pick_text(
+            src.get("method"),
+            src.get("http_method"),
+            src.get("HTTP_Method"),
+            src.get("HTTPMethod"),
+            src.get("failed_method"),
+            "GET",
+        )
+    )
+    out["method"] = method
+    out["HTTP_Method"] = method
+    out["HTTPMethod"] = method
+
+    headers = _normalize_headers(
+        src.get("headers")
+        if src.get("headers") not in (None, "")
+        else src.get("HTTP_Headers_JSON")
+        or src.get("http_headers_json")
+        or src.get("http_headers")
+    )
+    out["headers"] = headers
+
+    params = _normalize_params(
+        src.get("params")
+        if src.get("params") not in (None, "")
+        else src.get("query")
+        or src.get("query_params")
+    )
+    out["params"] = params
+
+    json_body_candidate = (
+        src.get("json")
+        if src.get("json") not in (None, "")
+        else src.get("body_json")
+        or src.get("JSON")
+    )
+    out["json"] = _normalize_json_body(json_body_candidate)
+
+    data_body_candidate = (
+        src.get("data")
+        if src.get("data") not in (None, "")
+        else src.get("body_text")
+        or src.get("body")
+    )
+    out["data"] = _normalize_text_body(data_body_candidate)
+
+    flow_id = _pick_text(
+        src.get("flow_id"),
+        src.get("flowId"),
+        src.get("flowid"),
+        src.get("Flow_ID"),
+    )
+    if flow_id:
+        out["flow_id"] = flow_id
+
+    root_event_id = _pick_text(
+        src.get("root_event_id"),
+        src.get("rootEventId"),
+        src.get("rooteventid"),
+        src.get("Root_Event_ID"),
+    )
+    if root_event_id:
+        out["root_event_id"] = root_event_id
+
+    source_event_id = _pick_text(
+        src.get("source_event_id"),
+        src.get("sourceEventId"),
+        src.get("sourceeventid"),
+        src.get("Source_Event_ID"),
+    )
+    if source_event_id:
+        out["source_event_id"] = source_event_id
+
+    event_id = _pick_text(
+        src.get("event_id"),
+        src.get("eventId"),
+        src.get("eventid"),
+        source_event_id,
+    )
+    if event_id:
+        out["event_id"] = event_id
+
+    workspace_id = _pick_text(
+        src.get("workspace_id"),
+        src.get("workspaceId"),
+        src.get("workspaceid"),
+        src.get("Workspace_ID"),
+        src.get("workspace"),
+    )
+    if workspace_id:
+        out["workspace_id"] = workspace_id
+        out["workspace"] = workspace_id
+
+    if src.get("step_index") is None and src.get("stepindex") is not None:
+        out["step_index"] = _to_int(src.get("stepindex"), 0)
+
+    if src.get("retry_count") is None and src.get("retrycount") is not None:
+        out["retry_count"] = _to_int(src.get("retrycount"), 0)
+
+    if src.get("retry_max") is None and src.get("retrymax") is not None:
+        out["retry_max"] = _to_int(src.get("retrymax"), DEFAULT_RETRY_MAX)
+
+    if src.get("retry_delay_seconds") is None:
+        alias_delay = (
+            src.get("retrydelayseconds")
+            if src.get("retrydelayseconds") is not None
+            else src.get("retry_delay_sec")
+        )
+        if alias_delay is not None:
+            out["retry_delay_seconds"] = _to_int(
+                alias_delay, DEFAULT_RETRY_DELAY_SECONDS
+            )
+
+    if src.get("timeout_seconds") is None and src.get("timeout") is not None:
+        out["timeout_seconds"] = _to_int(src.get("timeout"), DEFAULT_TIMEOUT_SECONDS)
+
+    if src.get("follow_redirects") is None and src.get("followredirects") is not None:
+        out["follow_redirects"] = _to_bool(src.get("followredirects"), False)
+
+    if src.get("verify_tls") is None and src.get("verifytls") is not None:
+        out["verify_tls"] = _to_bool(src.get("verifytls"), True)
+
+    if src.get("dry_run") is None and src.get("dryrun") is not None:
+        out["dry_run"] = _to_bool(src.get("dryrun"), False)
+
+    success_statuses = _normalize_success_statuses(src.get("success_statuses"))
+    if success_statuses is None:
+        success_statuses = _normalize_success_statuses(src.get("Success_Statuses"))
+    if success_statuses is not None:
+        out["success_statuses"] = success_statuses
+
+    return out
 
 
 def _extract_retry_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -195,11 +449,7 @@ def _extract_retry_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
         or ""
     )
 
-    command_id = str(
-        payload.get("command_id")
-        or payload.get("commandid")
-        or ""
-    )
+    command_id = str(payload.get("command_id") or payload.get("commandid") or "")
 
     linked_run = str(
         payload.get("linked_run")
@@ -232,7 +482,9 @@ def _extract_retry_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _compute_backoff_seconds(payload: Dict[str, Any], retry_count_after_failure: int) -> int:
+def _compute_backoff_seconds(
+    payload: Dict[str, Any], retry_count_after_failure: int
+) -> int:
     fixed_delay = _to_int(
         payload.get("retry_delay_seconds"),
         _to_int(payload.get("retry_delay_sec"), DEFAULT_RETRY_DELAY_SECONDS),
@@ -247,7 +499,9 @@ def _compute_backoff_seconds(payload: Dict[str, Any], retry_count_after_failure:
 
 
 def _build_next_retry_at(delay_seconds: int) -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + max(0, delay_seconds)))
+    return time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + max(0, delay_seconds))
+    )
 
 
 def _get_depth(payload: Dict[str, Any]) -> int:
@@ -378,7 +632,9 @@ def _extract_response_payload(response: requests.Response) -> Dict[str, Any]:
         "headers": dict(response.headers),
         "body_text": _trim_text(text, 4000),
         "body_json": body_json,
-        "elapsed_ms": int(getattr(response.elapsed, "total_seconds", lambda: 0.0)() * 1000),
+        "elapsed_ms": int(
+            getattr(response.elapsed, "total_seconds", lambda: 0.0)() * 1000
+        ),
     }
 
 
@@ -551,10 +807,16 @@ def _build_retry_router_input(
     retry_input["parent_command_id"] = parent_command_id
     retry_input["command_id"] = command_id or parent_command_id
     retry_input["retry_count"] = retry_count_after_failure
-    retry_input["retry_max"] = _to_int(original_payload.get("retry_max"), meta.get("retry_max", DEFAULT_RETRY_MAX))
+    retry_input["retry_max"] = _to_int(
+        original_payload.get("retry_max"),
+        meta.get("retry_max", DEFAULT_RETRY_MAX),
+    )
     retry_input["retry_delay_seconds"] = _to_int(
         original_payload.get("retry_delay_seconds"),
-        _to_int(original_payload.get("retry_delay_sec"), meta.get("retry_delay_seconds", DEFAULT_RETRY_DELAY_SECONDS)),
+        _to_int(
+            original_payload.get("retry_delay_sec"),
+            meta.get("retry_delay_seconds", DEFAULT_RETRY_DELAY_SECONDS),
+        ),
     )
     retry_input["next_retry_at"] = next_retry_at
     retry_input["_depth"] = _increment_depth(original_payload)
@@ -585,8 +847,12 @@ def _build_retry_router_input(
     retry_input["failed_method"] = failed_method
     retry_input["method"] = failed_method
 
-    retry_input["request"] = deepcopy(request_summary) if isinstance(request_summary, dict) else {}
-    retry_input["response"] = deepcopy(response_summary) if isinstance(response_summary, dict) else {}
+    retry_input["request"] = (
+        deepcopy(request_summary) if isinstance(request_summary, dict) else {}
+    )
+    retry_input["response"] = (
+        deepcopy(response_summary) if isinstance(response_summary, dict) else {}
+    )
     retry_input["original_input"] = original_input
 
     if http_status is not None:
@@ -606,9 +872,7 @@ def _update_monitored_endpoint_best_effort(
 ) -> None:
     try:
         endpoint_name = str(
-            original_payload.get("endpoint_name")
-            or original_payload.get("endpoint")
-            or ""
+            original_payload.get("endpoint_name") or original_payload.get("endpoint") or ""
         ).strip()
 
         endpoint_record_id = str(
@@ -621,9 +885,21 @@ def _update_monitored_endpoint_best_effort(
         airtable_update = runtime_context.get("airtable_update")
         run_record_id = str(runtime_context.get("run_record_id") or "").strip()
 
-        print("[http_exec][endpoint_update] endpoint_name =", repr(endpoint_name), flush=True)
-        print("[http_exec][endpoint_update] endpoint_record_id =", repr(endpoint_record_id), flush=True)
-        print("[http_exec][endpoint_update] run_record_id =", repr(run_record_id), flush=True)
+        print(
+            "[http_exec][endpoint_update] endpoint_name =",
+            repr(endpoint_name),
+            flush=True,
+        )
+        print(
+            "[http_exec][endpoint_update] endpoint_record_id =",
+            repr(endpoint_record_id),
+            flush=True,
+        )
+        print(
+            "[http_exec][endpoint_update] run_record_id =",
+            repr(run_record_id),
+            flush=True,
+        )
         print(
             "[http_exec][endpoint_update] helper_callable_by_field =",
             callable(airtable_update_by_field),
@@ -701,6 +977,162 @@ def _update_monitored_endpoint_best_effort(
         print("[http_exec] endpoint update error =", repr(e), flush=True)
 
 
+def _build_failure_result(
+    *,
+    original_payload: Dict[str, Any],
+    meta: Dict[str, Any],
+    run_record_id: str,
+    request_summary: Dict[str, Any],
+    response_summary: Optional[Dict[str, Any]],
+    http_status: Optional[int],
+    status: str,
+    error_code: str,
+    error_message: str,
+    retry_count_after_failure: Optional[int],
+    retryable: bool,
+    final_failure: bool,
+    next_commands: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    flow_id = meta["flow_id"]
+    root_event_id = meta["root_event_id"]
+    source_event_id = meta["source_event_id"]
+
+    result = {
+        "ok": False,
+        "status": status,
+        "ts": _now_ts(),
+        "request": request_summary,
+        "response": response_summary
+        if isinstance(response_summary, dict)
+        else {
+            "status_code": http_status,
+            "ok": False,
+            "content_type": "",
+            "headers": {},
+            "body_text": "",
+            "body_json": None,
+            "elapsed_ms": 0,
+        },
+        "status_code": http_status,
+        "http_status": http_status,
+        "error": error_code,
+        "error_message": error_message,
+        "retry_count": retry_count_after_failure
+        if retry_count_after_failure is not None
+        else meta["retry_count"],
+        "retry_max": meta["retry_max"],
+        "retry_delay_seconds": meta["retry_delay_seconds"],
+        "retryable": bool(retryable),
+        "final_failure": bool(final_failure),
+        "next_commands": next_commands if isinstance(next_commands, list) else [],
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "source_event_id": source_event_id,
+        "workspace_id": meta["workspace_id"],
+        "step_index": meta["step_index"],
+        "run_record_id": run_record_id,
+        "linked_run": run_record_id,
+        "event_id": source_event_id or root_event_id or flow_id,
+        "goal": _pick_text(
+            original_payload.get("goal"),
+            original_payload.get("failed_goal"),
+        ),
+    }
+    result["terminal"] = not bool(result["next_commands"])
+    return result
+
+
+def _build_success_result(
+    *,
+    meta: Dict[str, Any],
+    run_record_id: str,
+    request_summary: Dict[str, Any],
+    response_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    result = {
+        "ok": True,
+        "status": "done",
+        "ts": _now_ts(),
+        "request": request_summary,
+        "response": response_payload,
+        "status_code": int(response_payload.get("status_code") or 0),
+        "http_status": int(response_payload.get("status_code") or 0),
+        "retryable": False,
+        "final_failure": False,
+        "next_commands": [],
+        "terminal": True,
+        "flow_id": meta["flow_id"],
+        "root_event_id": meta["root_event_id"],
+        "source_event_id": meta["source_event_id"],
+        "workspace_id": meta["workspace_id"],
+        "step_index": meta["step_index"],
+        "run_record_id": run_record_id,
+        "linked_run": run_record_id,
+    }
+    return result
+
+
+def _plan_failure_next_commands(
+    *,
+    original_payload: Dict[str, Any],
+    meta: Dict[str, Any],
+    run_record_id: str,
+    retry_count_after_failure: int,
+    error_code: str,
+    error_message: str,
+    http_status: Optional[int],
+    request_summary: Dict[str, Any],
+    response_summary: Optional[Dict[str, Any]],
+    request_error_value: str = "",
+) -> Tuple[List[Dict[str, Any]], str, bool]:
+    retry_allowed = retry_count_after_failure <= meta["retry_max"]
+    next_retry_at = ""
+    next_commands: List[Dict[str, Any]] = []
+
+    if retry_allowed:
+        delay_seconds = _compute_backoff_seconds(
+            original_payload,
+            retry_count_after_failure,
+        )
+        next_retry_at = _build_next_retry_at(delay_seconds)
+
+        retry_router_input = _build_retry_router_input(
+            original_payload=original_payload,
+            meta=meta,
+            run_record_id=run_record_id,
+            retry_count_after_failure=retry_count_after_failure,
+            next_retry_at=next_retry_at,
+            error_code=error_code,
+            error_message=error_message,
+            http_status=http_status,
+            request_summary=request_summary,
+            response_summary=response_summary,
+            request_error_value=request_error_value,
+        )
+
+        next_commands = [
+            {
+                "capability": "retry_router",
+                "input": retry_router_input,
+            }
+        ]
+    else:
+        next_commands = [
+            _build_incident_router_command(
+                original_payload=original_payload,
+                meta=meta,
+                error_code=error_code,
+                error_message=error_message,
+                http_status=http_status,
+                request_summary=request_summary,
+                response_summary=response_summary,
+                run_record_id=run_record_id,
+            )
+        ]
+
+    return next_commands, next_retry_at, retry_allowed
+
+
 def capability_http_exec(
     payload: Optional[Dict[str, Any]] = None,
     context: Optional[Dict[str, Any]] = None,
@@ -714,8 +1146,12 @@ def capability_http_exec(
     if "run_record_id" not in runtime_context and kwargs.get("run_record_id"):
         runtime_context["run_record_id"] = kwargs.get("run_record_id")
 
-    if "airtable_update_by_field" not in runtime_context and kwargs.get("airtable_update_by_field"):
-        runtime_context["airtable_update_by_field"] = kwargs.get("airtable_update_by_field")
+    if "airtable_update_by_field" not in runtime_context and kwargs.get(
+        "airtable_update_by_field"
+    ):
+        runtime_context["airtable_update_by_field"] = kwargs.get(
+            "airtable_update_by_field"
+        )
 
     if "airtable_update" not in runtime_context and kwargs.get("airtable_update"):
         runtime_context["airtable_update"] = kwargs.get("airtable_update")
@@ -725,7 +1161,7 @@ def capability_http_exec(
     elif payload is None and isinstance(kwargs.get("payload"), dict):
         payload = kwargs["payload"]
 
-    original_payload = deepcopy(payload or {})
+    original_payload = _canonicalize_payload(deepcopy(payload or {}))
     meta = _extract_retry_meta(original_payload)
 
     run_record_id = str(
@@ -736,69 +1172,11 @@ def capability_http_exec(
         or ""
     ).strip()
 
-    base_result_fields = {
-        "flow_id": meta["flow_id"],
-        "root_event_id": meta["root_event_id"],
-        "source_event_id": meta["source_event_id"],
-        "workspace_id": meta["workspace_id"],
-        "step_index": meta["step_index"],
-        "run_record_id": run_record_id,
-        "linked_run": run_record_id,
-    }
-
-    def _build_failure_result(
-        *,
-        status: str,
-        error_code: str,
-        error_message: str,
-        request_summary: Dict[str, Any],
-        response_summary: Optional[Dict[str, Any]],
-        http_status: Optional[int],
-        retry_count_after_failure: Optional[int],
-        retryable: bool,
-        final_failure: bool,
-        next_commands: Optional[List[Dict[str, Any]]] = None,
-    ) -> Dict[str, Any]:
-        result = {
-            "ok": False,
-            "status": status,
-            "ts": _now_ts(),
-            "request": request_summary,
-            "response": response_summary
-            if isinstance(response_summary, dict)
-            else {
-                "status_code": http_status,
-                "ok": False,
-                "content_type": "",
-                "headers": {},
-                "body_text": "",
-                "body_json": None,
-                "elapsed_ms": 0,
-            },
-            "status_code": http_status,
-            "http_status": http_status,
-            "error": error_code,
-            "error_message": error_message,
-            "retry_count": retry_count_after_failure
-            if retry_count_after_failure is not None
-            else meta["retry_count"],
-            "retry_max": meta["retry_max"],
-            "retry_delay_seconds": meta["retry_delay_seconds"],
-            "retryable": bool(retryable),
-            "final_failure": bool(final_failure),
-            "next_commands": next_commands if isinstance(next_commands, list) else [],
-            "event_id": meta["source_event_id"] or meta["root_event_id"] or meta["flow_id"],
-            "goal": _pick_text(
-                original_payload.get("goal"),
-                original_payload.get("failed_goal"),
-            ),
-            **base_result_fields,
-        }
-        result["terminal"] = not bool(result["next_commands"])
-        return result
-
     if not HTTP_EXEC_ENABLED:
         result = _build_failure_result(
+            original_payload=original_payload,
+            meta=meta,
+            run_record_id=run_record_id,
             status="blocked",
             error_code="http_exec_disabled",
             error_message="http_exec_disabled",
@@ -813,8 +1191,13 @@ def capability_http_exec(
         print("[HTTP_EXEC CORE] error return =", result)
         return result
 
-    if _get_depth(original_payload) >= _to_int(original_payload.get("max_depth"), DEFAULT_MAX_DEPTH):
+    if _get_depth(original_payload) >= _to_int(
+        original_payload.get("max_depth"), DEFAULT_MAX_DEPTH
+    ):
         result = _build_failure_result(
+            original_payload=original_payload,
+            meta=meta,
+            run_record_id=run_record_id,
             status="blocked",
             error_code="max_depth_exceeded",
             error_message="max_depth_exceeded",
@@ -829,8 +1212,19 @@ def capability_http_exec(
         print("[HTTP_EXEC CORE] error return =", result)
         return result
 
-    url = str(original_payload.get("url") or "").strip()
-    method = _normalize_method(original_payload.get("method"))
+    url = _pick_text(
+        original_payload.get("url"),
+        original_payload.get("http_target"),
+        original_payload.get("URL"),
+    )
+    method = _normalize_method(
+        _pick_text(
+            original_payload.get("method"),
+            original_payload.get("HTTP_Method"),
+            original_payload.get("HTTPMethod"),
+            "GET",
+        )
+    )
     timeout_seconds = max(
         1,
         _to_int(original_payload.get("timeout_seconds"), DEFAULT_TIMEOUT_SECONDS),
@@ -859,6 +1253,9 @@ def capability_http_exec(
 
     if not url:
         result = _build_failure_result(
+            original_payload=original_payload,
+            meta=meta,
+            run_record_id=run_record_id,
             status="error",
             error_code="missing_url",
             error_message="missing_url",
@@ -878,6 +1275,9 @@ def capability_http_exec(
 
     if not allowed:
         result = _build_failure_result(
+            original_payload=original_payload,
+            meta=meta,
+            run_record_id=run_record_id,
             status="blocked",
             error_code=allow_reason,
             error_message=f"URL blocked: {allow_reason}",
@@ -900,29 +1300,22 @@ def capability_http_exec(
         return result
 
     if dry_run:
-        result = {
-            "ok": True,
-            "status": "done",
-            "dry_run": True,
-            "ts": _now_ts(),
-            "request": request_summary,
-            "response": {
-                "status_code": 0,
-                "ok": True,
-                "content_type": "application/json",
-                "headers": {},
-                "body_text": "",
-                "body_json": {"dry_run": True},
-                "elapsed_ms": 0,
-            },
-            "retryable": False,
-            "final_failure": False,
-            "next_commands": [],
-            "http_status": 0,
+        response_payload = {
             "status_code": 0,
-            "terminal": True,
-            **base_result_fields,
+            "ok": True,
+            "content_type": "application/json",
+            "headers": {},
+            "body_text": "",
+            "body_json": {"dry_run": True},
+            "elapsed_ms": 0,
         }
+        result = _build_success_result(
+            meta=meta,
+            run_record_id=run_record_id,
+            request_summary=request_summary,
+            response_payload=response_payload,
+        )
+        result["dry_run"] = True
         _update_monitored_endpoint_best_effort(
             original_payload=original_payload,
             runtime_context=runtime_context,
@@ -952,7 +1345,9 @@ def capability_http_exec(
         response_payload = _extract_response_payload(response)
         response_payload["elapsed_ms"] = elapsed_ms
 
-        success_statuses = original_payload.get("success_statuses")
+        success_statuses = _normalize_success_statuses(
+            original_payload.get("success_statuses")
+        )
         if isinstance(success_statuses, list) and success_statuses:
             is_success = int(response.status_code) in {
                 _to_int(x, -999999) for x in success_statuses
@@ -961,20 +1356,12 @@ def capability_http_exec(
             is_success = 200 <= int(response.status_code) < 300
 
         if is_success:
-            result = {
-                "ok": True,
-                "status": "done",
-                "ts": _now_ts(),
-                "request": request_summary,
-                "response": response_payload,
-                "status_code": int(response.status_code),
-                "http_status": int(response.status_code),
-                "retryable": False,
-                "final_failure": False,
-                "next_commands": [],
-                "terminal": True,
-                **base_result_fields,
-            }
+            result = _build_success_result(
+                meta=meta,
+                run_record_id=run_record_id,
+                request_summary=request_summary,
+                response_payload=response_payload,
+            )
             _update_monitored_endpoint_best_effort(
                 original_payload=original_payload,
                 runtime_context=runtime_context,
@@ -987,7 +1374,6 @@ def capability_http_exec(
 
         retry_count_after_failure = meta["retry_count"] + 1
         retryable = True
-        retry_allowed = retry_count_after_failure <= meta["retry_max"]
 
         _update_monitored_endpoint_best_effort(
             original_payload=original_payload,
@@ -997,50 +1383,22 @@ def capability_http_exec(
             elapsed_ms=elapsed_ms,
         )
 
-        next_retry_at = ""
-        next_commands: List[Dict[str, Any]] = []
-
-        if retry_allowed:
-            delay_seconds = _compute_backoff_seconds(
-                original_payload,
-                retry_count_after_failure,
-            )
-            next_retry_at = _build_next_retry_at(delay_seconds)
-
-            retry_router_input = _build_retry_router_input(
-                original_payload=original_payload,
-                meta=meta,
-                run_record_id=run_record_id,
-                retry_count_after_failure=retry_count_after_failure,
-                next_retry_at=next_retry_at,
-                error_code="http_status_error",
-                error_message=f"HTTP request failed with status {response.status_code}",
-                http_status=int(response.status_code),
-                request_summary=request_summary,
-                response_summary=response_payload,
-            )
-
-            next_commands = [
-                {
-                    "capability": "retry_router",
-                    "input": retry_router_input,
-                }
-            ]
-        else:
-            next_commands = [
-                _build_incident_router_command(
-                    original_payload=original_payload,
-                    meta=meta,
-                    error_code="http_status_error",
-                    error_message=f"HTTP request failed with status {response.status_code}",
-                    http_status=int(response.status_code),
-                    request_summary=request_summary,
-                    response_summary=response_payload,
-                    run_record_id=run_record_id,
-                )
-            ]
+        next_commands, next_retry_at, retry_allowed = _plan_failure_next_commands(
+            original_payload=original_payload,
+            meta=meta,
+            run_record_id=run_record_id,
+            retry_count_after_failure=retry_count_after_failure,
+            error_code="http_status_error",
+            error_message=f"HTTP request failed with status {response.status_code}",
+            http_status=int(response.status_code),
+            request_summary=request_summary,
+            response_summary=response_payload,
+        )
 
         result = _build_failure_result(
+            original_payload=original_payload,
+            meta=meta,
+            run_record_id=run_record_id,
             status="error",
             error_code="http_status_error",
             error_message=f"HTTP request failed with status {response.status_code}",
@@ -1064,7 +1422,6 @@ def capability_http_exec(
         elapsed_ms = int((time.time() - started_at) * 1000)
         retry_count_after_failure = meta["retry_count"] + 1
         retryable = True
-        retry_allowed = retry_count_after_failure <= meta["retry_max"]
         error_message = _trim_text(str(exc), 1000) or "Request timeout"
 
         response_payload = {
@@ -1085,51 +1442,23 @@ def capability_http_exec(
             elapsed_ms=elapsed_ms,
         )
 
-        next_retry_at = ""
-        next_commands: List[Dict[str, Any]] = []
-
-        if retry_allowed:
-            delay_seconds = _compute_backoff_seconds(
-                original_payload,
-                retry_count_after_failure,
-            )
-            next_retry_at = _build_next_retry_at(delay_seconds)
-
-            retry_router_input = _build_retry_router_input(
-                original_payload=original_payload,
-                meta=meta,
-                run_record_id=run_record_id,
-                retry_count_after_failure=retry_count_after_failure,
-                next_retry_at=next_retry_at,
-                error_code="timeout",
-                error_message=error_message,
-                http_status=None,
-                request_summary=request_summary,
-                response_summary=response_payload,
-                request_error_value=error_message,
-            )
-
-            next_commands = [
-                {
-                    "capability": "retry_router",
-                    "input": retry_router_input,
-                }
-            ]
-        else:
-            next_commands = [
-                _build_incident_router_command(
-                    original_payload=original_payload,
-                    meta=meta,
-                    error_code="timeout",
-                    error_message=error_message,
-                    http_status=None,
-                    request_summary=request_summary,
-                    response_summary=response_payload,
-                    run_record_id=run_record_id,
-                )
-            ]
+        next_commands, next_retry_at, retry_allowed = _plan_failure_next_commands(
+            original_payload=original_payload,
+            meta=meta,
+            run_record_id=run_record_id,
+            retry_count_after_failure=retry_count_after_failure,
+            error_code="timeout",
+            error_message=error_message,
+            http_status=None,
+            request_summary=request_summary,
+            response_summary=response_payload,
+            request_error_value=error_message,
+        )
 
         result = _build_failure_result(
+            original_payload=original_payload,
+            meta=meta,
+            run_record_id=run_record_id,
             status="error",
             error_code="timeout",
             error_message=error_message,
@@ -1153,7 +1482,6 @@ def capability_http_exec(
         elapsed_ms = int((time.time() - started_at) * 1000)
         retry_count_after_failure = meta["retry_count"] + 1
         retryable = True
-        retry_allowed = retry_count_after_failure <= meta["retry_max"]
         error_message = _trim_text(str(exc), 1000) or exc.__class__.__name__
 
         response_payload = {
@@ -1174,51 +1502,23 @@ def capability_http_exec(
             elapsed_ms=elapsed_ms,
         )
 
-        next_retry_at = ""
-        next_commands: List[Dict[str, Any]] = []
-
-        if retry_allowed:
-            delay_seconds = _compute_backoff_seconds(
-                original_payload,
-                retry_count_after_failure,
-            )
-            next_retry_at = _build_next_retry_at(delay_seconds)
-
-            retry_router_input = _build_retry_router_input(
-                original_payload=original_payload,
-                meta=meta,
-                run_record_id=run_record_id,
-                retry_count_after_failure=retry_count_after_failure,
-                next_retry_at=next_retry_at,
-                error_code="request_exception",
-                error_message=error_message,
-                http_status=None,
-                request_summary=request_summary,
-                response_summary=response_payload,
-                request_error_value=error_message,
-            )
-
-            next_commands = [
-                {
-                    "capability": "retry_router",
-                    "input": retry_router_input,
-                }
-            ]
-        else:
-            next_commands = [
-                _build_incident_router_command(
-                    original_payload=original_payload,
-                    meta=meta,
-                    error_code="request_exception",
-                    error_message=error_message,
-                    http_status=None,
-                    request_summary=request_summary,
-                    response_summary=response_payload,
-                    run_record_id=run_record_id,
-                )
-            ]
+        next_commands, next_retry_at, retry_allowed = _plan_failure_next_commands(
+            original_payload=original_payload,
+            meta=meta,
+            run_record_id=run_record_id,
+            retry_count_after_failure=retry_count_after_failure,
+            error_code="request_exception",
+            error_message=error_message,
+            http_status=None,
+            request_summary=request_summary,
+            response_summary=response_payload,
+            request_error_value=error_message,
+        )
 
         result = _build_failure_result(
+            original_payload=original_payload,
+            meta=meta,
+            run_record_id=run_record_id,
             status="error",
             error_code="request_exception",
             error_message=error_message,
@@ -1242,7 +1542,6 @@ def capability_http_exec(
         elapsed_ms = int((time.time() - started_at) * 1000)
         retry_count_after_failure = meta["retry_count"] + 1
         retryable = True
-        retry_allowed = retry_count_after_failure <= meta["retry_max"]
         error_message = _trim_text(f"{exc.__class__.__name__}: {exc}", 1000)
 
         response_payload = {
@@ -1263,51 +1562,23 @@ def capability_http_exec(
             elapsed_ms=elapsed_ms,
         )
 
-        next_retry_at = ""
-        next_commands: List[Dict[str, Any]] = []
-
-        if retry_allowed:
-            delay_seconds = _compute_backoff_seconds(
-                original_payload,
-                retry_count_after_failure,
-            )
-            next_retry_at = _build_next_retry_at(delay_seconds)
-
-            retry_router_input = _build_retry_router_input(
-                original_payload=original_payload,
-                meta=meta,
-                run_record_id=run_record_id,
-                retry_count_after_failure=retry_count_after_failure,
-                next_retry_at=next_retry_at,
-                error_code="unexpected_exception",
-                error_message=error_message,
-                http_status=None,
-                request_summary=request_summary,
-                response_summary=response_payload,
-                request_error_value=error_message,
-            )
-
-            next_commands = [
-                {
-                    "capability": "retry_router",
-                    "input": retry_router_input,
-                }
-            ]
-        else:
-            next_commands = [
-                _build_incident_router_command(
-                    original_payload=original_payload,
-                    meta=meta,
-                    error_code="unexpected_exception",
-                    error_message=error_message,
-                    http_status=None,
-                    request_summary=request_summary,
-                    response_summary=response_payload,
-                    run_record_id=run_record_id,
-                )
-            ]
+        next_commands, next_retry_at, retry_allowed = _plan_failure_next_commands(
+            original_payload=original_payload,
+            meta=meta,
+            run_record_id=run_record_id,
+            retry_count_after_failure=retry_count_after_failure,
+            error_code="unexpected_exception",
+            error_message=error_message,
+            http_status=None,
+            request_summary=request_summary,
+            response_summary=response_payload,
+            request_error_value=error_message,
+        )
 
         result = _build_failure_result(
+            original_payload=original_payload,
+            meta=meta,
+            run_record_id=run_record_id,
             status="error",
             error_code="unexpected_exception",
             error_message=error_message,
