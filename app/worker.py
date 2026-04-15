@@ -10292,7 +10292,10 @@ def _create_command_from_next_command(
         "decisionrouter": "decision_router",
         "incidentcreate": "incident_create",
     }
-    capability = capability_aliases.get(capability.replace("_", "").lower(), capability)
+    capability = capability_aliases.get(
+        capability.replace("_", "").lower(),
+        capability,
+    )
 
     if not capability:
         return {"ok": False, "error": "missing_capability"}
@@ -10330,7 +10333,8 @@ def _create_command_from_next_command(
             "ts",
         }
         raw_input = {
-            k: v for k, v in next_cmd.items()
+            k: v
+            for k, v in next_cmd.items()
             if k not in meta_keys
         }
 
@@ -10355,7 +10359,6 @@ def _create_command_from_next_command(
     command_input = _unwrap_command_payload(command_input)
     command_input = _normalize_flow_keys(command_input)
 
-    # if unwrap returned non-dict, try once more safely
     if isinstance(command_input, str):
         command_input = _json_load_maybe(command_input)
 
@@ -10473,10 +10476,15 @@ def _create_command_from_next_command(
         command_input["root_event_id"] = root_event_id or flow_id or parent_run_id
 
     if not str(command_input.get("source_event_id") or "").strip():
-        command_input["source_event_id"] = source_event_id or root_event_id or flow_id or parent_run_id
+        command_input["source_event_id"] = (
+            source_event_id or root_event_id or flow_id or parent_run_id
+        )
 
     if not str(command_input.get("event_id") or "").strip():
         command_input["event_id"] = command_input["source_event_id"]
+
+    # safe final cleanup before Airtable create
+    command_input = _sanitize_payload_for_airtable(command_input)
 
     inherited_input_idem = str(command_input.get("idempotency_key") or "").strip()
     explicit_next_cmd_idem = str(next_cmd.get("idempotency_key") or "").strip()
