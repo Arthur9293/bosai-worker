@@ -7653,10 +7653,54 @@ def _spawn_next_commands_from_result(
             continue
 
         capability = str(item.get("capability") or "").strip()
+
         raw_input = item.get("input")
+
         if not isinstance(raw_input, dict):
             raw_input = item.get("command_input")
-        if not isinstance(raw_input, dict):
+
+        if isinstance(raw_input, str):
+            parsed_input = _json_load_maybe(raw_input)
+            raw_input = parsed_input if isinstance(parsed_input, dict) else {}
+
+        # SAFE PATCH:
+        # Certains next_commands arrivent aplatis après sanitation.
+        # Exemple:
+        # {
+        #   "capability": "http_exec",
+        #   "url": "https://httpbin.org/get",
+        #   "method": "GET",
+        #   "goal": "first_probe"
+        # }
+        #
+        # Avant, ce cas donnait:
+        # errors: ["next_commands[1] invalid_input"]
+        #
+        # Ici, on reconstruit un input utile depuis les champs aplatis.
+        if not isinstance(raw_input, dict) or not raw_input:
+            meta_keys = {
+                "capability",
+                "Capability",
+                "priority",
+                "Priority",
+                "terminal",
+                "Terminal",
+                "ok",
+                "status",
+                "mode",
+                "message",
+                "error",
+                "error_message",
+                "spawn_summary",
+            }
+
+            raw_input = {
+                k: v
+                for k, v in item.items()
+                if k not in meta_keys
+            }
+
+        if not isinstance(raw_input, dict) or not raw_input:
             skipped += 1
             errors.append(f"next_commands[{idx}] invalid_input")
             continue
@@ -7843,8 +7887,7 @@ def _spawn_next_commands_from_result(
         "root_event_id": resolved_root_event_id,
         "max_depth": CHAIN_MAX_DEPTH,
     }
-
-
+    
 def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     max_cmds = int(req.max_commands or 0) or 5
     if POLICY_MAX_TOOL_CALLS > 0:
