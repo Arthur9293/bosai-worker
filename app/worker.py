@@ -5049,7 +5049,41 @@ def create_system_run(req: RunRequest) -> Tuple[str, str]:
     return record_id, run_uuid
 
 
+def _airtable_link_record_ids_from_any(value: Any) -> List[str]:
+    out: List[str] = []
+
+    def _push(v: Any) -> None:
+        if v is None:
+            return
+
+        if isinstance(v, list):
+            for item in v:
+                _push(item)
+            return
+
+        if isinstance(v, dict):
+            for key in ("id", "record_id", "command_record_id", "incident_record_id", "flow_record_id"):
+                raw = str(v.get(key) or "").strip()
+                if raw.startswith("rec") and raw not in out:
+                    out.append(raw)
+            return
+
+        raw = str(v or "").strip()
+        if raw.startswith("rec") and raw not in out:
+            out.append(raw)
+
+    _push(value)
+    return out
+
+
 def _extract_system_run_link_fields(result_obj: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    SAFE:
+    - Only writes scalar context fields directly on System_Runs.
+    - Does NOT write linked Airtable fields here, because wrong link formats
+      can make the whole Airtable update fail and drop Flow_ID/Root_Event_ID.
+    - Real linked fields are handled separately by best-effort helpers.
+    """
     if not isinstance(result_obj, dict):
         return {}
 
@@ -5059,11 +5093,25 @@ def _extract_system_run_link_fields(result_obj: Optional[Dict[str, Any]]) -> Dic
         else {}
     )
 
+    spawn_summary = (
+        result_obj.get("spawn_summary")
+        if isinstance(result_obj.get("spawn_summary"), dict)
+        else {}
+    )
+
     def _pick(*values: Any) -> str:
         for value in values:
+            if isinstance(value, list):
+                for item in value:
+                    text = str(item or "").strip()
+                    if text:
+                        return text
+                continue
+
             text = str(value or "").strip()
             if text:
                 return text
+
         return ""
 
     fields: Dict[str, Any] = {}
@@ -5072,52 +5120,166 @@ def _extract_system_run_link_fields(result_obj: Optional[Dict[str, Any]]) -> Dic
         result_obj.get("workspace_id"),
         result_obj.get("workspaceId"),
         result_obj.get("Workspace_ID"),
+        incident_result.get("workspace_id"),
+        incident_result.get("Workspace_ID"),
     )
+
     flow_id = _pick(
         result_obj.get("flow_id"),
         result_obj.get("flowId"),
         result_obj.get("Flow_ID"),
+        spawn_summary.get("flow_id"),
+        incident_result.get("flow_id"),
+        incident_result.get("Flow_ID"),
     )
+
     root_event_id = _pick(
         result_obj.get("root_event_id"),
         result_obj.get("rootEventId"),
         result_obj.get("Root_Event_ID"),
+        result_obj.get("event_id"),
+        spawn_summary.get("root_event_id"),
+        incident_result.get("root_event_id"),
+        incident_result.get("Root_Event_ID"),
     )
+
     source_event_id = _pick(
         result_obj.get("source_event_id"),
         result_obj.get("sourceEventId"),
         result_obj.get("Source_Event_ID"),
         result_obj.get("event_id"),
         result_obj.get("eventId"),
-    )
-    linked_command = _pick(
-        result_obj.get("linked_command"),
-        result_obj.get("command_id"),
-        incident_result.get("linked_command"),
-        incident_result.get("command_id"),
-    )
-    linked_incident = _pick(
-        result_obj.get("linked_incident"),
-        result_obj.get("incident_id"),
-        incident_result.get("linked_incident"),
-        incident_result.get("incident_id"),
+        incident_result.get("source_event_id"),
+        incident_result.get("event_id"),
     )
 
     if workspace_id:
         fields["Workspace_ID"] = workspace_id
+
     if flow_id:
         fields["Flow_ID"] = flow_id
+
     if root_event_id:
         fields["Root_Event_ID"] = root_event_id
+
     if source_event_id:
         fields["Source_Event_ID"] = source_event_id
-    if linked_command:
-        fields["Linked_Command"] = linked_command
-    if linked_incident:
-        fields["Linked_Incident"] = linked_incident
 
     return fields
 
+def _system_run_find_related_flow_record_ids(result_obj: Dict[str, Any]) -> List[str]:
+    flow_ids: List[str] = []
+
+    def _push(value: Any) -> None:
+        text = str(value or "").strip()
+        if text and text not in flow_ids:
+            flow_ids.append(text)
+
+    if isinstance(result_obj, dict):
+        _push(result_obj.get("flow_id"))
+        _push(result_obj.get("root_event_id"))
+
+        spawn_summary = result_obj.get("spawn_summary")
+        if isinstance(spawn_summary, dict):
+            _push(spawn_summary.get("flow_id"))
+            _push(spawn_summary.get("root_event_id"))
+
+    record_ids: List[str] = []
+
+    for flow_id in flow_ids:
+        try:
+            rec = flow_get_record(flow_id, workspace_id=str(result_obj.get("workspace_id") or "production"))
+            if rec and str(rec.get("id") or "").startswith("rec"):
+                rid = str(rec.get("id") or "").strip()
+                if rid not in record_ids:
+                    record_ids.append(rid)
+        except Exception:
+            continue
+
+    return record_ids
+
+
+def _system_run_find_related_incident_record_ids(result_obj: Dict[str, Any]) -> List[str]:
+    candidates: List[str] = []
+
+    def _push(value: Any) -> None:
+        text = str(value or "").strip()
+        if text and text not in candidates:
+            candidates.append(text)
+
+    if isinstance(result_obj, dict):
+        _push(result_obj.get("incident_record_id"))
+        _push(result_obj.get("incident_id"))
+        _push(result_obj.get("linked_incident"))
+
+        incident_result = result_obj.get("incident_result")
+        if isinstance(incident_result, dict):
+            _push(incident_result.get("incident_record_id"))
+            _push(incident_result.get("incident_id"))
+            _push(incident_result.get("linked_incident"))
+
+    record_ids = [x for x in candidates if x.startswith("rec")]
+    return record_ids
+
+
+def _patch_system_run_related_links_best_effort(
+    system_run_record_id: str,
+    result_obj: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    SAFE:
+    - Best-effort only.
+    - Tries your Airtable field names seen in the app:
+      linked_Flows / linked_Incidents.
+    - Falls back to other possible casing.
+    - Never blocks the run if Airtable rejects a linked field.
+    """
+    if not system_run_record_id or not isinstance(result_obj, dict):
+        return {"ok": False, "reason": "missing_input"}
+
+    flow_record_ids = _system_run_find_related_flow_record_ids(result_obj)
+    incident_record_ids = _system_run_find_related_incident_record_ids(result_obj)
+
+    if not flow_record_ids and not incident_record_ids:
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "no_related_airtable_record_ids",
+            "flow_record_ids": [],
+            "incident_record_ids": [],
+        }
+
+    candidates: List[Dict[str, Any]] = []
+
+    c1: Dict[str, Any] = {}
+    if flow_record_ids:
+        c1["linked_Flows"] = flow_record_ids
+    if incident_record_ids:
+        c1["linked_Incidents"] = incident_record_ids
+    if c1:
+        candidates.append(c1)
+
+    c2: Dict[str, Any] = {}
+    if flow_record_ids:
+        c2["Linked_Flows"] = flow_record_ids
+    if incident_record_ids:
+        c2["Linked_Incidents"] = incident_record_ids
+    if c2:
+        candidates.append(c2)
+
+    c3: Dict[str, Any] = {}
+    if flow_record_ids:
+        c3["Linked_Flow"] = flow_record_ids
+    if incident_record_ids:
+        c3["Linked_Incident"] = incident_record_ids
+    if c3:
+        candidates.append(c3)
+
+    return _airtable_update_best_effort(
+        SYSTEM_RUNS_TABLE_NAME,
+        system_run_record_id,
+        candidates,
+    )
 
 def finish_system_run(record_id: str, status: str, result_obj: Dict[str, Any]) -> None:
     persisted_result = dict(result_obj or {}) if isinstance(result_obj, dict) else {}
@@ -5131,25 +5293,36 @@ def finish_system_run(record_id: str, status: str, result_obj: Dict[str, Any]) -
         "Result_JSON": _safe_json_dumps(persisted_result),
     }
 
-    linked_fields = _extract_system_run_link_fields(persisted_result)
-    enriched_fields = {
+    context_fields = _extract_system_run_link_fields(persisted_result)
+
+    safe_fields = {
         **base_fields,
-        **linked_fields,
+        **context_fields,
     }
 
     try:
         airtable_update(
             SYSTEM_RUNS_TABLE_NAME,
             record_id,
-            enriched_fields,
+            safe_fields,
         )
     except Exception as e:
-        print("[finish_system_run] enriched update fallback =", repr(e), flush=True)
+        print("[finish_system_run] context update fallback =", repr(e), flush=True)
         airtable_update(
             SYSTEM_RUNS_TABLE_NAME,
             record_id,
             base_fields,
         )
+
+    try:
+        link_patch_result = _patch_system_run_related_links_best_effort(
+            system_run_record_id=record_id,
+            result_obj=persisted_result,
+        )
+        if isinstance(persisted_result, dict):
+            persisted_result["system_run_link_patch"] = link_patch_result
+    except Exception as e:
+        print("[finish_system_run] linked fields patch skipped =", repr(e), flush=True)
 
     _post_run_accounting_best_effort(
         system_run_record_id=record_id,
@@ -5157,6 +5330,63 @@ def finish_system_run(record_id: str, status: str, result_obj: Dict[str, Any]) -
     )
 
 
+def fail_system_run(
+    record_id: str,
+    error_message: str,
+    error_obj: Optional[Dict[str, Any]] = None,
+) -> None:
+    result_payload: Dict[str, Any] = (
+        dict(error_obj) if isinstance(error_obj, dict) else {}
+    )
+    result_payload.setdefault("error", error_message)
+    result_payload.setdefault("error_message", error_message)
+
+    result_payload = _normalize_keys_deep(result_payload)
+    result_payload = _propagate_incident_identity(result_payload)
+    result_payload = _sanitize_payload_for_airtable(result_payload)
+
+    base_fields = {
+        "Status_select": "Error",
+        "Finished_At": utc_now_iso(),
+        "Result_JSON": _safe_json_dumps(result_payload),
+    }
+
+    context_fields = _extract_system_run_link_fields(result_payload)
+
+    safe_fields = {
+        **base_fields,
+        **context_fields,
+    }
+
+    try:
+        airtable_update(
+            SYSTEM_RUNS_TABLE_NAME,
+            record_id,
+            safe_fields,
+        )
+    except Exception as e:
+        print("[fail_system_run] context update fallback =", repr(e), flush=True)
+        airtable_update(
+            SYSTEM_RUNS_TABLE_NAME,
+            record_id,
+            base_fields,
+        )
+
+    try:
+        link_patch_result = _patch_system_run_related_links_best_effort(
+            system_run_record_id=record_id,
+            result_obj=result_payload,
+        )
+        if isinstance(result_payload, dict):
+            result_payload["system_run_link_patch"] = link_patch_result
+    except Exception as e:
+        print("[fail_system_run] linked fields patch skipped =", repr(e), flush=True)
+
+    _post_run_accounting_best_effort(
+        system_run_record_id=record_id,
+        result_obj=result_payload,
+    )
+    
 def fail_system_run(
     record_id: str,
     error_message: str,
