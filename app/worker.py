@@ -45,6 +45,7 @@ from app.capabilities.incident_update import run as capability_incident_update
 from app.capabilities.resolve_incident import run as capability_resolve_incident
 from app.capabilities.close_incident import run as capability_close_incident
 from app.capabilities.smart_resolve import run as capability_smart_resolve
+from app.capabilities.decision_router import run as decision_router
 
 
 # ============================================================
@@ -11577,6 +11578,7 @@ EVENT_CAPABILITY_ALLOWLIST = {
     "chain_demo",
     "planner_demo",
     "decision_demo",
+    "decision_router",
     "incident_router_v2",
     "retry_router",
     "sla_router",
@@ -11603,6 +11605,7 @@ EXECUTABLE_CAPABILITY_ALLOWLIST = {
     "chain_demo",
     "planner_demo",
     "decision_demo",
+    "decision_router",
     "incident_router_v2",
     "retry_router",
     "sla_router",
@@ -11980,6 +11983,7 @@ CAPABILITIES = {
     "smart_resolve": capability_smart_resolve_wrapped,
     "planner_monitoring": capability_planner_monitoring,
     "decision_monitoring": capability_decision_monitoring,
+    "decision_router": decision_router,
     "lead_decision": capability_lead_decision,
     "send_lead_email": capability_send_lead_email,
 
