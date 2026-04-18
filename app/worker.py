@@ -9997,44 +9997,6 @@ def _event_mark_processed(
         "attempts": attempts,
     }
 
-def _event_mark_error(event_record_id: str, message: str) -> Dict[str, Any]:
-    ts = utc_now_iso()
-    msg = str(message or "")[:1000]
-
-    return _airtable_update_best_effort(
-        EVENTS_TABLE_NAME,
-        event_record_id,
-        [
-            {
-                "Status_select": "Error",
-                "Status": "Error",
-                "Processed_At": ts,
-                "Error_Message": msg,
-                "Last_Error": msg,
-            },
-            {
-                "Status_select": "Error",
-                "Status": "Error",
-                "Processed_At": ts,
-                "Error_Message": msg,
-            },
-            {
-                "Status_select": "Error",
-                "Processed_At": ts,
-                "Error_Message": msg,
-            },
-            {
-                "Status_select": "Error",
-                "Processed_At": ts,
-            },
-            {
-                "Status": "Error",
-                "Processed_At": ts,
-            },
-        ],
-    )
-
-
 def _event_mark_ignored(event_record_id: str, message: str) -> Dict[str, Any]:
     ts = utc_now_iso()
     msg = str(message or "")[:1000]
