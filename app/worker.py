@@ -7206,52 +7206,45 @@ def capability_retry_queue(req: RunRequest, run_record_id: str) -> Dict[str, Any
     if limit > 200:
         limit = 200
 
-    workspace_id = str(
-        inp.get("workspace_id")
-        or inp.get("workspaceId")
-        or inp.get("Workspace_ID")
-        or ""
-    ).strip()
+    view_name = str(
+        req.view
+        or inp.get("view")
+        or "Retry_Queue"
+    ).strip() or "Retry_Queue"
 
-    formula_parts = [
-        "OR({Status_select}='Retry',{Status_select}='retry_scheduled')",
-        "{Next_Retry_At}!=BLANK()",
-        "OR(IS_BEFORE({Next_Retry_At},NOW()),{Next_Retry_At}=NOW())",
-    ]
-
-    if workspace_id:
-        formula_parts.insert(0, f"{{Workspace_ID}}='{workspace_id}'")
-
-    formula = "AND(" + ",".join(formula_parts) + ")"
-
-    selected_view = str(getattr(req, "view", "") or "").strip()
+    formula = (
+        "AND("
+        "{Status_select}='Retry',"
+        "{Next_Retry_At}!=BLANK(),"
+        "OR(IS_BEFORE({Next_Retry_At},NOW()),{Next_Retry_At}=NOW())"
+        ")"
+    )
 
     try:
-        list_kwargs = {
-            "formula": formula,
-            "sort": [{"field": "Next_Retry_At", "direction": "asc"}],
-            "max_records": limit,
-        }
-        if selected_view:
-            list_kwargs["view_name"] = selected_view
-
         recs = airtable_list_filtered(
             COMMANDS_TABLE_NAME,
-            **list_kwargs,
-        )
-        mode = "formula"
-    except Exception:
-        fallback_view = selected_view or "Retry_Queue"
-        recs = airtable_list_view(
-            COMMANDS_TABLE_NAME,
-            fallback_view,
+            formula=formula,
+            view_name=view_name,
+            sort=[{"field": "Next_Retry_At", "direction": "asc"}],
             max_records=limit,
         )
-        mode = f"view_fallback:{fallback_view}"
+        mode = f"formula+view:{view_name}"
+    except Exception as e:
+        recs = airtable_list_view(
+            COMMANDS_TABLE_NAME,
+            view_name,
+            max_records=limit,
+        )
+        mode = f"view_fallback:{view_name}"
+        formula_error = str(e)
+    else:
+        formula_error = None
 
     promoted = 0
     failed = 0
+    skipped_not_ready = 0
     errors: List[str] = []
+    promoted_ids: List[str] = []
 
     for r in recs:
         cid = r.get("id")
@@ -7259,22 +7252,7 @@ def capability_retry_queue(req: RunRequest, run_record_id: str) -> Dict[str, Any
             continue
 
         fields = r.get("fields", {}) or {}
-
-        status_value = str(_read_command_status(fields) or "").strip()
-        next_retry_at = fields.get("Next_Retry_At")
-        record_workspace_id = str(
-            fields.get("Workspace_ID")
-            or fields.get("workspace_id")
-            or ""
-        ).strip()
-
-        if status_value not in ("Retry", "retry_scheduled"):
-            continue
-
-        if not next_retry_at:
-            continue
-
-        if workspace_id and record_workspace_id and record_workspace_id != workspace_id:
+        if _read_command_status(fields) != "Retry":
             continue
 
         res = _airtable_update_best_effort(
@@ -7284,20 +7262,41 @@ def capability_retry_queue(req: RunRequest, run_record_id: str) -> Dict[str, Any
                 {
                     "Status_select": "Queued",
                     "Next_Retry_At": None,
+                    "Is_Locked": False,
+                    "Locked_At": None,
+                    "Lock_Expires_At": None,
+                    "Lock_Token": None,
+                    "Owner_Bot_Name": None,
+                    "Worker_Started_At": None,
+                    "Started_At": None,
+                    "Last_Heartbeat_At": None,
+                    "Finished_At": None,
                     "Linked_Run": [run_record_id],
                 },
                 {
                     "Status_select": "Queued",
+                    "Next_Retry_At": None,
+                    "Is_Locked": False,
+                    "Locked_At": None,
+                    "Lock_Expires_At": None,
+                    "Lock_Token": None,
                     "Linked_Run": [run_record_id],
                 },
                 {
                     "Status_select": "Queued",
+                    "Next_Retry_At": None,
+                    "Is_Locked": False,
+                },
+                {
+                    "Status_select": "Queued",
+                    "Next_Retry_At": None,
                 },
             ],
         )
 
         if res.get("ok"):
             promoted += 1
+            promoted_ids.append(cid)
         else:
             failed += 1
             errors.append(f"{cid}: {res.get('error')}")
@@ -7305,11 +7304,14 @@ def capability_retry_queue(req: RunRequest, run_record_id: str) -> Dict[str, Any
     return {
         "ok": True,
         "mode": mode,
+        "view": view_name,
         "formula": formula,
-        "workspace_id": workspace_id,
+        "formula_error": formula_error,
         "scanned": len(recs),
         "promoted": promoted,
+        "promoted_ids": promoted_ids[:20],
         "failed": failed,
+        "skipped_not_ready": skipped_not_ready,
         "errors": errors[:10],
     }
     
