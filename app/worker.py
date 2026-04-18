@@ -45,7 +45,7 @@ from app.capabilities.incident_update import run as capability_incident_update
 from app.capabilities.resolve_incident import run as capability_resolve_incident
 from app.capabilities.close_incident import run as capability_close_incident
 from app.capabilities.smart_resolve import run as capability_smart_resolve
-from app.capabilities.decision_router import run as decision_router
+from app.capabilities.decision_router import decision_router
 
 
 # ============================================================
