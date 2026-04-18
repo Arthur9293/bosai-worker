@@ -5395,52 +5395,6 @@ def fail_system_run(
         result_obj=result_payload,
     )
     
-def fail_system_run(
-    record_id: str,
-    error_message: str,
-    error_obj: Optional[Dict[str, Any]] = None,
-) -> None:
-    result_payload: Dict[str, Any] = (
-        dict(error_obj) if isinstance(error_obj, dict) else {}
-    )
-    result_payload.setdefault("error", error_message)
-    result_payload.setdefault("error_message", error_message)
-
-    result_payload = _normalize_keys_deep(result_payload)
-    result_payload = _propagate_incident_identity(result_payload)
-    result_payload = _sanitize_payload_for_airtable(result_payload)
-
-    base_fields = {
-        "Status_select": "Error",
-        "Finished_At": utc_now_iso(),
-        "Result_JSON": _safe_json_dumps(result_payload),
-    }
-
-    linked_fields = _extract_system_run_link_fields(result_payload)
-    enriched_fields = {
-        **base_fields,
-        **linked_fields,
-    }
-
-    try:
-        airtable_update(
-            SYSTEM_RUNS_TABLE_NAME,
-            record_id,
-            enriched_fields,
-        )
-    except Exception as e:
-        print("[fail_system_run] enriched update fallback =", repr(e), flush=True)
-        airtable_update(
-            SYSTEM_RUNS_TABLE_NAME,
-            record_id,
-            base_fields,
-        )
-
-    _post_run_accounting_best_effort(
-        system_run_record_id=record_id,
-        result_obj=result_payload,
-    )
-
 def idempotency_lookup(req: RunRequest) -> Optional[Dict[str, Any]]:
     formula = (
         f"AND({{Idempotency_Key}}='{req.idempotency_key}',"
