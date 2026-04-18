@@ -14703,11 +14703,24 @@ async def run(request: Request, response: Response) -> RunResponse:
             workspace_record=workspace_record,
         )
 
-    else:
+   else:
         verify_request_auth_or_401(raw, headers_lc)
 
         workspace_id = _normalize_workspace_id(
-            _extract_workspace_id(payload=payload, request=request)
+            _pick_text(
+                payload_input.get("workspace_id"),
+                payload_input.get("workspaceId"),
+                payload_input.get("Workspace_ID"),
+                payload_input.get("workspace"),
+                payload.get("workspace_id"),
+                payload.get("workspaceId"),
+                payload.get("Workspace_ID"),
+                payload.get("workspace"),
+                request.headers.get("x-workspace-id"),
+                request.headers.get("x-bosai-workspace"),
+                request.query_params.get("workspace_id"),
+                WORKSPACE_DEFAULT_ID,
+            )
         )
 
         _enforce_workspace_access_for_run(
