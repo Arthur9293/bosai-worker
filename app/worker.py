@@ -55,14 +55,23 @@ def _normalize_workspace_id(value: Any) -> str:
     text = str(value or "").strip()
     return text or WORKSPACE_DEFAULT_ID
 
-
-def _extract_workspace_id(payload: Optional[Dict[str, Any]] = None, request: Optional[Request] = None) -> str:
+def _extract_workspace_id(
+    payload: Optional[Dict[str, Any]] = None,
+    request: Optional[Request] = None,
+) -> str:
     payload = payload or {}
+    nested_input = payload.get("input") if isinstance(payload.get("input"), dict) else {}
 
     candidates = [
         payload.get("workspace_id"),
         payload.get("workspaceId"),
         payload.get("Workspace_ID"),
+        payload.get("workspace"),
+
+        nested_input.get("workspace_id"),
+        nested_input.get("workspaceId"),
+        nested_input.get("Workspace_ID"),
+        nested_input.get("workspace"),
     ]
 
     if request is not None:
@@ -75,13 +84,12 @@ def _extract_workspace_id(payload: Optional[Dict[str, Any]] = None, request: Opt
         )
 
     for candidate in candidates:
-        normalized = _normalize_workspace_id(candidate)
-        if normalized:
-            return normalized
+        text = str(candidate or "").strip()
+        if text:
+            return text
 
     return WORKSPACE_DEFAULT_ID
-
-
+    
 def _inject_workspace(payload: Optional[Dict[str, Any]], workspace_id: str) -> Dict[str, Any]:
     obj = dict(payload or {})
     obj["workspace_id"] = _normalize_workspace_id(workspace_id)
