@@ -9996,43 +9996,6 @@ def _event_mark_processed(
         "event_record_id": event_record_id,
         "attempts": attempts,
     }
-
-def _event_mark_ignored(event_record_id: str, message: str) -> Dict[str, Any]:
-    ts = utc_now_iso()
-    msg = str(message or "")[:1000]
-
-    return _airtable_update_best_effort(
-        EVENTS_TABLE_NAME,
-        event_record_id,
-        [
-            {
-                "Status_select": "Ignored",
-                "Status": "Ignored",
-                "Processed_At": ts,
-                "Error_Message": msg,
-                "Last_Error": msg,
-            },
-            {
-                "Status_select": "Ignored",
-                "Status": "Ignored",
-                "Processed_At": ts,
-                "Error_Message": msg,
-            },
-            {
-                "Status_select": "Ignored",
-                "Processed_At": ts,
-                "Error_Message": msg,
-            },
-            {
-                "Status_select": "Ignored",
-                "Processed_At": ts,
-            },
-            {
-                "Status": "Ignored",
-                "Processed_At": ts,
-            },
-        ],
-    )
     
 def _create_command_from_event(event_record: Dict[str, Any]) -> Dict[str, Any]:
     fields = event_record.get("fields", {}) or {}
