@@ -14568,7 +14568,7 @@ async def run(request: Request, response: Response) -> RunResponse:
 
         return out
 
-        def _enrich_next_command(
+    def _enrich_next_command(
         next_cmd: Dict[str, Any],
         *,
         parent_result: Dict[str, Any],
