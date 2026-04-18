@@ -14675,61 +14675,60 @@ async def run(request: Request, response: Response) -> RunResponse:
     workspace_record = resolve_workspace_from_headers(headers_lc)
     print("[RUN DEBUG] workspace_record =", workspace_record, flush=True)
 
-    if workspace_record:
-        workspace_fields = workspace_record.get("fields", {}) or {}
-        workspace_id = _normalize_workspace_id(
-            workspace_fields.get("Workspace_ID")
+if workspace_record:
+    workspace_fields = workspace_record.get("fields", {}) or {}
+    workspace_id = _normalize_workspace_id(
+        workspace_fields.get("Workspace_ID")
+    )
+
+    requested_workspace_id = _safe_str(
+        payload_input.get("workspace_id")
+        or payload_input.get("workspaceId")
+        or payload_input.get("Workspace_ID")
+        or payload.get("workspace_id")
+        or payload.get("workspaceId")
+        or payload.get("Workspace_ID")
+    )
+
+    if requested_workspace_id:
+        requested_workspace_id = _normalize_workspace_id(requested_workspace_id)
+        if requested_workspace_id != workspace_id:
+            raise HTTPException(status_code=403, detail="workspace_mismatch")
+
+    _enforce_workspace_access_for_run(
+        request=request,
+        headers_lc=headers_lc,
+        workspace_id=workspace_id,
+        capability_name=capability_name,
+        workspace_record=workspace_record,
+    )
+else:
+    verify_request_auth_or_401(raw, headers_lc)
+
+    workspace_id = _normalize_workspace_id(
+        _pick_text(
+            payload_input.get("workspace_id"),
+            payload_input.get("workspaceId"),
+            payload_input.get("Workspace_ID"),
+            payload_input.get("workspace"),
+            payload.get("workspace_id"),
+            payload.get("workspaceId"),
+            payload.get("Workspace_ID"),
+            payload.get("workspace"),
+            request.headers.get("x-workspace-id"),
+            request.headers.get("x-bosai-workspace"),
+            request.query_params.get("workspace_id"),
+            WORKSPACE_DEFAULT_ID,
         )
+    )
 
-        requested_workspace_id = _safe_str(
-            payload_input.get("workspace_id")
-            or payload_input.get("workspaceId")
-            or payload_input.get("Workspace_ID")
-            or payload.get("workspace_id")
-            or payload.get("workspaceId")
-            or payload.get("Workspace_ID")
-        )
-
-        if requested_workspace_id:
-            requested_workspace_id = _normalize_workspace_id(requested_workspace_id)
-            if requested_workspace_id != workspace_id:
-                raise HTTPException(status_code=403, detail="workspace_mismatch")
-
-        _enforce_workspace_access_for_run(
-            request=request,
-            headers_lc=headers_lc,
-            workspace_id=workspace_id,
-            capability_name=capability_name,
-            workspace_record=workspace_record,
-        )
-
-   else:
-        verify_request_auth_or_401(raw, headers_lc)
-
-        workspace_id = _normalize_workspace_id(
-            _pick_text(
-                payload_input.get("workspace_id"),
-                payload_input.get("workspaceId"),
-                payload_input.get("Workspace_ID"),
-                payload_input.get("workspace"),
-                payload.get("workspace_id"),
-                payload.get("workspaceId"),
-                payload.get("Workspace_ID"),
-                payload.get("workspace"),
-                request.headers.get("x-workspace-id"),
-                request.headers.get("x-bosai-workspace"),
-                request.query_params.get("workspace_id"),
-                WORKSPACE_DEFAULT_ID,
-            )
-        )
-
-        _enforce_workspace_access_for_run(
-            request=request,
-            headers_lc=headers_lc,
-            workspace_id=workspace_id,
-            capability_name=capability_name,
-            workspace_record=None,
-        )
+    _enforce_workspace_access_for_run(
+        request=request,
+        headers_lc=headers_lc,
+        workspace_id=workspace_id,
+        capability_name=capability_name,
+        workspace_record=None,
+    )
 
     payload_input = _ensure_input_context(payload_input, workspace_id)
     payload["input"] = payload_input
