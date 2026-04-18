@@ -7199,32 +7199,55 @@ def _command_mark_retry_or_dead_from_result_best_effort(
     
 def capability_retry_queue(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     inp = req.input or {}
+
     limit = int(inp.get("limit", 50) or 50)
     if limit <= 0:
         limit = 50
     if limit > 200:
         limit = 200
 
-    formula = (
-        "AND("
-        "{Status_select}='Retry',"
-        "{Next_Retry_At}!=BLANK(),"
-        "OR(IS_BEFORE({Next_Retry_At},NOW()),{Next_Retry_At}=NOW())"
-        ")"
-    )
+    workspace_id = str(
+        inp.get("workspace_id")
+        or inp.get("workspaceId")
+        or inp.get("Workspace_ID")
+        or ""
+    ).strip()
+
+    formula_parts = [
+        "OR({Status_select}='Retry',{Status_select}='retry_scheduled')",
+        "{Next_Retry_At}!=BLANK()",
+        "OR(IS_BEFORE({Next_Retry_At},NOW()),{Next_Retry_At}=NOW())",
+    ]
+
+    if workspace_id:
+        formula_parts.insert(0, f"{{Workspace_ID}}='{workspace_id}'")
+
+    formula = "AND(" + ",".join(formula_parts) + ")"
+
+    selected_view = str(getattr(req, "view", "") or "").strip()
 
     try:
+        list_kwargs = {
+            "formula": formula,
+            "sort": [{"field": "Next_Retry_At", "direction": "asc"}],
+            "max_records": limit,
+        }
+        if selected_view:
+            list_kwargs["view_name"] = selected_view
+
         recs = airtable_list_filtered(
             COMMANDS_TABLE_NAME,
-            formula=formula,
-            view_name=(req.view or COMMANDS_VIEW_NAME or "Queue").strip(),
-            sort=[{"field": "Next_Retry_At", "direction": "asc"}],
-            max_records=limit,
+            **list_kwargs,
         )
         mode = "formula"
     except Exception:
-        recs = airtable_list_view(COMMANDS_TABLE_NAME, (req.view or COMMANDS_VIEW_NAME or "Queue").strip(), max_records=limit)
-        mode = "view_fallback"
+        fallback_view = selected_view or "Retry_Queue"
+        recs = airtable_list_view(
+            COMMANDS_TABLE_NAME,
+            fallback_view,
+            max_records=limit,
+        )
+        mode = f"view_fallback:{fallback_view}"
 
     promoted = 0
     failed = 0
@@ -7234,19 +7257,45 @@ def capability_retry_queue(req: RunRequest, run_record_id: str) -> Dict[str, Any
         cid = r.get("id")
         if not cid:
             continue
+
         fields = r.get("fields", {}) or {}
-        if _read_command_status(fields) != "Retry":
+
+        status_value = str(_read_command_status(fields) or "").strip()
+        next_retry_at = fields.get("Next_Retry_At")
+        record_workspace_id = str(
+            fields.get("Workspace_ID")
+            or fields.get("workspace_id")
+            or ""
+        ).strip()
+
+        if status_value not in ("Retry", "retry_scheduled"):
+            continue
+
+        if not next_retry_at:
+            continue
+
+        if workspace_id and record_workspace_id and record_workspace_id != workspace_id:
             continue
 
         res = _airtable_update_best_effort(
             COMMANDS_TABLE_NAME,
             cid,
             [
-                {"Status_select": "Queued", "Next_Retry_At": None, "Linked_Run": [run_record_id]},
-                {"Status_select": "Queued", "Linked_Run": [run_record_id]},
-                {"Status_select": "Queued"},
+                {
+                    "Status_select": "Queued",
+                    "Next_Retry_At": None,
+                    "Linked_Run": [run_record_id],
+                },
+                {
+                    "Status_select": "Queued",
+                    "Linked_Run": [run_record_id],
+                },
+                {
+                    "Status_select": "Queued",
+                },
             ],
         )
+
         if res.get("ok"):
             promoted += 1
         else:
@@ -7256,13 +7305,14 @@ def capability_retry_queue(req: RunRequest, run_record_id: str) -> Dict[str, Any
     return {
         "ok": True,
         "mode": mode,
+        "formula": formula,
+        "workspace_id": workspace_id,
         "scanned": len(recs),
         "promoted": promoted,
         "failed": failed,
         "errors": errors[:10],
     }
-
-
+    
 def capability_lock_recovery(req: RunRequest, run_record_id: str) -> Dict[str, Any]:
     inp = req.input or {}
     limit = int(inp.get("limit", 50) or 50)
