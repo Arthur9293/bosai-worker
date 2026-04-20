@@ -12465,37 +12465,232 @@ def health_score() -> Dict[str, Any]:
 @app.get("/runs")
 def get_runs(limit: int = 20) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=20, minimum=1, maximum=100)
-    records, meta = _safe_records_from_view(SYSTEM_RUNS_TABLE_NAME, SYSTEM_RUNS_VIEW_NAME, limit)
+    records, meta = _safe_records_from_view(
+        SYSTEM_RUNS_TABLE_NAME,
+        SYSTEM_RUNS_VIEW_NAME,
+        limit,
+    )
+
+    def _pick_text(*values: Any) -> str:
+        for value in values:
+            if value is None:
+                continue
+
+            if isinstance(value, list):
+                for item in value:
+                    text = str(item or "").strip()
+                    if text:
+                        return text
+                continue
+
+            text = str(value or "").strip()
+            if text:
+                return text
+
+        return ""
+
+    def _safe_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        text = str(value or "").strip().lower()
+        return text in ("1", "true", "yes", "on", "oui")
+
+    def _safe_duration_ms(started_at: Any, finished_at: Any, result_obj: Dict[str, Any]) -> Optional[int]:
+        explicit = (
+            result_obj.get("duration_ms")
+            or result_obj.get("Duration_ms")
+            or result_obj.get("durationMs")
+        )
+
+        try:
+            if explicit is not None and str(explicit).strip() != "":
+                return int(explicit)
+        except Exception:
+            pass
+
+        try:
+            if started_at and finished_at:
+                start_ts = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+                end_ts = datetime.fromisoformat(str(finished_at).replace("Z", "+00:00"))
+                delta = int((end_ts - start_ts).total_seconds() * 1000)
+                return max(delta, 0)
+        except Exception:
+            pass
+
+        return None
 
     runs: List[Dict[str, Any]] = []
-    stats = {"running": 0, "done": 0, "error": 0, "unsupported": 0, "other": 0}
+    stats = {
+        "running": 0,
+        "done": 0,
+        "error": 0,
+        "unsupported": 0,
+        "retry": 0,
+        "blocked": 0,
+        "queued": 0,
+        "other": 0,
+    }
 
     for r in records:
         f = r.get("fields", {}) or {}
-        status = str(f.get("Status_select", "") or "").strip()
 
-        if status == "Running":
+        input_obj = _json_load_maybe(
+            f.get("Input_JSON")
+            or f.get("input_json")
+            or f.get("Input")
+            or f.get("input")
+        )
+        result_obj = _json_load_maybe(
+            f.get("Result_JSON")
+            or f.get("result_json")
+            or f.get("Result")
+            or f.get("result")
+        )
+
+        status = _pick_text(
+            f.get("Status_select"),
+            f.get("Status"),
+            result_obj.get("status"),
+            result_obj.get("status_select"),
+        ) or "Unknown"
+
+        status_key = status.lower()
+
+        if status_key == "running":
             stats["running"] += 1
-        elif status == "Done":
+        elif status_key == "done":
             stats["done"] += 1
-        elif status == "Error":
+        elif status_key == "error":
             stats["error"] += 1
-        elif status == "Unsupported":
+        elif status_key == "unsupported":
             stats["unsupported"] += 1
+        elif status_key == "retry":
+            stats["retry"] += 1
+        elif status_key == "blocked":
+            stats["blocked"] += 1
+        elif status_key in ("queued", "queue"):
+            stats["queued"] += 1
         else:
             stats["other"] += 1
+
+        started_at = _pick_text(f.get("Started_At"), f.get("started_at"))
+        finished_at = _pick_text(f.get("Finished_At"), f.get("finished_at"))
+        created_at = _pick_text(f.get("Created_At"), f.get("created_at"), started_at)
+        updated_at = _pick_text(f.get("Updated_At"), f.get("updated_at"), finished_at, started_at)
+
+        workspace_id = _pick_text(
+            f.get("Workspace_ID"),
+            f.get("workspace_id"),
+            input_obj.get("workspace_id"),
+            input_obj.get("workspaceId"),
+            input_obj.get("workspace"),
+            result_obj.get("workspace_id"),
+            result_obj.get("workspaceId"),
+            result_obj.get("workspace"),
+        )
+
+        flow_id = _pick_text(
+            f.get("Flow_ID"),
+            f.get("flow_id"),
+            input_obj.get("flow_id"),
+            input_obj.get("flowId"),
+            input_obj.get("flowid"),
+            result_obj.get("flow_id"),
+            result_obj.get("flowId"),
+            result_obj.get("flowid"),
+        )
+
+        root_event_id = _pick_text(
+            f.get("Root_Event_ID"),
+            f.get("root_event_id"),
+            input_obj.get("root_event_id"),
+            input_obj.get("rootEventId"),
+            input_obj.get("rooteventid"),
+            result_obj.get("root_event_id"),
+            result_obj.get("rootEventId"),
+            result_obj.get("rooteventid"),
+            input_obj.get("event_id"),
+            result_obj.get("event_id"),
+        )
+
+        source_event_id = _pick_text(
+            f.get("Source_Event_ID"),
+            f.get("source_event_id"),
+            input_obj.get("source_event_id"),
+            input_obj.get("sourceEventId"),
+            input_obj.get("sourceeventid"),
+            result_obj.get("source_event_id"),
+            result_obj.get("sourceEventId"),
+            result_obj.get("sourceeventid"),
+            input_obj.get("event_id"),
+            result_obj.get("event_id"),
+            root_event_id,
+            flow_id,
+        )
+
+        linked_command = _pick_text(
+            f.get("Command_ID"),
+            f.get("command_id"),
+            f.get("Linked_Command"),
+            input_obj.get("command_id"),
+            input_obj.get("commandId"),
+            input_obj.get("linked_command"),
+            result_obj.get("command_id"),
+            result_obj.get("commandId"),
+            result_obj.get("linked_command"),
+        )
+
+        linked_run = _pick_text(
+            f.get("Linked_Run"),
+            f.get("Run_Record_ID"),
+            f.get("run_record_id"),
+            input_obj.get("linked_run"),
+            input_obj.get("run_record_id"),
+            result_obj.get("linked_run"),
+            result_obj.get("run_record_id"),
+        )
+
+        error_text = _pick_text(
+            result_obj.get("error_message"),
+            result_obj.get("error"),
+            f.get("Last_Error"),
+            f.get("Error_Message"),
+            f.get("Error"),
+        )
+
+        duration_ms = _safe_duration_ms(started_at, finished_at, result_obj)
 
         runs.append(
             {
                 "id": r.get("id"),
+                "record_id": r.get("id"),
                 "run_id": f.get("Run_ID"),
                 "worker": f.get("Worker"),
                 "capability": f.get("Capability"),
                 "status": status,
                 "priority": f.get("Priority"),
-                "started_at": f.get("Started_At"),
-                "finished_at": f.get("Finished_At"),
-                "dry_run": f.get("Dry_Run"),
+                "dry_run": _safe_bool(f.get("Dry_Run")),
+                "started_at": started_at or None,
+                "finished_at": finished_at or None,
+                "created_at": created_at or None,
+                "updated_at": updated_at or None,
+                "duration_ms": duration_ms,
+                "idempotency_key": f.get("Idempotency_Key"),
+                "workspace_id": workspace_id or None,
+                "flow_id": flow_id or None,
+                "root_event_id": root_event_id or None,
+                "source_event_id": source_event_id or None,
+                "linked_command": linked_command or None,
+                "linked_run": linked_run or None,
+                "app_name": f.get("App_Name"),
+                "app_version": f.get("App_Version"),
+                "error": error_text or None,
+                "input": input_obj,
+                "result": result_obj,
+                "input_json": input_obj,
+                "result_json": result_obj,
             }
         )
 
