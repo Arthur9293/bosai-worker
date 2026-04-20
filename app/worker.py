@@ -1978,7 +1978,6 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
     orchestration_capabilities = {
         "retry_router",
         "sla_router",
-        "incident_router",
         "incident_router_v2",
         "incident_deduplicate",
         "incident_create",
@@ -2631,7 +2630,6 @@ def _compose_command_input(fields: Dict[str, Any]) -> Dict[str, Any]:
 # ============================================================
 
 _INCIDENT_CHAIN_CAPABILITIES = {
-    "incident_router",
     "incident_router_v2",
     "incident_deduplicate",
     "incident_create",
@@ -2642,7 +2640,6 @@ _INCIDENT_CHAIN_CAPABILITIES = {
 
 _INCIDENT_ORCHESTRATION_CAPABILITIES = {
     "retry_router",
-    "incident_router",
     "incident_router_v2",
     "incident_deduplicate",
     "incident_create",
@@ -7839,7 +7836,6 @@ def capability_command_orchestrator(req: RunRequest, run_record_id: str) -> Dict
     ORCHESTRATION_CAPABILITIES = {
         "retry_router",
         "decision_router",
-        "incident_router",
         "incident_router_v2",
         "incident_deduplicate",
         "incident_create",
@@ -10418,7 +10414,6 @@ def _create_command_from_next_command(
     capability_aliases = {
         "httpexec": "http_exec",
         "retryrouter": "retry_router",
-        "incidentrouter": "incident_router",
         "incidentrouterv2": "incident_router_v2",
         "decisionrouter": "decision_router",
         "incidentcreate": "incident_create",
@@ -10596,7 +10591,7 @@ def _create_command_from_next_command(
                 "command_input": command_input,
             }
 
-    if capability in ("incident_router_v2", "incident_router", "incident_create"):
+    if capability in ("incident_router_v2", "incident_create"):
         command_input = _ensure_incident_identity(command_input)
 
     # re-assert after capability-specific normalization
@@ -13854,7 +13849,6 @@ PLAN_CAPABILITY_MATRIX: Dict[str, set[str]] = {
         "complete_flow_demo",
         "sla_router",
         "retry_router",
-        "incident_router",
         "incident_router_v2",
         "incident_create",
         "complete_flow_incident",
@@ -13952,7 +13946,6 @@ ALL_KNOWN_CAPABILITIES: Set[str] = {
     "complete_flow_demo",
     "sla_router",
     "retry_router",
-    "incident_router",
     "incident_router_v2",
     "incident_create",
     "complete_flow_incident",
