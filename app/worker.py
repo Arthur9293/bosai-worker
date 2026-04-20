@@ -12588,11 +12588,12 @@ def _extract_run_metadata_from_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
     
 @app.get("/runs")
 def get_runs(
-    request: Request,
     limit: int = 20,
-    workspace_id: str = "",
+    workspace_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=20, minimum=1, maximum=100)
+    requested_workspace_id = _normalize_workspace_id(workspace_id) if workspace_id else ""
+
     records, meta = _safe_records_from_view(
         SYSTEM_RUNS_TABLE_NAME,
         SYSTEM_RUNS_VIEW_NAME,
@@ -12625,7 +12626,11 @@ def get_runs(
         text = str(value or "").strip().lower()
         return text in ("1", "true", "yes", "on", "oui")
 
-    def _safe_duration_ms(started_at: Any, finished_at: Any, result_obj: Dict[str, Any]) -> Optional[int]:
+    def _safe_duration_ms(
+        started_at: Any,
+        finished_at: Any,
+        result_obj: Dict[str, Any],
+    ) -> Optional[int]:
         explicit = (
             result_obj.get("duration_ms")
             or result_obj.get("Duration_ms")
@@ -12649,20 +12654,9 @@ def get_runs(
 
         return None
 
-    raw_requested_workspace_id = _pick_text(
-        workspace_id,
-        request.query_params.get("workspace_id"),
-        request.headers.get("x-workspace-id"),
-        request.headers.get("x-bosai-workspace"),
-    )
+    all_runs: List[Dict[str, Any]] = []
+    visible_runs: List[Dict[str, Any]] = []
 
-    requested_workspace_id = (
-        _normalize_workspace_id(raw_requested_workspace_id)
-        if raw_requested_workspace_id
-        else ""
-    )
-
-    runs: List[Dict[str, Any]] = []
     stats = {
         "running": 0,
         "done": 0,
@@ -12674,12 +12668,7 @@ def get_runs(
         "other": 0,
     }
 
-    received_count = 0
-    dropped_by_scope = 0
-
     for r in records:
-        received_count += 1
-
         f = r.get("fields", {}) or {}
 
         input_obj = _json_load_maybe(
@@ -12707,9 +12696,10 @@ def get_runs(
         created_at = _pick_text(f.get("Created_At"), f.get("created_at"), started_at)
         updated_at = _pick_text(f.get("Updated_At"), f.get("updated_at"), finished_at, started_at)
 
-        current_workspace_id = _pick_text(
+        resolved_workspace_id = _pick_text(
             f.get("Workspace_ID"),
             f.get("workspace_id"),
+            f.get("Workspace"),
             input_obj.get("workspace_id"),
             input_obj.get("workspaceId"),
             input_obj.get("workspace"),
@@ -12717,35 +12707,9 @@ def get_runs(
             result_obj.get("workspaceId"),
             result_obj.get("workspace"),
         )
+        resolved_workspace_id = _normalize_workspace_id(resolved_workspace_id) if resolved_workspace_id else ""
 
-        current_workspace_id = _normalize_workspace_id(
-            current_workspace_id or WORKSPACE_DEFAULT_ID
-        )
-
-        if requested_workspace_id and current_workspace_id != requested_workspace_id:
-            dropped_by_scope += 1
-            continue
-
-        status_key = status.lower()
-
-        if status_key == "running":
-            stats["running"] += 1
-        elif status_key == "done":
-            stats["done"] += 1
-        elif status_key == "error":
-            stats["error"] += 1
-        elif status_key == "unsupported":
-            stats["unsupported"] += 1
-        elif status_key == "retry":
-            stats["retry"] += 1
-        elif status_key == "blocked":
-            stats["blocked"] += 1
-        elif status_key in ("queued", "queue"):
-            stats["queued"] += 1
-        else:
-            stats["other"] += 1
-
-        flow_id_value = _pick_text(
+        flow_id = _pick_text(
             f.get("Flow_ID"),
             f.get("flow_id"),
             input_obj.get("flow_id"),
@@ -12781,7 +12745,7 @@ def get_runs(
             input_obj.get("event_id"),
             result_obj.get("event_id"),
             root_event_id,
-            flow_id_value,
+            flow_id,
         )
 
         linked_command = _pick_text(
@@ -12816,50 +12780,74 @@ def get_runs(
 
         duration_ms = _safe_duration_ms(started_at, finished_at, result_obj)
 
-        runs.append(
-            {
-                "id": r.get("id"),
-                "record_id": r.get("id"),
-                "run_id": f.get("Run_ID"),
-                "worker": f.get("Worker"),
-                "capability": f.get("Capability"),
-                "status": status,
-                "priority": f.get("Priority"),
-                "dry_run": _safe_bool(f.get("Dry_Run")),
-                "started_at": started_at or None,
-                "finished_at": finished_at or None,
-                "created_at": created_at or None,
-                "updated_at": updated_at or None,
-                "duration_ms": duration_ms,
-                "idempotency_key": f.get("Idempotency_Key"),
-                "workspace_id": current_workspace_id or None,
-                "flow_id": flow_id_value or None,
-                "root_event_id": root_event_id or None,
-                "source_event_id": source_event_id or None,
-                "linked_command": linked_command or None,
-                "linked_run": linked_run or None,
-                "app_name": f.get("App_Name"),
-                "app_version": f.get("App_Version"),
-                "error": error_text or None,
-                "input": input_obj,
-                "result": result_obj,
-                "input_json": input_obj,
-                "result_json": result_obj,
-            }
-        )
+        run_item = {
+            "id": r.get("id"),
+            "record_id": r.get("id"),
+            "run_id": f.get("Run_ID"),
+            "worker": f.get("Worker"),
+            "capability": f.get("Capability"),
+            "status": status,
+            "priority": f.get("Priority"),
+            "dry_run": _safe_bool(f.get("Dry_Run")),
+            "started_at": started_at or None,
+            "finished_at": finished_at or None,
+            "created_at": created_at or None,
+            "updated_at": updated_at or None,
+            "duration_ms": duration_ms,
+            "idempotency_key": f.get("Idempotency_Key"),
+            "workspace_id": resolved_workspace_id or None,
+            "flow_id": flow_id or None,
+            "root_event_id": root_event_id or None,
+            "source_event_id": source_event_id or None,
+            "linked_command": linked_command or None,
+            "linked_run": linked_run or None,
+            "app_name": f.get("App_Name"),
+            "app_version": f.get("App_Version"),
+            "error": error_text or None,
+            "input": input_obj,
+            "result": result_obj,
+            "input_json": input_obj,
+            "result_json": result_obj,
+        }
+
+        all_runs.append(run_item)
+
+        if requested_workspace_id and resolved_workspace_id != requested_workspace_id:
+            continue
+
+        visible_runs.append(run_item)
+
+        status_key = status.lower()
+
+        if status_key == "running":
+            stats["running"] += 1
+        elif status_key == "done":
+            stats["done"] += 1
+        elif status_key == "error":
+            stats["error"] += 1
+        elif status_key == "unsupported":
+            stats["unsupported"] += 1
+        elif status_key == "retry":
+            stats["retry"] += 1
+        elif status_key == "blocked":
+            stats["blocked"] += 1
+        elif status_key in ("queued", "queue"):
+            stats["queued"] += 1
+        else:
+            stats["other"] += 1
 
     return {
         "ok": bool(meta.get("ok")),
         "source": meta,
+        "count": len(visible_runs),
         "scope": {
             "requested_workspace_id": requested_workspace_id or None,
-            "received": received_count,
-            "visible": len(runs),
-            "dropped_by_scope": dropped_by_scope,
+            "received": len(all_runs),
+            "visible": len(visible_runs),
+            "dropped_by_scope": max(0, len(all_runs) - len(visible_runs)),
         },
-        "count": len(runs),
         "stats": stats,
-        "runs": runs,
+        "runs": visible_runs,
         "ts": utc_now_iso(),
     }
     
