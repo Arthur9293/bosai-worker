@@ -12508,9 +12508,90 @@ def health_score() -> Dict[str, Any]:
 # ============================================================
 # Read-only endpoints
 # ============================================================
+def _extract_run_metadata_from_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
+    input_json = _coerce_json_obj(
+        fields.get("Input_JSON")
+        or fields.get("input_json")
+    )
 
+    result_json = _coerce_json_obj(
+        fields.get("Result_JSON")
+        or fields.get("result_json")
+    )
+
+    def pick(*values):
+        for v in values:
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return None
+
+    workspace_id = pick(
+        fields.get("Workspace_ID"),
+        fields.get("workspace_id"),
+        input_json.get("workspace_id"),
+        input_json.get("workspaceId"),
+        input_json.get("workspace"),
+        result_json.get("workspace_id"),
+        result_json.get("workspaceId"),
+        result_json.get("workspace"),
+    )
+
+    flow_id = pick(
+        fields.get("Flow_ID"),
+        fields.get("flow_id"),
+        input_json.get("flow_id"),
+        input_json.get("flowid"),
+        input_json.get("flowId"),
+        result_json.get("flow_id"),
+        result_json.get("flowid"),
+        result_json.get("flowId"),
+    )
+
+    root_event_id = pick(
+        fields.get("Root_Event_ID"),
+        fields.get("root_event_id"),
+        fields.get("Event_ID"),
+        fields.get("event_id"),
+        input_json.get("root_event_id"),
+        input_json.get("rooteventid"),
+        input_json.get("rootEventId"),
+        input_json.get("event_id"),
+        result_json.get("root_event_id"),
+        result_json.get("rooteventid"),
+        result_json.get("rootEventId"),
+        result_json.get("event_id"),
+    )
+
+    source_event_id = pick(
+        fields.get("Source_Event_ID"),
+        fields.get("source_event_id"),
+        input_json.get("source_event_id"),
+        input_json.get("sourceeventid"),
+        input_json.get("sourceEventId"),
+        input_json.get("event_id"),
+        result_json.get("source_event_id"),
+        result_json.get("sourceeventid"),
+        result_json.get("sourceEventId"),
+        result_json.get("event_id"),
+        root_event_id,
+        flow_id,
+    )
+
+    return {
+        "workspace_id": workspace_id,
+        "flow_id": flow_id,
+        "root_event_id": root_event_id,
+        "source_event_id": source_event_id,
+        "input_json": input_json if input_json else None,
+        "result_json": result_json if result_json else None,
+    }
+    
 @app.get("/runs")
-def get_runs(limit: int = 20) -> Dict[str, Any]:
+def get_runs(
+    request: Request,
+    limit: int = 20,
+    workspace_id: str = "",
+) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=20, minimum=1, maximum=100)
     records, meta = _safe_records_from_view(
         SYSTEM_RUNS_TABLE_NAME,
@@ -12568,6 +12649,19 @@ def get_runs(limit: int = 20) -> Dict[str, Any]:
 
         return None
 
+    raw_requested_workspace_id = _pick_text(
+        workspace_id,
+        request.query_params.get("workspace_id"),
+        request.headers.get("x-workspace-id"),
+        request.headers.get("x-bosai-workspace"),
+    )
+
+    requested_workspace_id = (
+        _normalize_workspace_id(raw_requested_workspace_id)
+        if raw_requested_workspace_id
+        else ""
+    )
+
     runs: List[Dict[str, Any]] = []
     stats = {
         "running": 0,
@@ -12580,7 +12674,12 @@ def get_runs(limit: int = 20) -> Dict[str, Any]:
         "other": 0,
     }
 
+    received_count = 0
+    dropped_by_scope = 0
+
     for r in records:
+        received_count += 1
+
         f = r.get("fields", {}) or {}
 
         input_obj = _json_load_maybe(
@@ -12603,6 +12702,30 @@ def get_runs(limit: int = 20) -> Dict[str, Any]:
             result_obj.get("status_select"),
         ) or "Unknown"
 
+        started_at = _pick_text(f.get("Started_At"), f.get("started_at"))
+        finished_at = _pick_text(f.get("Finished_At"), f.get("finished_at"))
+        created_at = _pick_text(f.get("Created_At"), f.get("created_at"), started_at)
+        updated_at = _pick_text(f.get("Updated_At"), f.get("updated_at"), finished_at, started_at)
+
+        current_workspace_id = _pick_text(
+            f.get("Workspace_ID"),
+            f.get("workspace_id"),
+            input_obj.get("workspace_id"),
+            input_obj.get("workspaceId"),
+            input_obj.get("workspace"),
+            result_obj.get("workspace_id"),
+            result_obj.get("workspaceId"),
+            result_obj.get("workspace"),
+        )
+
+        current_workspace_id = _normalize_workspace_id(
+            current_workspace_id or WORKSPACE_DEFAULT_ID
+        )
+
+        if requested_workspace_id and current_workspace_id != requested_workspace_id:
+            dropped_by_scope += 1
+            continue
+
         status_key = status.lower()
 
         if status_key == "running":
@@ -12622,23 +12745,7 @@ def get_runs(limit: int = 20) -> Dict[str, Any]:
         else:
             stats["other"] += 1
 
-        started_at = _pick_text(f.get("Started_At"), f.get("started_at"))
-        finished_at = _pick_text(f.get("Finished_At"), f.get("finished_at"))
-        created_at = _pick_text(f.get("Created_At"), f.get("created_at"), started_at)
-        updated_at = _pick_text(f.get("Updated_At"), f.get("updated_at"), finished_at, started_at)
-
-        workspace_id = _pick_text(
-            f.get("Workspace_ID"),
-            f.get("workspace_id"),
-            input_obj.get("workspace_id"),
-            input_obj.get("workspaceId"),
-            input_obj.get("workspace"),
-            result_obj.get("workspace_id"),
-            result_obj.get("workspaceId"),
-            result_obj.get("workspace"),
-        )
-
-        flow_id = _pick_text(
+        flow_id_value = _pick_text(
             f.get("Flow_ID"),
             f.get("flow_id"),
             input_obj.get("flow_id"),
@@ -12674,7 +12781,7 @@ def get_runs(limit: int = 20) -> Dict[str, Any]:
             input_obj.get("event_id"),
             result_obj.get("event_id"),
             root_event_id,
-            flow_id,
+            flow_id_value,
         )
 
         linked_command = _pick_text(
@@ -12725,8 +12832,8 @@ def get_runs(limit: int = 20) -> Dict[str, Any]:
                 "updated_at": updated_at or None,
                 "duration_ms": duration_ms,
                 "idempotency_key": f.get("Idempotency_Key"),
-                "workspace_id": workspace_id or None,
-                "flow_id": flow_id or None,
+                "workspace_id": current_workspace_id or None,
+                "flow_id": flow_id_value or None,
                 "root_event_id": root_event_id or None,
                 "source_event_id": source_event_id or None,
                 "linked_command": linked_command or None,
@@ -12744,12 +12851,18 @@ def get_runs(limit: int = 20) -> Dict[str, Any]:
     return {
         "ok": bool(meta.get("ok")),
         "source": meta,
+        "scope": {
+            "requested_workspace_id": requested_workspace_id or None,
+            "received": received_count,
+            "visible": len(runs),
+            "dropped_by_scope": dropped_by_scope,
+        },
         "count": len(runs),
         "stats": stats,
         "runs": runs,
         "ts": utc_now_iso(),
     }
-
+    
 def _coerce_json_obj(value: Any) -> Dict[str, Any]:
     if isinstance(value, dict):
         return value
