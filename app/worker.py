@@ -12035,7 +12035,7 @@ CAPABILITIES = {
     "smart_resolve": capability_smart_resolve_wrapped,
     "planner_monitoring": capability_planner_monitoring,
     "decision_monitoring": capability_decision_monitoring,
-    "decision_router": decision_router,
+    "decision_router": capability_decision_router,
     "lead_decision": capability_lead_decision,
     "send_lead_email": capability_send_lead_email,
 
