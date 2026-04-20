@@ -621,11 +621,16 @@ def bosai_scheduler_loop() -> None:
     global SCHEDULER_LAST_COMMAND_RESULT
     global SCHEDULER_LAST_ERROR
 
+    scheduler_workspace_id = _normalize_workspace_id(SCHEDULER_WORKSPACE_ID)
+
     while True:
         try:
             SCHEDULER_LAST_TICK_AT = utc_now_iso()
             SCHEDULER_LAST_ERROR = None
-            print(f"[scheduler] tick at {SCHEDULER_LAST_TICK_AT}")
+            print(
+                f"[scheduler] tick at {SCHEDULER_LAST_TICK_AT} workspace={scheduler_workspace_id}",
+                flush=True,
+            )
 
             evt_run_record_id: Optional[str] = None
             cmd_run_record_id: Optional[str] = None
@@ -635,9 +640,13 @@ def bosai_scheduler_loop() -> None:
                 evt_payload = {
                     "worker": WORKER_NAME,
                     "capability": "event_engine",
-                    "idempotency_key": f"scheduler-events-{int(time.time())}",
-                    "input": {},
+                    "idempotency_key": f"scheduler-events-{scheduler_workspace_id}-{int(time.time())}",
+                    "input": {
+                        "workspace_id": scheduler_workspace_id,
+                        "workspace": scheduler_workspace_id,
+                    },
                 }
+
                 req_evt = RunRequest.from_payload(evt_payload)
                 evt_run_record_id, _ = create_system_run(req_evt)
 
@@ -646,21 +655,36 @@ def bosai_scheduler_loop() -> None:
                     evt_result if isinstance(evt_result, dict) else {"raw": str(evt_result)}
                 )
 
-                if isinstance(evt_result, dict) and "run_record_id" not in evt_result:
-                    evt_result["run_record_id"] = evt_run_record_id
+                if isinstance(evt_result, dict):
+                    evt_result.setdefault("run_record_id", evt_run_record_id)
+                    evt_result.setdefault("workspace_id", scheduler_workspace_id)
+                    evt_result.setdefault("scheduler_workspace_id", scheduler_workspace_id)
 
                 finish_system_run(evt_run_record_id, "Done", evt_result)
-                print(f"[scheduler] event_engine result={evt_result}")
+                print(
+                    f"[scheduler] event_engine result={evt_result}",
+                    flush=True,
+                )
 
             except Exception as e:
                 import traceback
                 SCHEDULER_LAST_ERROR = f"event_engine: {repr(e)}"
                 if evt_run_record_id:
                     try:
-                        fail_system_run(evt_run_record_id, repr(e))
+                        fail_system_run(
+                            evt_run_record_id,
+                            repr(e),
+                            {
+                                "ok": False,
+                                "error": repr(e),
+                                "error_message": repr(e),
+                                "workspace_id": scheduler_workspace_id,
+                                "scheduler_workspace_id": scheduler_workspace_id,
+                            },
+                        )
                     except Exception:
                         pass
-                print("[scheduler] event_engine error:", repr(e))
+                print("[scheduler] event_engine error:", repr(e), flush=True)
                 traceback.print_exc()
 
             # 2) Command orchestrator
@@ -668,13 +692,16 @@ def bosai_scheduler_loop() -> None:
                 cmd_payload = {
                     "worker": WORKER_NAME,
                     "capability": "command_orchestrator",
-                    "idempotency_key": f"scheduler-commands-{int(time.time())}",
+                    "idempotency_key": f"scheduler-commands-{scheduler_workspace_id}-{int(time.time())}",
                     "input": {
+                        "workspace_id": scheduler_workspace_id,
+                        "workspace": scheduler_workspace_id,
                         "run_retry_queue": True,
                         "run_lock_recovery": True,
                     },
                     "max_commands": 10,
                 }
+
                 req_cmd = RunRequest.from_payload(cmd_payload)
                 cmd_run_record_id, _ = create_system_run(req_cmd)
 
@@ -683,21 +710,36 @@ def bosai_scheduler_loop() -> None:
                     cmd_result if isinstance(cmd_result, dict) else {"raw": str(cmd_result)}
                 )
 
-                if isinstance(cmd_result, dict) and "run_record_id" not in cmd_result:
-                    cmd_result["run_record_id"] = cmd_run_record_id
+                if isinstance(cmd_result, dict):
+                    cmd_result.setdefault("run_record_id", cmd_run_record_id)
+                    cmd_result.setdefault("workspace_id", scheduler_workspace_id)
+                    cmd_result.setdefault("scheduler_workspace_id", scheduler_workspace_id)
 
                 finish_system_run(cmd_run_record_id, "Done", cmd_result)
-                print(f"[scheduler] command_orchestrator result={cmd_result}")
+                print(
+                    f"[scheduler] command_orchestrator result={cmd_result}",
+                    flush=True,
+                )
 
             except Exception as e:
                 import traceback
                 SCHEDULER_LAST_ERROR = f"command_orchestrator: {repr(e)}"
                 if cmd_run_record_id:
                     try:
-                        fail_system_run(cmd_run_record_id, repr(e))
+                        fail_system_run(
+                            cmd_run_record_id,
+                            repr(e),
+                            {
+                                "ok": False,
+                                "error": repr(e),
+                                "error_message": repr(e),
+                                "workspace_id": scheduler_workspace_id,
+                                "scheduler_workspace_id": scheduler_workspace_id,
+                            },
+                        )
                     except Exception:
                         pass
-                print("[scheduler] command_orchestrator error:", repr(e))
+                print("[scheduler] command_orchestrator error:", repr(e), flush=True)
                 traceback.print_exc()
 
             time.sleep(10)
@@ -705,7 +747,7 @@ def bosai_scheduler_loop() -> None:
         except Exception as e:
             import traceback
             SCHEDULER_LAST_ERROR = f"scheduler_crash: {repr(e)}"
-            print("[scheduler] crash:", repr(e))
+            print("[scheduler] crash:", repr(e), flush=True)
             traceback.print_exc()
             time.sleep(10)
 
@@ -714,6 +756,7 @@ def health_scheduler() -> Dict[str, Any]:
     return {
         "ok": True,
         "internal_scheduler_enabled": INTERNAL_SCHEDULER_ENABLED,
+        "scheduler_workspace_id": _normalize_workspace_id(SCHEDULER_WORKSPACE_ID),
         "last_tick_at": SCHEDULER_LAST_TICK_AT,
         "last_event_result": SCHEDULER_LAST_EVENT_RESULT,
         "last_command_result": SCHEDULER_LAST_COMMAND_RESULT,
