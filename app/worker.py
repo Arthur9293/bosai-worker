@@ -445,7 +445,10 @@ INTERNAL_SCHEDULER_ENABLED = (
     os.getenv("INTERNAL_SCHEDULER_ENABLED", "1").strip().lower()
     in ("1", "true", "yes", "on")
 )
-
+SCHEDULER_WORKSPACE_ID = (
+    os.getenv("BOSAI_SCHEDULER_WORKSPACE_ID", "").strip()
+    or WORKSPACE_DEFAULT_ID
+)
 SLA_WARNING_THRESHOLD_MIN = float((os.getenv("SLA_WARNING_THRESHOLD_MIN", "60") or "60").strip())
 
 LOGS_ERRORS_FIELDS_ALLOWED = set(
