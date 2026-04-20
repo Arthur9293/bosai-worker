@@ -12448,6 +12448,7 @@ def health() -> Dict[str, Any]:
        "version": APP_VERSION,
        "worker": WORKER_NAME,
        "internal_scheduler_enabled": INTERNAL_SCHEDULER_ENABLED,
+       "scheduler_workspace_id": _normalize_workspace_id(SCHEDULER_WORKSPACE_ID),
        "capabilities": sorted(list(CAPABILITIES.keys())),
        "policies_loaded": bool(POLICIES),
        "policy_keys": sorted(list(POLICIES.keys())) if isinstance(POLICIES, dict) else [],
