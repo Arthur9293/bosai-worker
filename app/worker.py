@@ -12586,72 +12586,131 @@ def _extract_run_metadata_from_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
         "result_json": result_json if result_json else None,
     }
     
+def _pick_run_text(*values: Any) -> str:
+    for value in values:
+        if value is None:
+            continue
+
+        if isinstance(value, list):
+            for item in value:
+                text = str(item or "").strip()
+                if text:
+                    return text
+            continue
+
+        text = str(value or "").strip()
+        if text:
+            return text
+
+    return ""
+
+
+def _extract_run_workspace_id_from_fields(fields: Dict[str, Any]) -> str:
+    input_obj = _json_load_maybe(
+        fields.get("Input_JSON")
+        or fields.get("input_json")
+        or fields.get("Input")
+        or fields.get("input")
+    )
+
+    result_obj = _json_load_maybe(
+        fields.get("Result_JSON")
+        or fields.get("result_json")
+        or fields.get("Result")
+        or fields.get("result")
+    )
+
+    raw_workspace_id = _pick_run_text(
+        fields.get("Workspace_ID"),
+        fields.get("workspace_id"),
+        fields.get("Workspace"),
+        fields.get("workspace"),
+        input_obj.get("workspace_id") if isinstance(input_obj, dict) else "",
+        input_obj.get("workspaceId") if isinstance(input_obj, dict) else "",
+        input_obj.get("Workspace_ID") if isinstance(input_obj, dict) else "",
+        input_obj.get("workspace") if isinstance(input_obj, dict) else "",
+        result_obj.get("workspace_id") if isinstance(result_obj, dict) else "",
+        result_obj.get("workspaceId") if isinstance(result_obj, dict) else "",
+        result_obj.get("Workspace_ID") if isinstance(result_obj, dict) else "",
+        result_obj.get("workspace") if isinstance(result_obj, dict) else "",
+    )
+
+    return _normalize_workspace_id(raw_workspace_id) if raw_workspace_id else ""
+
+
 @app.get("/runs")
-def get_runs(
-    limit: int = 20,
-    workspace_id: Optional[str] = None,
-) -> Dict[str, Any]:
+def get_runs(limit: int = 20, workspace_id: Optional[str] = None) -> Dict[str, Any]:
     limit = _safe_limit(limit, default=20, minimum=1, maximum=100)
-    requested_workspace_id = _normalize_workspace_id(workspace_id) if workspace_id else ""
 
-    records: List[Dict[str, Any]] = []
-    meta: Dict[str, Any] = {}
+    requested_workspace_id = (
+        _normalize_workspace_id(workspace_id) if str(workspace_id or "").strip() else ""
+    )
 
+    scan_limit = max(limit, 200) if requested_workspace_id else limit
+
+    records, meta = _safe_records_from_view(
+        SYSTEM_RUNS_TABLE_NAME,
+        SYSTEM_RUNS_VIEW_NAME,
+        scan_limit,
+    )
+
+    # 1) filtre local sur la view si un workspace est demandé
     if requested_workspace_id:
-        try:
-            formula = f"{{Workspace_ID}}='{requested_workspace_id}'"
+        filtered_from_view = [
+            r for r in records
+            if _extract_run_workspace_id_from_fields(r.get("fields", {}) or {}) == requested_workspace_id
+        ]
 
-            records = airtable_list_filtered(
-                SYSTEM_RUNS_TABLE_NAME,
-                formula=formula,
-                view_name="",
-                max_records=max(limit, 200),
-            )
-
+        if filtered_from_view:
+            records = filtered_from_view[:limit]
             meta = {
-                "ok": True,
-                "table": SYSTEM_RUNS_TABLE_NAME,
-                "view": "",
-                "mode": "workspace_formula",
-                "formula": formula,
-                "requested_workspace_id": requested_workspace_id,
+                **meta,
+                "workspace_id": requested_workspace_id,
+                "workspace_filter_mode": "view_local_filter",
             }
-        except Exception as e:
-            records, fallback_meta = _safe_records_from_view(
-                SYSTEM_RUNS_TABLE_NAME,
-                SYSTEM_RUNS_VIEW_NAME,
-                max(limit, 200),
-            )
-            meta = {
-                **fallback_meta,
-                "mode": "view_fallback_after_formula_error",
-                "requested_workspace_id": requested_workspace_id,
-                "formula_error": repr(e),
-            }
-    else:
-        records, meta = _safe_records_from_view(
-            SYSTEM_RUNS_TABLE_NAME,
-            SYSTEM_RUNS_VIEW_NAME,
-            max(limit, 200),
-        )
+        else:
+            # 2) fallback ultra-safe : lecture brute de la table sans dépendre de la view
+            try:
+                response = requests.get(
+                    _airtable_url(SYSTEM_RUNS_TABLE_NAME),
+                    headers={
+                        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+                        "Accept": "application/json",
+                    },
+                    params={
+                        "maxRecords": max(limit, 200),
+                    },
+                    timeout=20,
+                )
+                response.raise_for_status()
 
-    def _pick_text(*values: Any) -> str:
-        for value in values:
-            if value is None:
-                continue
+                payload = response.json()
+                raw_records = payload.get("records", []) or []
 
-            if isinstance(value, list):
-                for item in value:
-                    text = str(item or "").strip()
-                    if text:
-                        return text
-                continue
+                fallback_filtered = [
+                    r for r in raw_records
+                    if _extract_run_workspace_id_from_fields(r.get("fields", {}) or {}) == requested_workspace_id
+                ]
 
-            text = str(value or "").strip()
-            if text:
-                return text
+                records = fallback_filtered[:limit]
+                meta = {
+                    "ok": True,
+                    "table": SYSTEM_RUNS_TABLE_NAME,
+                    "view": SYSTEM_RUNS_VIEW_NAME,
+                    "workspace_id": requested_workspace_id,
+                    "workspace_filter_mode": "table_fallback_local_filter",
+                    "raw_count": len(raw_records),
+                    "matched_count": len(fallback_filtered),
+                }
 
-        return ""
+            except Exception as fallback_exc:
+                records = []
+                meta = {
+                    **meta,
+                    "workspace_id": requested_workspace_id,
+                    "workspace_filter_mode": "table_fallback_failed",
+                    "fallback_error": repr(fallback_exc),
+                }
 
     def _safe_bool(value: Any) -> bool:
         if isinstance(value, bool):
@@ -12689,9 +12748,7 @@ def get_runs(
 
         return None
 
-    all_runs: List[Dict[str, Any]] = []
-    visible_runs: List[Dict[str, Any]] = []
-
+    runs: List[Dict[str, Any]] = []
     stats = {
         "running": 0,
         "done": 0,
@@ -12719,137 +12776,12 @@ def get_runs(
             or f.get("result")
         )
 
-        status = _pick_text(
+        status = _pick_run_text(
             f.get("Status_select"),
             f.get("Status"),
-            result_obj.get("status"),
-            result_obj.get("status_select"),
+            result_obj.get("status") if isinstance(result_obj, dict) else "",
+            result_obj.get("status_select") if isinstance(result_obj, dict) else "",
         ) or "Unknown"
-
-        started_at = _pick_text(f.get("Started_At"), f.get("started_at"))
-        finished_at = _pick_text(f.get("Finished_At"), f.get("finished_at"))
-        created_at = _pick_text(f.get("Created_At"), f.get("created_at"), started_at)
-        updated_at = _pick_text(f.get("Updated_At"), f.get("updated_at"), finished_at, started_at)
-
-        resolved_workspace_id = _pick_text(
-            f.get("Workspace_ID"),
-            f.get("workspace_id"),
-            input_obj.get("workspace_id"),
-            input_obj.get("workspaceId"),
-            input_obj.get("workspace"),
-            result_obj.get("workspace_id"),
-            result_obj.get("workspaceId"),
-            result_obj.get("workspace"),
-        )
-        resolved_workspace_id = _normalize_workspace_id(resolved_workspace_id) if resolved_workspace_id else ""
-
-        flow_id = _pick_text(
-            f.get("Flow_ID"),
-            f.get("flow_id"),
-            input_obj.get("flow_id"),
-            input_obj.get("flowId"),
-            input_obj.get("flowid"),
-            result_obj.get("flow_id"),
-            result_obj.get("flowId"),
-            result_obj.get("flowid"),
-        )
-
-        root_event_id = _pick_text(
-            f.get("Root_Event_ID"),
-            f.get("root_event_id"),
-            input_obj.get("root_event_id"),
-            input_obj.get("rootEventId"),
-            input_obj.get("rooteventid"),
-            result_obj.get("root_event_id"),
-            result_obj.get("rootEventId"),
-            result_obj.get("rooteventid"),
-            input_obj.get("event_id"),
-            result_obj.get("event_id"),
-        )
-
-        source_event_id = _pick_text(
-            f.get("Source_Event_ID"),
-            f.get("source_event_id"),
-            input_obj.get("source_event_id"),
-            input_obj.get("sourceEventId"),
-            input_obj.get("sourceeventid"),
-            result_obj.get("source_event_id"),
-            result_obj.get("sourceEventId"),
-            result_obj.get("sourceeventid"),
-            input_obj.get("event_id"),
-            result_obj.get("event_id"),
-            root_event_id,
-            flow_id,
-        )
-
-        linked_command = _pick_text(
-            f.get("Command_ID"),
-            f.get("command_id"),
-            f.get("Linked_Command"),
-            input_obj.get("command_id"),
-            input_obj.get("commandId"),
-            input_obj.get("linked_command"),
-            result_obj.get("command_id"),
-            result_obj.get("commandId"),
-            result_obj.get("linked_command"),
-        )
-
-        linked_run = _pick_text(
-            f.get("Linked_Run"),
-            f.get("Run_Record_ID"),
-            f.get("run_record_id"),
-            input_obj.get("linked_run"),
-            input_obj.get("run_record_id"),
-            result_obj.get("linked_run"),
-            result_obj.get("run_record_id"),
-        )
-
-        error_text = _pick_text(
-            result_obj.get("error_message"),
-            result_obj.get("error"),
-            f.get("Last_Error"),
-            f.get("Error_Message"),
-            f.get("Error"),
-        )
-
-        duration_ms = _safe_duration_ms(started_at, finished_at, result_obj)
-
-        run_item = {
-            "id": r.get("id"),
-            "record_id": r.get("id"),
-            "run_id": f.get("Run_ID"),
-            "worker": f.get("Worker"),
-            "capability": f.get("Capability"),
-            "status": status,
-            "priority": f.get("Priority"),
-            "dry_run": _safe_bool(f.get("Dry_Run")),
-            "started_at": started_at or None,
-            "finished_at": finished_at or None,
-            "created_at": created_at or None,
-            "updated_at": updated_at or None,
-            "duration_ms": duration_ms,
-            "idempotency_key": f.get("Idempotency_Key"),
-            "workspace_id": resolved_workspace_id or None,
-            "flow_id": flow_id or None,
-            "root_event_id": root_event_id or None,
-            "source_event_id": source_event_id or None,
-            "linked_command": linked_command or None,
-            "linked_run": linked_run or None,
-            "app_name": f.get("App_Name"),
-            "app_version": f.get("App_Version"),
-            "error": error_text or None,
-            "input": input_obj,
-            "result": result_obj,
-            "input_json": input_obj,
-            "result_json": result_obj,
-        }
-
-        all_runs.append(run_item)
-
-        if requested_workspace_id and resolved_workspace_id != requested_workspace_id:
-            continue
-
-        visible_runs.append(run_item)
 
         status_key = status.lower()
 
@@ -12870,18 +12802,122 @@ def get_runs(
         else:
             stats["other"] += 1
 
+        started_at = _pick_run_text(f.get("Started_At"), f.get("started_at"))
+        finished_at = _pick_run_text(f.get("Finished_At"), f.get("finished_at"))
+        created_at = _pick_run_text(f.get("Created_At"), f.get("created_at"), started_at)
+        updated_at = _pick_run_text(f.get("Updated_At"), f.get("updated_at"), finished_at, started_at)
+
+        resolved_workspace_id = _extract_run_workspace_id_from_fields(f)
+
+        flow_id = _pick_run_text(
+            f.get("Flow_ID"),
+            f.get("flow_id"),
+            input_obj.get("flow_id") if isinstance(input_obj, dict) else "",
+            input_obj.get("flowId") if isinstance(input_obj, dict) else "",
+            input_obj.get("flowid") if isinstance(input_obj, dict) else "",
+            result_obj.get("flow_id") if isinstance(result_obj, dict) else "",
+            result_obj.get("flowId") if isinstance(result_obj, dict) else "",
+            result_obj.get("flowid") if isinstance(result_obj, dict) else "",
+        )
+
+        root_event_id = _pick_run_text(
+            f.get("Root_Event_ID"),
+            f.get("root_event_id"),
+            input_obj.get("root_event_id") if isinstance(input_obj, dict) else "",
+            input_obj.get("rootEventId") if isinstance(input_obj, dict) else "",
+            input_obj.get("rooteventid") if isinstance(input_obj, dict) else "",
+            result_obj.get("root_event_id") if isinstance(result_obj, dict) else "",
+            result_obj.get("rootEventId") if isinstance(result_obj, dict) else "",
+            result_obj.get("rooteventid") if isinstance(result_obj, dict) else "",
+            input_obj.get("event_id") if isinstance(input_obj, dict) else "",
+            result_obj.get("event_id") if isinstance(result_obj, dict) else "",
+        )
+
+        source_event_id = _pick_run_text(
+            f.get("Source_Event_ID"),
+            f.get("source_event_id"),
+            input_obj.get("source_event_id") if isinstance(input_obj, dict) else "",
+            input_obj.get("sourceEventId") if isinstance(input_obj, dict) else "",
+            input_obj.get("sourceeventid") if isinstance(input_obj, dict) else "",
+            result_obj.get("source_event_id") if isinstance(result_obj, dict) else "",
+            result_obj.get("sourceEventId") if isinstance(result_obj, dict) else "",
+            result_obj.get("sourceeventid") if isinstance(result_obj, dict) else "",
+            input_obj.get("event_id") if isinstance(input_obj, dict) else "",
+            result_obj.get("event_id") if isinstance(result_obj, dict) else "",
+            root_event_id,
+            flow_id,
+        )
+
+        linked_command = _pick_run_text(
+            f.get("Command_ID"),
+            f.get("command_id"),
+            f.get("Linked_Command"),
+            input_obj.get("command_id") if isinstance(input_obj, dict) else "",
+            input_obj.get("commandId") if isinstance(input_obj, dict) else "",
+            input_obj.get("linked_command") if isinstance(input_obj, dict) else "",
+            result_obj.get("command_id") if isinstance(result_obj, dict) else "",
+            result_obj.get("commandId") if isinstance(result_obj, dict) else "",
+            result_obj.get("linked_command") if isinstance(result_obj, dict) else "",
+        )
+
+        linked_run = _pick_run_text(
+            f.get("Linked_Run"),
+            f.get("Run_Record_ID"),
+            f.get("run_record_id"),
+            input_obj.get("linked_run") if isinstance(input_obj, dict) else "",
+            input_obj.get("run_record_id") if isinstance(input_obj, dict) else "",
+            result_obj.get("linked_run") if isinstance(result_obj, dict) else "",
+            result_obj.get("run_record_id") if isinstance(result_obj, dict) else "",
+        )
+
+        error_text = _pick_run_text(
+            result_obj.get("error_message") if isinstance(result_obj, dict) else "",
+            result_obj.get("error") if isinstance(result_obj, dict) else "",
+            f.get("Last_Error"),
+            f.get("Error_Message"),
+            f.get("Error"),
+        )
+
+        duration_ms = _safe_duration_ms(started_at, finished_at, result_obj if isinstance(result_obj, dict) else {})
+
+        runs.append(
+            {
+                "id": r.get("id"),
+                "record_id": r.get("id"),
+                "run_id": f.get("Run_ID"),
+                "worker": f.get("Worker"),
+                "capability": f.get("Capability"),
+                "status": status,
+                "priority": f.get("Priority"),
+                "dry_run": _safe_bool(f.get("Dry_Run")),
+                "started_at": started_at or None,
+                "finished_at": finished_at or None,
+                "created_at": created_at or None,
+                "updated_at": updated_at or None,
+                "duration_ms": duration_ms,
+                "idempotency_key": f.get("Idempotency_Key"),
+                "workspace_id": resolved_workspace_id or None,
+                "flow_id": flow_id or None,
+                "root_event_id": root_event_id or None,
+                "source_event_id": source_event_id or None,
+                "linked_command": linked_command or None,
+                "linked_run": linked_run or None,
+                "app_name": f.get("App_Name"),
+                "app_version": f.get("App_Version"),
+                "error": error_text or None,
+                "input": input_obj,
+                "result": result_obj,
+                "input_json": input_obj,
+                "result_json": result_obj,
+            }
+        )
+
     return {
         "ok": bool(meta.get("ok")),
         "source": meta,
-        "count": len(visible_runs),
-        "scope": {
-            "requested_workspace_id": requested_workspace_id or None,
-            "received": len(all_runs),
-            "visible": len(visible_runs),
-            "dropped_by_scope": max(0, len(all_runs) - len(visible_runs)),
-        },
+        "count": len(runs),
         "stats": stats,
-        "runs": visible_runs,
+        "runs": runs,
         "ts": utc_now_iso(),
     }
     
