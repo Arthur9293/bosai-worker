@@ -12089,7 +12089,297 @@ def _list_workspace_records_best_effort(
             "error": repr(e),
             "view": str(view_name or "").strip(),
         }
-        
+
+# ============================================================
+# Run read helpers
+# ============================================================
+
+def _run_json_obj(value: Any) -> Dict[str, Any]:
+    parsed = _json_load_maybe(value)
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _run_pick_text(*values: Any) -> str:
+    for value in values:
+        if value is None:
+            continue
+
+        if isinstance(value, list):
+            for item in value:
+                text = _run_pick_text(item)
+                if text:
+                    return text
+            continue
+
+        text = str(value or "").strip()
+        if text:
+            return text
+
+    return ""
+
+
+def _run_pick_int(*values: Any) -> Optional[int]:
+    for value in values:
+        try:
+            if value is None or value == "":
+                continue
+            return int(value)
+        except Exception:
+            continue
+    return None
+
+
+def _run_context_from_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
+    input_obj = _run_json_obj(
+        fields.get("Input_JSON")
+        or fields.get("input_json")
+        or fields.get("Input")
+        or fields.get("input")
+    )
+
+    result_obj = _run_json_obj(
+        fields.get("Result_JSON")
+        or fields.get("result_json")
+        or fields.get("Result")
+        or fields.get("result")
+    )
+
+    run_id = _run_pick_text(
+        fields.get("Run_ID"),
+        fields.get("run_id"),
+    )
+
+    worker = _run_pick_text(
+        fields.get("Worker"),
+        fields.get("worker"),
+        result_obj.get("worker"),
+        input_obj.get("worker"),
+    )
+
+    capability = _run_pick_text(
+        fields.get("Capability"),
+        fields.get("capability"),
+        result_obj.get("capability"),
+        input_obj.get("capability"),
+    )
+
+    status = _run_pick_text(
+        fields.get("Status_select"),
+        fields.get("Status"),
+        fields.get("status"),
+        result_obj.get("status"),
+        result_obj.get("status_select"),
+        input_obj.get("status"),
+    )
+
+    workspace_id = _run_pick_text(
+        fields.get("Workspace_ID"),
+        fields.get("workspace_id"),
+        fields.get("Workspace"),
+        input_obj.get("workspace_id"),
+        input_obj.get("workspaceId"),
+        input_obj.get("workspace"),
+        result_obj.get("workspace_id"),
+        result_obj.get("workspaceId"),
+        result_obj.get("workspace"),
+    )
+
+    flow_id = _run_pick_text(
+        fields.get("Flow_ID"),
+        fields.get("flow_id"),
+        input_obj.get("flow_id"),
+        input_obj.get("flowId"),
+        input_obj.get("flowid"),
+        result_obj.get("flow_id"),
+        result_obj.get("flowId"),
+        result_obj.get("flowid"),
+    )
+
+    root_event_id = _run_pick_text(
+        fields.get("Root_Event_ID"),
+        fields.get("root_event_id"),
+        input_obj.get("root_event_id"),
+        input_obj.get("rootEventId"),
+        input_obj.get("rooteventid"),
+        result_obj.get("root_event_id"),
+        result_obj.get("rootEventId"),
+        result_obj.get("rooteventid"),
+        input_obj.get("event_id"),
+        result_obj.get("event_id"),
+        flow_id,
+    )
+
+    source_event_id = _run_pick_text(
+        fields.get("Source_Event_ID"),
+        fields.get("source_event_id"),
+        input_obj.get("source_event_id"),
+        input_obj.get("sourceEventId"),
+        input_obj.get("sourceeventid"),
+        result_obj.get("source_event_id"),
+        result_obj.get("sourceEventId"),
+        result_obj.get("sourceeventid"),
+        input_obj.get("event_id"),
+        result_obj.get("event_id"),
+        root_event_id,
+        flow_id,
+    )
+
+    linked_run = _run_pick_text(
+        fields.get("Linked_Run"),
+        fields.get("Run_Record_ID"),
+        fields.get("run_record_id"),
+        input_obj.get("linked_run"),
+        input_obj.get("run_record_id"),
+        result_obj.get("linked_run"),
+        result_obj.get("run_record_id"),
+    )
+
+    linked_command = _run_pick_text(
+        fields.get("Linked_Command"),
+        fields.get("Command_ID"),
+        fields.get("command_id"),
+        input_obj.get("linked_command"),
+        input_obj.get("command_id"),
+        result_obj.get("linked_command"),
+        result_obj.get("command_id"),
+    )
+
+    linked_incident = _run_pick_text(
+        fields.get("Linked_Incident"),
+        fields.get("Incident_ID"),
+        fields.get("incident_id"),
+        input_obj.get("linked_incident"),
+        input_obj.get("incident_id"),
+        input_obj.get("incident_record_id"),
+        result_obj.get("linked_incident"),
+        result_obj.get("incident_id"),
+        result_obj.get("incident_record_id"),
+    )
+
+    created_at = _run_pick_text(
+        fields.get("Created_At"),
+        fields.get("created_at"),
+        fields.get("Created time"),
+        fields.get("Started_At"),
+    )
+
+    started_at = _run_pick_text(
+        fields.get("Started_At"),
+        fields.get("started_at"),
+        created_at,
+    )
+
+    finished_at = _run_pick_text(
+        fields.get("Finished_At"),
+        fields.get("finished_at"),
+    )
+
+    updated_at = _run_pick_text(
+        fields.get("Updated_At"),
+        fields.get("updated_at"),
+        fields.get("Last_Updated_At"),
+        finished_at,
+        started_at,
+        created_at,
+    )
+
+    duration_ms = _run_pick_int(
+        fields.get("Duration_ms"),
+        fields.get("duration_ms"),
+        result_obj.get("duration_ms"),
+        result_obj.get("durationMs"),
+    )
+
+    if duration_ms is None:
+        try:
+            start_ts = datetime.fromisoformat(started_at.replace("Z", "+00:00")).timestamp() if started_at else None
+            end_candidate = finished_at or updated_at
+            end_ts = datetime.fromisoformat(end_candidate.replace("Z", "+00:00")).timestamp() if end_candidate else None
+            if start_ts is not None and end_ts is not None and end_ts >= start_ts:
+                duration_ms = int((end_ts - start_ts) * 1000)
+        except Exception:
+            duration_ms = None
+
+    error_message = _run_pick_text(
+        fields.get("Error_Message"),
+        fields.get("Last_Error"),
+        result_obj.get("error_message"),
+        result_obj.get("error"),
+    )
+
+    return {
+        "run_id": run_id,
+        "worker": worker,
+        "capability": capability,
+        "status": status,
+        "priority": fields.get("Priority"),
+        "dry_run": bool(fields.get("Dry_Run") or False),
+        "idempotency_key": _run_pick_text(
+            fields.get("Idempotency_Key"),
+            fields.get("idempotency_key"),
+        ),
+        "workspace_id": workspace_id or None,
+        "flow_id": flow_id or None,
+        "root_event_id": root_event_id or None,
+        "source_event_id": source_event_id or None,
+        "linked_run": linked_run or None,
+        "linked_command": linked_command or None,
+        "linked_incident": linked_incident or None,
+        "created_at": created_at or None,
+        "started_at": started_at or None,
+        "finished_at": finished_at or None,
+        "updated_at": updated_at or None,
+        "duration_ms": duration_ms,
+        "app_name": _run_pick_text(fields.get("App_Name"), fields.get("app_name")),
+        "app_version": _run_pick_text(fields.get("App_Version"), fields.get("app_version")),
+        "input_json": input_obj,
+        "result_json": result_obj,
+        "input": input_obj,
+        "result": result_obj,
+        "error": error_message or None,
+    }
+
+
+def _run_stats_bucket(status: str) -> str:
+    key = str(status or "").strip().lower()
+
+    if key in ("running", "processing", "queued", "pending", "new"):
+        return "running"
+    if key in ("done", "success", "completed", "processed"):
+        return "done"
+    if key in ("error", "failed", "dead", "blocked", "retry", "retriable"):
+        return "error"
+    if key == "unsupported":
+        return "unsupported"
+    return "other"
+
+
+def _read_system_run_record_by_any_id(run_ref: str) -> Tuple[Optional[Dict[str, Any]], str]:
+    resolved_ref = str(run_ref or "").strip()
+    if not resolved_ref:
+        return None, ""
+
+    if resolved_ref.startswith("rec"):
+        try:
+            rec = airtable_get_record(SYSTEM_RUNS_TABLE_NAME, resolved_ref)
+            if isinstance(rec, dict) and rec.get("id"):
+                return rec, "record_id"
+        except Exception:
+            pass
+
+    try:
+        rec = airtable_find_first(
+            SYSTEM_RUNS_TABLE_NAME,
+            formula=f"{{Run_ID}}='{_formula_escape(resolved_ref)}'",
+            max_records=1,
+        )
+        if isinstance(rec, dict) and rec.get("id"):
+            return rec, "run_id"
+    except Exception:
+        pass
+
+    return None, ""
+    
 # ============================================================
 # Root / health
 # ============================================================
@@ -15515,31 +15805,221 @@ async def internal_escalate(request: Request) -> Dict[str, Any]:
 
 @app.get("/runs/{record_id}")
 def get_run_detail(record_id: str) -> Dict[str, Any]:
+    def _pick_text(*values: Any) -> str:
+        for value in values:
+            if value is None:
+                continue
+
+            if isinstance(value, list):
+                for item in value:
+                    text = str(item or "").strip()
+                    if text:
+                        return text
+                continue
+
+            text = str(value or "").strip()
+            if text:
+                return text
+
+        return ""
+
+    def _safe_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        text = str(value or "").strip().lower()
+        return text in ("1", "true", "yes", "on", "oui")
+
+    def _safe_duration_ms(started_at: Any, finished_at: Any, result_obj: Dict[str, Any]) -> Optional[int]:
+        explicit = (
+            result_obj.get("duration_ms")
+            or result_obj.get("Duration_ms")
+            or result_obj.get("durationMs")
+        )
+
+        try:
+            if explicit is not None and str(explicit).strip() != "":
+                return int(explicit)
+        except Exception:
+            pass
+
+        try:
+            if started_at and finished_at:
+                start_ts = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+                end_ts = datetime.fromisoformat(str(finished_at).replace("Z", "+00:00"))
+                delta = int((end_ts - start_ts).total_seconds() * 1000)
+                return max(delta, 0)
+        except Exception:
+            pass
+
+        return None
+
     try:
-        rec = airtable_get_record(SYSTEM_RUNS_TABLE_NAME, record_id)
+        rec = None
+        matched_by = "record_id"
+
+        try:
+            rec = airtable_get_record(SYSTEM_RUNS_TABLE_NAME, record_id)
+        except Exception:
+            rec = None
+
+        if not rec:
+            rec = airtable_find_first(
+                SYSTEM_RUNS_TABLE_NAME,
+                formula=f"{{Run_ID}}='{_formula_escape(record_id)}'",
+                max_records=1,
+            )
+            matched_by = "run_id"
+
+        if not rec:
+            raise HTTPException(status_code=404, detail="run_not_found")
+
         f = rec.get("fields", {}) or {}
+
+        input_obj = _json_load_maybe(
+            f.get("Input_JSON")
+            or f.get("input_json")
+            or f.get("Input")
+            or f.get("input")
+        )
+        result_obj = _json_load_maybe(
+            f.get("Result_JSON")
+            or f.get("result_json")
+            or f.get("Result")
+            or f.get("result")
+        )
+
+        status = _pick_text(
+            f.get("Status_select"),
+            f.get("Status"),
+            result_obj.get("status"),
+            result_obj.get("status_select"),
+        ) or "Unknown"
+
+        started_at = _pick_text(f.get("Started_At"), f.get("started_at"))
+        finished_at = _pick_text(f.get("Finished_At"), f.get("finished_at"))
+        created_at = _pick_text(f.get("Created_At"), f.get("created_at"), started_at)
+        updated_at = _pick_text(f.get("Updated_At"), f.get("updated_at"), finished_at, started_at)
+
+        workspace_id = _pick_text(
+            f.get("Workspace_ID"),
+            f.get("workspace_id"),
+            input_obj.get("workspace_id"),
+            input_obj.get("workspaceId"),
+            input_obj.get("workspace"),
+            result_obj.get("workspace_id"),
+            result_obj.get("workspaceId"),
+            result_obj.get("workspace"),
+        )
+
+        flow_id = _pick_text(
+            f.get("Flow_ID"),
+            f.get("flow_id"),
+            input_obj.get("flow_id"),
+            input_obj.get("flowId"),
+            input_obj.get("flowid"),
+            result_obj.get("flow_id"),
+            result_obj.get("flowId"),
+            result_obj.get("flowid"),
+        )
+
+        root_event_id = _pick_text(
+            f.get("Root_Event_ID"),
+            f.get("root_event_id"),
+            input_obj.get("root_event_id"),
+            input_obj.get("rootEventId"),
+            input_obj.get("rooteventid"),
+            result_obj.get("root_event_id"),
+            result_obj.get("rootEventId"),
+            result_obj.get("rooteventid"),
+            input_obj.get("event_id"),
+            result_obj.get("event_id"),
+        )
+
+        source_event_id = _pick_text(
+            f.get("Source_Event_ID"),
+            f.get("source_event_id"),
+            input_obj.get("source_event_id"),
+            input_obj.get("sourceEventId"),
+            input_obj.get("sourceeventid"),
+            result_obj.get("source_event_id"),
+            result_obj.get("sourceEventId"),
+            result_obj.get("sourceeventid"),
+            input_obj.get("event_id"),
+            result_obj.get("event_id"),
+            root_event_id,
+            flow_id,
+        )
+
+        linked_command = _pick_text(
+            f.get("Command_ID"),
+            f.get("command_id"),
+            f.get("Linked_Command"),
+            input_obj.get("command_id"),
+            input_obj.get("commandId"),
+            input_obj.get("linked_command"),
+            result_obj.get("command_id"),
+            result_obj.get("commandId"),
+            result_obj.get("linked_command"),
+        )
+
+        linked_run = _pick_text(
+            f.get("Linked_Run"),
+            f.get("Run_Record_ID"),
+            f.get("run_record_id"),
+            input_obj.get("linked_run"),
+            input_obj.get("run_record_id"),
+            result_obj.get("linked_run"),
+            result_obj.get("run_record_id"),
+        )
+
+        error_text = _pick_text(
+            result_obj.get("error_message"),
+            result_obj.get("error"),
+            f.get("Last_Error"),
+            f.get("Error_Message"),
+            f.get("Error"),
+        )
+
+        duration_ms = _safe_duration_ms(started_at, finished_at, result_obj)
+
         return {
             "ok": True,
+            "matched_by": matched_by,
             "run": {
                 "id": rec.get("id"),
+                "record_id": rec.get("id"),
                 "run_id": f.get("Run_ID"),
                 "worker": f.get("Worker"),
                 "capability": f.get("Capability"),
-                "status": f.get("Status_select"),
+                "status": status,
                 "priority": f.get("Priority"),
-                "dry_run": f.get("Dry_Run"),
-                "started_at": f.get("Started_At"),
-                "finished_at": f.get("Finished_At"),
+                "dry_run": _safe_bool(f.get("Dry_Run")),
+                "started_at": started_at or None,
+                "finished_at": finished_at or None,
+                "created_at": created_at or None,
+                "updated_at": updated_at or None,
+                "duration_ms": duration_ms,
                 "idempotency_key": f.get("Idempotency_Key"),
-                "input_json": f.get("Input_JSON"),
-                "result_json": f.get("Result_JSON"),
+                "workspace_id": workspace_id or None,
+                "flow_id": flow_id or None,
+                "root_event_id": root_event_id or None,
+                "source_event_id": source_event_id or None,
+                "linked_command": linked_command or None,
+                "linked_run": linked_run or None,
                 "app_name": f.get("App_Name"),
                 "app_version": f.get("App_Version"),
+                "error": error_text or None,
+                "input": input_obj,
+                "result": result_obj,
+                "input_json": input_obj,
+                "result_json": result_obj,
             },
             "ts": utc_now_iso(),
         }
+
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"run_detail_failed: {repr(e)}")
-
