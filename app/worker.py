@@ -10823,17 +10823,17 @@ def _create_incident_log_record(incident_payload: Dict[str, Any]) -> Dict[str, A
             },
         ]
 
-        print("[AIRTABLE CREATE] table =", LOGS_ERREURS_TABLE_NAME)
+        print("[AIRTABLE CREATE] table =", LOGS_ERRORS_TABLE_NAME)
         print("[AIRTABLE CREATE] trying fields =", json.dumps(candidates[0], ensure_ascii=False))
 
-        create_res = _airtable_create_best_effort(LOGS_ERREURS_TABLE_NAME, candidates)
+        create_res = _airtable_create_best_effort(LOGS_ERRORS_TABLE_NAME, candidates)
 
         if not create_res.get("ok"):
             return {
                 "ok": False,
                 "error": create_res.get("error"),
                 "debug": {
-                    "table": LOGS_ERREURS_TABLE_NAME,
+                    "table": LOGS_ERRORS_TABLE_NAME,
                     "candidates": candidates,
                     "flow_id": flow_id,
                     "root_event_id": root_event_id,
