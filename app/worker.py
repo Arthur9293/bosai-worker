@@ -12594,11 +12594,46 @@ def get_runs(
     limit = _safe_limit(limit, default=20, minimum=1, maximum=100)
     requested_workspace_id = _normalize_workspace_id(workspace_id) if workspace_id else ""
 
-    records, meta = _safe_records_from_view(
-        SYSTEM_RUNS_TABLE_NAME,
-        SYSTEM_RUNS_VIEW_NAME,
-        limit,
-    )
+    records: List[Dict[str, Any]] = []
+    meta: Dict[str, Any] = {}
+
+    if requested_workspace_id:
+        try:
+            formula = f"{{Workspace_ID}}='{requested_workspace_id}'"
+
+            records = airtable_list_filtered(
+                SYSTEM_RUNS_TABLE_NAME,
+                formula=formula,
+                view_name="",
+                max_records=max(limit, 200),
+            )
+
+            meta = {
+                "ok": True,
+                "table": SYSTEM_RUNS_TABLE_NAME,
+                "view": "",
+                "mode": "workspace_formula",
+                "formula": formula,
+                "requested_workspace_id": requested_workspace_id,
+            }
+        except Exception as e:
+            records, fallback_meta = _safe_records_from_view(
+                SYSTEM_RUNS_TABLE_NAME,
+                SYSTEM_RUNS_VIEW_NAME,
+                max(limit, 200),
+            )
+            meta = {
+                **fallback_meta,
+                "mode": "view_fallback_after_formula_error",
+                "requested_workspace_id": requested_workspace_id,
+                "formula_error": repr(e),
+            }
+    else:
+        records, meta = _safe_records_from_view(
+            SYSTEM_RUNS_TABLE_NAME,
+            SYSTEM_RUNS_VIEW_NAME,
+            max(limit, 200),
+        )
 
     def _pick_text(*values: Any) -> str:
         for value in values:
@@ -12699,7 +12734,6 @@ def get_runs(
         resolved_workspace_id = _pick_text(
             f.get("Workspace_ID"),
             f.get("workspace_id"),
-            f.get("Workspace"),
             input_obj.get("workspace_id"),
             input_obj.get("workspaceId"),
             input_obj.get("workspace"),
