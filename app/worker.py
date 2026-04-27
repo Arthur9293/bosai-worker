@@ -403,7 +403,12 @@ EVENTS_VIEW_NAME = os.getenv("EVENTS_VIEW_NAME", "Queue").strip()
 EVENTS_DASHBOARD_VIEW_NAME = os.getenv("EVENTS_DASHBOARD_VIEW_NAME", EVENTS_VIEW_NAME or "Grid view").strip()
 
 
-WORKSPACE_DEFAULT_ID = os.getenv("BOSAI_DEFAULT_WORKSPACE_ID", "production").strip() or "production"
+WORKSPACE_DEFAULT_ID = (
+    os.getenv("BOSAI_DEFAULT_WORKSPACE_ID", "").strip()
+    or os.getenv("BOSAI_ACTIVE_WORKSPACE_ID", "").strip()
+    or os.getenv("BOSAI_WORKSPACE_ID", "").strip()
+    or "ferrera-production"
+)
 WORKSPACE_API_KEYS_RAW = os.getenv("BOSAI_WORKSPACE_API_KEYS", "").strip()
 WORKSPACE_API_KEY_HEADER = "x-bosai-key"
 
